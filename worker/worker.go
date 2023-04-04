@@ -224,6 +224,12 @@ type contractLocker interface {
 	ReleaseContract(ctx context.Context, fcid types.FileContractID, lockID uint64) (err error)
 }
 
+// SatelliteStore stores the satellite config.
+type SatelliteStore interface {
+	Config() api.SatelliteConfig
+	SetConfig(c api.SatelliteConfig) error
+}
+
 // A Bus is the source of truth within a renterd system.
 type Bus interface {
 	AccountStore
@@ -252,13 +258,24 @@ type Bus interface {
 	WalletDiscard(ctx context.Context, txn types.Transaction) error
 	WalletPrepareForm(ctx context.Context, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, hostCollateral types.Currency, hostKey types.PublicKey, hostSettings rhpv2.HostSettings, endHeight uint64) (txns []types.Transaction, err error)
 	WalletPrepareRenew(ctx context.Context, contract types.FileContractRevision, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, newCollateral types.Currency, hostKey types.PublicKey, hostSettings rhpv2.HostSettings, endHeight uint64) ([]types.Transaction, types.Currency, error)
+
+	// Satellite.
+	Contract(ctx context.Context, id types.FileContractID) (contract api.ContractMetadata, err error)
+	AddContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64) (added api.ContractMetadata, err error)
+	AddRenewedContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, renewedFrom types.FileContractID) (renewed api.ContractMetadata, err error)
+	SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) (err error)
 }
 
 // deriveSubKey can be used to derive a sub-masterkey from the worker's
 // masterkey to use for a specific purpose. Such as deriving more keys for
 // ephemeral accounts.
 func (w *worker) deriveSubKey(purpose string) types.PrivateKey {
-	seed := blake2b.Sum256(append(w.masterKey[:], []byte(purpose)...))
+	var seed [32]byte
+	if w.pool.satelliteEnabled {
+		copy(seed[:], w.pool.satelliteRenterSeed)
+	} else {
+		seed = blake2b.Sum256(append(w.masterKey[:], []byte(purpose)...))
+	}
 	pk := types.NewPrivateKeyFromSeed(seed[:])
 	for i := range seed {
 		seed[i] = 0
@@ -310,6 +327,9 @@ type worker struct {
 	uploadSectorTimeout   time.Duration
 
 	logger *zap.SugaredLogger
+
+	// Satellite
+	store SatelliteStore
 }
 
 func (w *worker) recordPriceTableUpdate(hostKey types.PublicKey, pt hostdb.HostPriceTable, err error) {
@@ -490,7 +510,8 @@ func (w *worker) unlockHosts(hosts []sectorStore) {
 func (w *worker) withHostsV2(ctx context.Context, contracts []api.ContractMetadata, fn func([]sectorStore) error) (err error) {
 	var hosts []sectorStore
 	for _, c := range contracts {
-		hosts = append(hosts, w.pool.session(c.HostKey, c.HostIP, c.ID, w.deriveRenterKey(c.HostKey)))
+		renterKey := w.deriveRenterKey(c.HostKey)
+		hosts = append(hosts, w.pool.session(c.HostKey, c.HostIP, c.ID, renterKey))
 	}
 	done := make(chan struct{})
 
@@ -1177,16 +1198,35 @@ func (w *worker) accountHandlerGET(jc jape.Context) {
 }
 
 // New returns an HTTP handler that serves the worker API.
-func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, l *zap.Logger) *worker {
+func New(s SatelliteStore, masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, l *zap.Logger, satelliteEnabled bool, satelliteAddr string, satelliteKey types.PublicKey, satelliteSeed []byte) *worker {
 	w := &worker{
 		id:                    id,
 		bus:                   b,
-		pool:                  newSessionPool(sessionLockTimeout, sessionReconectTimeout, sessionTTL),
+		pool:                  newSessionPool(
+		                         sessionLockTimeout,
+		                         sessionReconectTimeout,
+		                         sessionTTL,
+		                         satelliteEnabled,
+		                         satelliteAddr,
+		                         satelliteKey,
+		                         satelliteSeed),
 		masterKey:             masterKey,
 		busFlushInterval:      busFlushInterval,
 		downloadSectorTimeout: downloadSectorTimeout,
 		uploadSectorTimeout:   uploadSectorTimeout,
 		logger:                l.Sugar().Named("worker").Named(id),
+		store:                 s,
+	}
+	if satelliteEnabled {
+		err := w.store.SetConfig(api.SatelliteConfig{
+			Enabled:    satelliteEnabled,
+			Address:    satelliteAddr,
+			PublicKey:  satelliteKey,
+			RenterSeed: satelliteSeed,
+		})
+		if err != nil {
+			w.logger.Errorw(fmt.Sprintf("failed to save satellite config: %v", err))
+		}
 	}
 	w.initAccounts(b)
 	w.initContractSpendingRecorder()
@@ -1215,6 +1255,13 @@ func (w *worker) Handler() http.Handler {
 		"GET    /objects/*path": w.objectsHandlerGET,
 		"PUT    /objects/*path": w.objectsHandlerPUT,
 		"DELETE /objects/*path": w.objectsHandlerDELETE,
+
+		// Satellite.
+		"GET    /satellite/request": w.satelliteRequestContractsHandler,
+		"POST   /satellite/form":    w.satelliteFormContractsHandler,
+		"POST   /satellite/renew":   w.satelliteRenewContractsHandler,
+		"GET    /satellite/config":  w.satelliteConfigHandlerGET,
+		"PUT    /satellite/config":  w.satelliteConfigHandlerPUT,
 	}))
 }
 

@@ -149,6 +149,10 @@ func (w *worker) fundAccount(ctx context.Context, hk types.PublicKey, siamuxAddr
 			if err := RPCFundAccount(t, &payment, account.id, pt.UID); err != nil {
 				return fmt.Errorf("failed to fund account with %v;%w", amount, err)
 			}
+			// send the new revision to the satellite
+			if w.pool.satelliteEnabled {
+				w.satelliteUpdateRevision(rhpv2.ContractRevision{Revision: *revision,}, api.ContractSpending{FundAccount: cost})
+			}
 			w.contractSpendingRecorder.Record(revision.ParentID, api.ContractSpending{FundAccount: cost})
 			return nil
 		})

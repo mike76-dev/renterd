@@ -38,6 +38,16 @@ type WorkerConfig struct {
 	SessionTTL              time.Duration
 	DownloadSectorTimeout   time.Duration
 	UploadSectorTimeout     time.Duration
+
+	// Satellite.
+	Satellite SatelliteConfig
+}
+
+type SatelliteConfig struct {
+	Enabled    bool
+	Address    string
+	PublicKey  types.PublicKey
+	RenterSeed []byte
 }
 
 type BusConfig struct {
@@ -58,6 +68,9 @@ type AutopilotConfig struct {
 	ScannerBatchSize         uint64
 	ScannerMinRecentFailures uint64
 	ScannerNumThreads        uint64
+
+	// Satellite.
+	SatelliteEnabled bool
 }
 
 type ShutdownFn = func(context.Context) error
@@ -279,14 +292,14 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 	return b.Handler(), shutdownFn, nil
 }
 
-func NewWorker(cfg WorkerConfig, b worker.Bus, seed types.PrivateKey, l *zap.Logger) (http.Handler, ShutdownFn, error) {
+func NewWorker(cfg WorkerConfig, s worker.SatelliteStore, b worker.Bus, seed types.PrivateKey, l *zap.Logger) (http.Handler, ShutdownFn, error) {
 	workerKey := blake2b.Sum256(append([]byte("worker"), seed...))
-	w := worker.New(workerKey, cfg.ID, b, cfg.SessionLockTimeout, cfg.SessionReconnectTimeout, cfg.SessionTTL, cfg.BusFlushInterval, cfg.DownloadSectorTimeout, cfg.UploadSectorTimeout, l)
+	w := worker.New(s, workerKey, cfg.ID, b, cfg.SessionLockTimeout, cfg.SessionReconnectTimeout, cfg.SessionTTL, cfg.BusFlushInterval, cfg.DownloadSectorTimeout, cfg.UploadSectorTimeout, l, cfg.Satellite.Enabled, cfg.Satellite.Address, cfg.Satellite.PublicKey, cfg.Satellite.RenterSeed)
 	return w.Handler(), w.Shutdown, nil
 }
 
 func NewAutopilot(cfg AutopilotConfig, s autopilot.Store, b autopilot.Bus, workers []autopilot.Worker, l *zap.Logger) (http.Handler, func() error, ShutdownFn, error) {
-	ap, err := autopilot.New(s, b, workers, l, cfg.Heartbeat, cfg.ScannerInterval, cfg.ScannerBatchSize, cfg.ScannerMinRecentFailures, cfg.ScannerNumThreads, cfg.MigrationHealthCutoff, cfg.AccountsRefillInterval)
+	ap, err := autopilot.New(s, b, workers, l, cfg.Heartbeat, cfg.ScannerInterval, cfg.ScannerBatchSize, cfg.ScannerMinRecentFailures, cfg.ScannerNumThreads, cfg.MigrationHealthCutoff, cfg.AccountsRefillInterval, cfg.SatelliteEnabled)
 	if err != nil {
 		return nil, nil, nil, err
 	}

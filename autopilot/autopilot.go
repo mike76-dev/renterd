@@ -111,6 +111,9 @@ type Autopilot struct {
 	ticker      *time.Ticker
 	triggerChan chan struct{}
 	stopChan    chan struct{}
+
+	// Satellite.
+	satelliteEnabled bool
 }
 
 // loopState holds a bunch of state variables that are used by the autopilot and
@@ -250,9 +253,11 @@ func (ap *Autopilot) Run() error {
 			ap.c.updateCurrentPeriod()
 
 			// perform wallet maintenance
-			err = ap.c.performWalletMaintenance(ctx)
-			if err != nil {
-				ap.logger.Errorf("wallet maintenance failed, err: %v", err)
+			if !ap.satelliteEnabled {
+				err = ap.c.performWalletMaintenance(ctx)
+				if err != nil {
+					ap.logger.Errorf("wallet maintenance failed, err: %v", err)
+				}
 			}
 
 			// perform maintenance
@@ -428,7 +433,7 @@ func (ap *Autopilot) triggerHandlerPOST(jc jape.Context) {
 }
 
 // New initializes an Autopilot.
-func New(store Store, bus Bus, workers []Worker, logger *zap.Logger, heartbeat time.Duration, scannerScanInterval time.Duration, scannerBatchSize, scannerMinRecentFailures, scannerNumThreads uint64, migrationHealthCutoff float64, accountsRefillInterval time.Duration) (*Autopilot, error) {
+func New(store Store, bus Bus, workers []Worker, logger *zap.Logger, heartbeat time.Duration, scannerScanInterval time.Duration, scannerBatchSize, scannerMinRecentFailures, scannerNumThreads uint64, migrationHealthCutoff float64, accountsRefillInterval time.Duration, satelliteEnabled bool) (*Autopilot, error) {
 	ap := &Autopilot{
 		bus:     bus,
 		logger:  logger.Sugar().Named("autopilot"),
@@ -436,6 +441,9 @@ func New(store Store, bus Bus, workers []Worker, logger *zap.Logger, heartbeat t
 		workers: newWorkerPool(workers),
 
 		tickerDuration: heartbeat,
+
+		// Satellite.
+		satelliteEnabled: satelliteEnabled,
 	}
 	scanner, err := newScanner(
 		ap,

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -161,6 +162,14 @@ func main() {
 		node.AutopilotConfig
 	}
 
+	// Satellite.
+	var satelliteCfg struct {
+		enabled       bool
+		satelliteAddr string
+		satelliteKey  string
+		satelliteSeed string
+	}
+
 	apiAddr := flag.String("http", build.DefaultAPIAddress, "address to serve API on")
 	tracingEnabled := flag.Bool("tracing-enabled", false, "Enables tracing through OpenTelemetry. If RENTERD_TRACING_ENABLED is set, it overwrites the CLI flag's value. Tracing can be configured using the standard OpenTelemetry environment variables. https://github.com/open-telemetry/opentelemetry-specification/blob/v1.8.0/specification/protocol/exporter.md")
 	tracingServiceInstanceId := flag.String("tracing-service-instance-id", "cluster", "ID of the service instance used for tracing. If RENTERD_TRACING_SERVICE_INSTANCE_ID is set, it overwrites the CLI flag's value.")
@@ -189,6 +198,12 @@ func main() {
 	flag.Uint64Var(&autopilotCfg.ScannerNumThreads, "autopilot.scannerNumThreads", 100, "number of threads that scan hosts")
 	flag.DurationVar(&nodeCfg.shutdownTimeout, "node.shutdownTimeout", 5*time.Minute, "the timeout applied to the node shutdown")
 
+	// Satellite-related flags.
+	flag.BoolVar(&satelliteCfg.enabled, "satellite.enabled", true, "enable/disable connecting to a satellite - can be overwritten using the RENTERD_SATELLITE_ENABLED environment variable")
+	flag.StringVar(&satelliteCfg.satelliteAddr, "satellite.addr", "", "URL of the satellite - can be overwritten using RENTERD_SATELLITE_ADDR environment variable")
+	flag.StringVar(&satelliteCfg.satelliteKey, "satellite.key", "", "public key of the satellite - can be overwritten using RENTERD_SATELLITE_KEY environment variable")
+	flag.StringVar(&satelliteCfg.satelliteSeed, "satellite.seed", "", "renter seed received from the satellite - can be overwritten using RENTERD_SATELLITE_SEED environment variable")
+
 	flag.Parse()
 
 	log.Println("renterd v0.1.0")
@@ -213,6 +228,34 @@ func main() {
 	parseEnvVar("RENTERD_AUTOPILOT_ENABLED", &autopilotCfg.enabled)
 	parseEnvVar("RENTERD_TRACING_ENABLED", tracingEnabled)
 	parseEnvVar("RENTERD_TRACING_SERVICE_INSTANCE_ID", tracingServiceInstanceId)
+
+	// Satellite.
+	parseEnvVar("RENTERD_SATELLITE_ENABLED", &satelliteCfg.enabled)
+	parseEnvVar("RENTERD_SATELLITE_ADDR", &satelliteCfg.satelliteAddr)
+	parseEnvVar("RENTERD_SATELLITE_KEY", &satelliteCfg.satelliteKey)
+	parseEnvVar("RENTERD_SATELLITE_SEED", &satelliteCfg.satelliteSeed)
+
+	if satelliteCfg.enabled {
+		workerCfg.WorkerConfig.Satellite.Enabled = true
+		autopilotCfg.SatelliteEnabled = true
+		if satelliteCfg.satelliteAddr == "" {
+			panic("satellite address not provided")
+		}
+		workerCfg.WorkerConfig.Satellite.Address = satelliteCfg.satelliteAddr
+		var err error
+		key := strings.TrimPrefix(satelliteCfg.satelliteKey, "ed25519:")
+		b, err := hex.DecodeString(key)
+		if err != nil || len(b) != 32 {
+			panic("wrong satellite public key")
+		}
+		copy(workerCfg.WorkerConfig.Satellite.PublicKey[:], b)
+		seed, err := hex.DecodeString(satelliteCfg.satelliteSeed)
+		if err != nil || len(seed) != 32 {
+			panic("wrong satellite seed")
+		}
+		workerCfg.WorkerConfig.Satellite.RenterSeed = make([]byte, len(seed))
+		copy(workerCfg.WorkerConfig.Satellite.RenterSeed, seed)
+	}
 
 	var autopilotShutdownFn func(context.Context) error
 	var shutdownFns []func(context.Context) error
@@ -276,7 +319,17 @@ func main() {
 	workerAddrs, workerPassword := workerCfg.remoteAddrs, workerCfg.apiPassword
 	if workerAddrs == "" {
 		if workerCfg.enabled {
-			w, shutdownFn, err := node.NewWorker(workerCfg.WorkerConfig, bc, getSeed(), logger)
+			// create a store for the satellite config
+			satelliteDir := filepath.Join(*dir, "satellite")
+			if err := os.MkdirAll(satelliteDir, 0700); err != nil {
+				log.Fatal("failed to create satellite dir", err)
+			}
+			s, err := stores.NewJSONSatelliteStore(satelliteDir)
+			if err != nil {
+				log.Fatal("failed to create JSON satellite store", err)
+			}
+
+			w, shutdownFn, err := node.NewWorker(workerCfg.WorkerConfig, s, bc, getSeed(), logger)
 			if err != nil {
 				log.Fatal("failed to create worker", err)
 			}

@@ -17,6 +17,9 @@ func (s *Session) appendSector(ctx context.Context, sector *[rhpv2.SectorSize]by
 	}
 	storageDuration := uint64(s.Revision().Revision.WindowStart) - currentHeight
 	price, collateral := rhpv2.RPCAppendCost(s.settings, storageDuration)
+	if s.satelliteEnabled {
+		price = price.Mul64(125).Div64(100) // to prevent low payment error
+	}
 	root, err := s.Append(ctx, sector, price, collateral)
 	if err != nil {
 		return root, err
@@ -166,6 +169,12 @@ type sessionPool struct {
 	mu     sync.Mutex
 	height uint64
 	hosts  map[types.PublicKey]*Session
+
+	// Satellite-related fields.
+	satelliteEnabled    bool
+	satelliteAddress    string
+	satellitePublicKey  types.PublicKey
+	satelliteRenterSeed []byte
 }
 
 func (sp *sessionPool) acquire(ctx context.Context, ss *sharedSession) (_ *Session, err error) {
@@ -200,6 +209,13 @@ func (sp *sessionPool) acquire(ctx context.Context, ss *sharedSession) (_ *Sessi
 			return nil, err
 		}
 	}
+
+	// Satellite.
+	s.satelliteEnabled = sp.satelliteEnabled
+	s.satelliteAddress = sp.satelliteAddress
+	copy(s.satellitePublicKey[:], sp.satellitePublicKey[:])
+	s.satelliteRenterSeed = make([]byte, len(sp.satelliteRenterSeed))
+	copy(s.satelliteRenterSeed, sp.satelliteRenterSeed)
 
 	return s, nil
 }
@@ -259,11 +275,17 @@ func (sp *sessionPool) Close() error {
 }
 
 // newSessionPool creates a new sessionPool.
-func newSessionPool(sessionLockTimeout, sessionReconectTimeout, sessionTTL time.Duration) *sessionPool {
+func newSessionPool(sessionLockTimeout, sessionReconectTimeout, sessionTTL time.Duration, satelliteEnabled bool, satelliteAddress string, satellitePublicKey types.PublicKey, satelliteRenterSeed []byte) *sessionPool {
 	return &sessionPool{
 		sessionLockTimeout:      sessionLockTimeout,
 		sessionReconnectTimeout: sessionReconectTimeout,
 		sessionTTL:              sessionTTL,
 		hosts:                   make(map[types.PublicKey]*Session),
+
+		// Satellite-related fields.
+		satelliteEnabled:    satelliteEnabled,
+		satelliteAddress:    satelliteAddress,
+		satellitePublicKey:  satellitePublicKey,
+		satelliteRenterSeed: satelliteRenterSeed,
 	}
 }

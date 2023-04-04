@@ -466,11 +466,13 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 		}
 
 		// decide whether the host is still good
-		usable, unusableResult := isUsableHost(state.cfg, state.gs, state.rs, state.cs, f, host.Host, minScore, contract.FileSize(), state.fee, false)
-		if !usable {
-			c.logger.Infow("unusable host", "hk", hk, "fcid", fcid, "reasons", unusableResult.reasons())
-			toIgnore = append(toIgnore, fcid)
-			continue
+		if !c.ap.satelliteEnabled {
+			usable, unusableResult := isUsableHost(state.cfg, state.gs, state.rs, state.cs, f, host.Host, minScore, contract.FileSize(), state.fee, false)
+			if !usable {
+				c.logger.Infow("unusable host", "hk", hk, "fcid", fcid, "reasons", unusableResult.reasons())
+				toIgnore = append(toIgnore, fcid)
+				continue
+			}
 		}
 
 		// grab the settings - this is safe because bad settings make an unusable host
@@ -541,6 +543,9 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 }
 
 func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts []hostdb.Host, active []api.Contract, missing uint64, budget *types.Currency, renterAddress types.Address, minScore float64) ([]types.FileContractID, error) {
+	if c.ap.satelliteEnabled {
+		return nil, nil
+	}
 	ctx, span := tracing.Tracer.Start(ctx, "runContractFormations")
 	defer span.End()
 
@@ -624,6 +629,9 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 }
 
 func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *types.Currency, renterAddress types.Address, toRenew []contractInfo) ([]api.ContractMetadata, error) {
+	if c.ap.satelliteEnabled {
+		return nil, nil
+	}
 	ctx, span := tracing.Tracer.Start(ctx, "runContractRenewals")
 	defer span.End()
 
@@ -663,6 +671,9 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *
 }
 
 func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, budget *types.Currency, renterAddress types.Address, toRefresh []contractInfo) ([]api.ContractMetadata, error) {
+	if c.ap.satelliteEnabled {
+		return nil, nil
+	}
 	ctx, span := tracing.Tracer.Start(ctx, "runContractRefreshes")
 	defer span.End()
 

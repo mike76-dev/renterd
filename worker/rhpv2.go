@@ -213,6 +213,12 @@ type Session struct {
 	settings    rhpv2.HostSettings
 	lastSeen    time.Time
 	mu          sync.Mutex
+
+	// Satellite-related fields.
+	satelliteEnabled    bool
+	satelliteAddress    string
+	satellitePublicKey  types.PublicKey
+	satelliteRenterSeed []byte
 }
 
 // Append calls the Write RPC with a single action, appending the provided
@@ -286,6 +292,12 @@ func (s *Session) HostKey() types.PublicKey { return s.revision.HostKey() }
 // is non-nil. Failure to do so may allow an attacker to inject malicious data.
 func (s *Session) Read(ctx context.Context, w io.Writer, sections []rhpv2.RPCReadRequestSection, price types.Currency) (err error) {
 	defer wrapErr(&err, "Read")
+	defer func() {
+		// send the new revision to the satellite
+		if err == nil && s.satelliteEnabled {
+			s.satelliteUpdateRevision(api.ContractSpending{Downloads: price})
+		}
+	}()
 	defer recordRPC(ctx, s.transport, s.revision, rhpv2.RPCReadID, &err)()
 	defer recordContractSpending(ctx, s.revision.ID(), api.ContractSpending{Downloads: price}, &err)
 
@@ -618,6 +630,12 @@ func (s *Session) Unlock(ctx context.Context) (err error) {
 // always requested.
 func (s *Session) Write(ctx context.Context, actions []rhpv2.RPCWriteAction, price, collateral types.Currency) (err error) {
 	defer wrapErr(&err, "Write")
+	defer func() {
+		// send the new revision to the satellite
+		if err == nil && s.satelliteEnabled {
+			s.satelliteUpdateRevision(api.ContractSpending{Uploads: price})
+		}
+	}()
 	defer recordRPC(ctx, s.transport, s.revision, rhpv2.RPCWriteID, &err)()
 	defer recordContractSpending(ctx, s.revision.ID(), api.ContractSpending{Uploads: price}, &err)
 
@@ -724,6 +742,7 @@ func (s *Session) Write(ctx context.Context, actions []rhpv2.RPCWriteAction, pri
 	s.revision.Revision = rev
 	s.revision.Signatures[0].Signature = renterSig.Signature[:]
 	s.revision.Signatures[1].Signature = hostSig.Signature[:]
+
 	return nil
 }
 
