@@ -7,7 +7,8 @@ import (
 	_ "net/http/pprof"
 	"strings"
 
-	"go.sia.tech/web/renterd/ui"
+	"github.com/mike76-dev/sia-web/renterd/ui"
+	//"go.sia.tech/web/renterd/ui"
 )
 
 type clientRouterFS struct {
