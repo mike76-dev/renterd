@@ -7,14 +7,16 @@ import (
 	"sync"
 	"time"
 
+	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/siad/modules"
 )
 
 // EphemeralSatelliteStore implements worker.SatelliteStore in memory.
 type EphemeralSatelliteStore struct {
-	mu     sync.Mutex
-	config api.SatelliteConfig
+	mu        sync.Mutex
+	config    api.SatelliteConfig
+	contracts map[types.FileContractID]types.PublicKey
 }
 
 // Config implements worker.SatelliteStore.
@@ -32,6 +34,47 @@ func (s *EphemeralSatelliteStore) SetConfig(c api.SatelliteConfig) error {
 	return nil
 }
 
+// Contracts implements worker.SatelliteStore.
+func (s *EphemeralSatelliteStore) Contracts() map[types.FileContractID]types.PublicKey {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.contracts
+}
+
+// Satellite implements worker.SatelliteStore.
+func (s *EphemeralSatelliteStore) Satellite(fcid types.FileContractID) (types.PublicKey, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pk, exists := s.contracts[fcid]
+	return pk, exists
+}
+
+// AddContract implements worker.SatelliteStore.
+func (s *EphemeralSatelliteStore) AddContract(fcid types.FileContractID, pk types.PublicKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.contracts[fcid] = pk
+	return nil
+}
+
+// DeleteContract implements worker.SatelliteStore.
+func (s *EphemeralSatelliteStore) DeleteContract(fcid types.FileContractID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.contracts[fcid]; exists {
+		delete(s.contracts, fcid)
+	}
+	return nil
+}
+
+// DeleteAll implements worker.SatelliteStore.
+func (s *EphemeralSatelliteStore) DeleteAll() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.contracts = make(map[types.FileContractID]types.PublicKey)
+	return nil
+}
+
 // ProcessConsensusChange implements chain.Subscriber.
 func (s *EphemeralSatelliteStore) ProcessConsensusChange(cc modules.ConsensusChange) {
 	panic("not implemented")
@@ -42,7 +85,7 @@ func NewEphemeralSatelliteStore() *EphemeralSatelliteStore {
 	return &EphemeralSatelliteStore{}
 }
 
-// JSONAutopilotStore implements worker.SatelliteStore in memory, backed by a JSON file.
+// JSONSatelliteStore implements worker.SatelliteStore in memory, backed by a JSON file.
 type JSONSatelliteStore struct {
 	*EphemeralSatelliteStore
 	dir      string
@@ -50,7 +93,8 @@ type JSONSatelliteStore struct {
 }
 
 type jsonSatellitePersistData struct {
-	Config api.SatelliteConfig
+	Config    api.SatelliteConfig                      `json:"config"`
+	Contracts map[types.FileContractID]types.PublicKey `json:"contracts"`
 }
 
 func (s *JSONSatelliteStore) save() error {
@@ -58,6 +102,7 @@ func (s *JSONSatelliteStore) save() error {
 	defer s.mu.Unlock()
 	var p jsonSatellitePersistData
 	p.Config = s.config
+	p.Contracts = s.contracts
 	js, _ := json.MarshalIndent(p, "", "  ")
 
 	// atomic save
@@ -89,12 +134,31 @@ func (s *JSONSatelliteStore) load() error {
 		return err
 	}
 	s.config = p.Config
+	s.contracts = p.Contracts
 	return nil
 }
 
 // SetConfig implements worker.SatelliteStore.
 func (s *JSONSatelliteStore) SetConfig(c api.SatelliteConfig) error {
 	s.EphemeralSatelliteStore.SetConfig(c)
+	return s.save()
+}
+
+// AddContract implements worker.SatelliteStore.
+func (s *JSONSatelliteStore) AddContract(fcid types.FileContractID, pk types.PublicKey) error {
+	s.EphemeralSatelliteStore.AddContract(fcid, pk)
+	return s.save()
+}
+
+// DeleteContract implements worker.SatelliteStore.
+func (s *JSONSatelliteStore) DeleteContract(fcid types.FileContractID) error {
+	s.EphemeralSatelliteStore.DeleteContract(fcid)
+	return s.save()
+}
+
+// DeleteAll implements worker.SatelliteStore.
+func (s *JSONSatelliteStore) DeleteAll() error {
+	s.EphemeralSatelliteStore.DeleteAll()
 	return s.save()
 }
 

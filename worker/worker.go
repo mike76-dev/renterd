@@ -224,10 +224,15 @@ type contractLocker interface {
 	ReleaseContract(ctx context.Context, fcid types.FileContractID, lockID uint64) (err error)
 }
 
-// SatelliteStore stores the satellite config.
+// SatelliteStore stores the satellite persistence.
 type SatelliteStore interface {
 	Config() api.SatelliteConfig
 	SetConfig(c api.SatelliteConfig) error
+	Contracts() map[types.FileContractID]types.PublicKey
+	Satellite(types.FileContractID) (types.PublicKey, bool)
+	AddContract(types.FileContractID, types.PublicKey) error
+	DeleteContract(types.FileContractID) error
+	DeleteAll() error
 }
 
 // A Bus is the source of truth within a renterd system.
@@ -329,7 +334,8 @@ type worker struct {
 	logger *zap.SugaredLogger
 
 	// Satellite
-	store SatelliteStore
+	satelliteContracts map[types.FileContractID]types.PublicKey
+	store              SatelliteStore
 }
 
 func (w *worker) recordPriceTableUpdate(hostKey types.PublicKey, pt hostdb.HostPriceTable, err error) {
