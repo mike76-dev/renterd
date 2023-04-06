@@ -4,7 +4,7 @@ import (
 	"go.sia.tech/core/types"
 )
 
-// SatelliteFormRequest is the request type for the /satellite/form endpoint.
+// SatelliteFormRequest is the request type for the /worker/satellite/form endpoint.
 type SatelliteFormRequest struct {
 	Hosts uint64 `json:"hosts"`
 	// Contract configuration (all units are blocks or bytes).
@@ -15,7 +15,7 @@ type SatelliteFormRequest struct {
 	Storage     uint64 `json:"storage"`
 }
 
-// SatelliteRenewRequest is the request type for the /satellite/renew endpoint.
+// SatelliteRenewRequest is the request type for the /worker/satellite/renew endpoint.
 type SatelliteRenewRequest struct {
 	Contracts []types.FileContractID `json:"contracts"`
 	// Contract configuration (all units are blocks or bytes).
@@ -24,6 +24,11 @@ type SatelliteRenewRequest struct {
 	Download    uint64 `json:"download"`
 	Upload      uint64 `json:"upload"`
 	Storage     uint64 `json:"storage"`
+}
+
+// SatelliteResponse is the response type for the /bus/satellite endpoint.
+type SatelliteResponse struct {
+	Satellite types.PublicKey `json:"satellite"`
 }
 
 // SatelliteConfig contains the satellite configuration parameters.

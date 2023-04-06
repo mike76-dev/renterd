@@ -1209,8 +1209,9 @@ func (b *bus) Handler() http.Handler {
 		"GET    /params/gouging":  b.paramsHandlerGougingGET,
 
 		// Satellite.
-		"GET /satellite/config": b.satelliteConfigHandlerGET,
-		"PUT /satellite/config": b.satelliteConfigHandlerPUT,
+		"GET /satellite/config":  b.satelliteConfigHandlerGET,
+		"PUT /satellite/config":  b.satelliteConfigHandlerPUT,
+		"GET /satellite/find/:id": b.satelliteFindHandler,
 	}))
 }
 

@@ -2,6 +2,7 @@ package bus
 
 import (
 	"encoding/hex"
+	"fmt"
 
 	"go.sia.tech/core/types"
 	"go.sia.tech/jape"
@@ -76,4 +77,26 @@ func (c *Client) SatelliteConfig() (cfg api.SatelliteConfig, err error) {
 // SetSatelliteConfig updates the satellite's configuration.
 func (c *Client) SetSatelliteConfig(cfg api.SatelliteConfig) error {
 	return c.c.PUT("/satellite/config", cfg)
+}
+
+// satelliteFindHandler handles the /satellite/find requests.
+func (b *bus) satelliteFindHandler(jc jape.Context) {
+	var id types.FileContractID
+	if jc.DecodeParam("id", &id) != nil {
+		return
+	}
+	pk, exists := b.sats.Satellite(id)
+	if !exists {
+		pk = types.PublicKey{}
+	}
+	s := api.SatelliteResponse{
+		Satellite: pk,
+	}
+	jc.Encode(s)
+}
+
+// Satellite returns the public key of the satellite that formed the contract.
+func (c *Client) Satellite(fcid types.FileContractID) (pk types.PublicKey, err error) {
+	err = c.c.GET(fmt.Sprintf("/satellite/find/%s", fcid), &pk)
+	return
 }
