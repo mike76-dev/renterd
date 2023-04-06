@@ -625,6 +625,13 @@ func (b *bus) contractIDHandlerPOST(jc jape.Context) {
 		return
 	}
 
+	if (req.PublicKey != types.PublicKey{}) {
+		err := b.sats.AddContract(id, req.PublicKey)
+		if jc.Check("couldn't store contract ID", err) != nil {
+			return
+		}
+	}
+
 	a, err := b.ms.AddContract(jc.Request.Context(), req.Contract, req.TotalCost, req.StartHeight)
 	if jc.Check("couldn't store contract", err) == nil {
 		jc.Encode(a)
@@ -642,6 +649,13 @@ func (b *bus) contractIDRenewedHandlerPOST(jc jape.Context) {
 		return
 	}
 
+	if (req.PublicKey != types.PublicKey{}) {
+		err := b.sats.AddContract(id, req.PublicKey)
+		if jc.Check("couldn't store contract ID", err) != nil {
+			return
+		}
+	}
+
 	r, err := b.ms.AddRenewedContract(jc.Request.Context(), req.Contract, req.TotalCost, req.StartHeight, req.RenewedFrom)
 	if jc.Check("couldn't store contract", err) == nil {
 		jc.Encode(r)
@@ -653,10 +667,16 @@ func (b *bus) contractIDHandlerDELETE(jc jape.Context) {
 	if jc.DecodeParam("id", &id) != nil {
 		return
 	}
+	if jc.Check("couldn't delete contract ID", b.sats.DeleteContract(id)) != nil {
+		return
+	}
 	jc.Check("couldn't remove contract", b.ms.ArchiveContract(jc.Request.Context(), id, api.ContractArchivalReasonRemoved))
 }
 
 func (b *bus) contractsAllHandlerDELETE(jc jape.Context) {
+	if jc.Check("couldn't delete contract IDs", b.sats.DeleteAll()) != nil {
+		return
+	}
 	jc.Check("couldn't remove contracts", b.ms.ArchiveAllContracts(jc.Request.Context(), api.ContractArchivalReasonRemoved))
 }
 

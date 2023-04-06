@@ -357,7 +357,7 @@ func (w *worker) satelliteRequestContractsHandler(jc jape.Context) {
 		if err == nil {
 			continue
 		}
-		a, err := w.bus.AddContract(ctx, ec.contract, ec.contract.RenterFunds(), ec.startHeight)
+		a, err := w.bus.AddContract(ctx, ec.contract, ec.contract.RenterFunds(), ec.startHeight, w.pool.satellitePublicKey)
 		if jc.Check("couldn't add contract", err) != nil {
 			return
 		}
@@ -458,7 +458,7 @@ func (w *worker) satelliteFormContractsHandler(jc jape.Context) {
 	for _, cr := range cs.contracts {
 		id := cr.ID()
 		contracts = append(contracts, id)
-		a, err := w.bus.AddContract(ctx, cr, cr.RenterFunds(), state.BlockHeight)
+		a, err := w.bus.AddContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, w.pool.satellitePublicKey)
 		if jc.Check("couldn't add contract", err) != nil {
 			return
 		}
@@ -571,9 +571,9 @@ func (w *worker) satelliteRenewContractsHandler(jc jape.Context) {
 		from, ok := renewedFrom[host]
 		var a api.ContractMetadata
 		if ok {
-			a, err = w.bus.AddRenewedContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, from)
+			a, err = w.bus.AddRenewedContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, from, w.pool.satellitePublicKey)
 		} else {
-			a, err = w.bus.AddContract(ctx, cr, cr.RenterFunds(), state.BlockHeight)
+			a, err = w.bus.AddContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, w.pool.satellitePublicKey)
 		}
 		if jc.Check("couldn't add contract", err) != nil {
 			return

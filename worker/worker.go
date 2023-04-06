@@ -255,8 +255,8 @@ type Bus interface {
 
 	// Satellite.
 	Contract(ctx context.Context, id types.FileContractID) (contract api.ContractMetadata, err error)
-	AddContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64) (added api.ContractMetadata, err error)
-	AddRenewedContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, renewedFrom types.FileContractID) (renewed api.ContractMetadata, err error)
+	AddContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, spk types.PublicKey) (added api.ContractMetadata, err error)
+	AddRenewedContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, renewedFrom types.FileContractID, spk types.PublicKey) (renewed api.ContractMetadata, err error)
 	SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) (err error)
 	SetSatelliteConfig(api.SatelliteConfig) error
 }
