@@ -402,11 +402,17 @@ func (c *contractor) performWalletMaintenance(ctx context.Context) error {
 	return nil
 }
 
-func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts []api.Contract, minScore float64) (toArchive map[types.FileContractID]string, toIgnore []types.FileContractID, toRefresh, toRenew []contractInfo, _ error) {
+func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts []api.Contract, minScore float64) (toArchive map[types.FileContractID]string, toIgnore []types.FileContractID, toRefresh, toRenew []contractInfo, err error) {
 	if c.ap.isStopped() {
 		return
 	}
 	c.logger.Debug("running contract checks")
+
+	// Fetch satellite config
+	scfg, err := c.ap.bus.SatelliteConfig()
+	if err != nil {
+		return
+	}
 
 	var notfound int
 	defer func() {
@@ -466,7 +472,7 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 		}
 
 		// decide whether the host is still good
-		if !c.ap.satelliteEnabled {
+		if !scfg.Enabled {
 			usable, unusableResult := isUsableHost(state.cfg, state.gs, state.rs, state.cs, f, host.Host, minScore, contract.FileSize(), state.fee, false)
 			if !usable {
 				c.logger.Infow("unusable host", "hk", hk, "fcid", fcid, "reasons", unusableResult.reasons())
@@ -543,9 +549,15 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 }
 
 func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts []hostdb.Host, active []api.Contract, missing uint64, budget *types.Currency, renterAddress types.Address, minScore float64) ([]types.FileContractID, error) {
-	if c.ap.satelliteEnabled {
+	// Fetch satellite config
+	scfg, err := c.ap.bus.SatelliteConfig()
+	if err != nil {
+		return nil, err
+	}
+	if scfg.Enabled {
 		return nil, nil
 	}
+
 	ctx, span := tracing.Tracer.Start(ctx, "runContractFormations")
 	defer span.End()
 
@@ -629,9 +641,15 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 }
 
 func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *types.Currency, renterAddress types.Address, toRenew []contractInfo) ([]api.ContractMetadata, error) {
-	if c.ap.satelliteEnabled {
+	// Fetch satellite config
+	scfg, err := c.ap.bus.SatelliteConfig()
+	if err != nil {
+		return nil, err
+	}
+	if scfg.Enabled {
 		return nil, nil
 	}
+
 	ctx, span := tracing.Tracer.Start(ctx, "runContractRenewals")
 	defer span.End()
 
@@ -671,9 +689,15 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *
 }
 
 func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, budget *types.Currency, renterAddress types.Address, toRefresh []contractInfo) ([]api.ContractMetadata, error) {
-	if c.ap.satelliteEnabled {
+	// Fetch satellite config
+	scfg, err := c.ap.bus.SatelliteConfig()
+	if err != nil {
+		return nil, err
+	}
+	if scfg.Enabled {
 		return nil, nil
 	}
+
 	ctx, span := tracing.Tracer.Start(ctx, "runContractRefreshes")
 	defer span.End()
 

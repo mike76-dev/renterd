@@ -238,7 +238,6 @@ func main() {
 	if satelliteCfg.enabled {
 		busCfg.BusConfig.Satellite.Enabled = true
 		workerCfg.WorkerConfig.Satellite.Enabled = true
-		autopilotCfg.SatelliteEnabled = true
 		if satelliteCfg.satelliteAddr == "" {
 			panic("satellite address not provided")
 		}

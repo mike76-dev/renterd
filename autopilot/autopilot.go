@@ -76,6 +76,9 @@ type Bus interface {
 	UpdateSetting(ctx context.Context, key string, value interface{}) error
 	GougingSettings(ctx context.Context) (gs api.GougingSettings, err error)
 	RedundancySettings(ctx context.Context) (rs api.RedundancySettings, err error)
+
+	// satellite
+	SatelliteConfig() (cfg api.SatelliteConfig, err error)
 }
 
 type Worker interface {
@@ -111,9 +114,6 @@ type Autopilot struct {
 	ticker      *time.Ticker
 	triggerChan chan struct{}
 	stopChan    chan struct{}
-
-	// Satellite.
-	satelliteEnabled bool
 }
 
 // loopState holds a bunch of state variables that are used by the autopilot and
@@ -206,6 +206,12 @@ func (ap *Autopilot) Run() error {
 	var launchAccountRefillsOnce sync.Once
 	for {
 		ap.logger.Info("autopilot iteration starting")
+		// Fetch satellite config
+		scfg, err := ap.bus.SatelliteConfig()
+		if err != nil {
+			ap.logger.Errorf("failed to fetch satellite config: %v", err)
+			return err
+		}
 		ap.workers.withWorker(func(w Worker) {
 			defer ap.logger.Info("autopilot iteration ended")
 			ctx, span := tracing.Tracer.Start(context.Background(), "Autopilot Iteration")
@@ -253,7 +259,7 @@ func (ap *Autopilot) Run() error {
 			ap.c.updateCurrentPeriod()
 
 			// perform wallet maintenance
-			if !ap.satelliteEnabled {
+			if !scfg.Enabled {
 				err = ap.c.performWalletMaintenance(ctx)
 				if err != nil {
 					ap.logger.Errorf("wallet maintenance failed, err: %v", err)
@@ -433,7 +439,7 @@ func (ap *Autopilot) triggerHandlerPOST(jc jape.Context) {
 }
 
 // New initializes an Autopilot.
-func New(store Store, bus Bus, workers []Worker, logger *zap.Logger, heartbeat time.Duration, scannerScanInterval time.Duration, scannerBatchSize, scannerMinRecentFailures, scannerNumThreads uint64, migrationHealthCutoff float64, accountsRefillInterval time.Duration, satelliteEnabled bool) (*Autopilot, error) {
+func New(store Store, bus Bus, workers []Worker, logger *zap.Logger, heartbeat time.Duration, scannerScanInterval time.Duration, scannerBatchSize, scannerMinRecentFailures, scannerNumThreads uint64, migrationHealthCutoff float64, accountsRefillInterval time.Duration) (*Autopilot, error) {
 	ap := &Autopilot{
 		bus:     bus,
 		logger:  logger.Sugar().Named("autopilot"),
@@ -441,9 +447,6 @@ func New(store Store, bus Bus, workers []Worker, logger *zap.Logger, heartbeat t
 		workers: newWorkerPool(workers),
 
 		tickerDuration: heartbeat,
-
-		// Satellite.
-		satelliteEnabled: satelliteEnabled,
 	}
 	scanner, err := newScanner(
 		ap,

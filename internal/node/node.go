@@ -71,9 +71,6 @@ type AutopilotConfig struct {
 	ScannerBatchSize         uint64
 	ScannerMinRecentFailures uint64
 	ScannerNumThreads        uint64
-
-	// Satellite.
-	SatelliteEnabled bool
 }
 
 type ShutdownFn = func(context.Context) error
@@ -312,7 +309,7 @@ func NewWorker(cfg WorkerConfig, b worker.Bus, seed types.PrivateKey, l *zap.Log
 }
 
 func NewAutopilot(cfg AutopilotConfig, s autopilot.Store, b autopilot.Bus, workers []autopilot.Worker, l *zap.Logger) (http.Handler, func() error, ShutdownFn, error) {
-	ap, err := autopilot.New(s, b, workers, l, cfg.Heartbeat, cfg.ScannerInterval, cfg.ScannerBatchSize, cfg.ScannerMinRecentFailures, cfg.ScannerNumThreads, cfg.MigrationHealthCutoff, cfg.AccountsRefillInterval, cfg.SatelliteEnabled)
+	ap, err := autopilot.New(s, b, workers, l, cfg.Heartbeat, cfg.ScannerInterval, cfg.ScannerBatchSize, cfg.ScannerMinRecentFailures, cfg.ScannerNumThreads, cfg.MigrationHealthCutoff, cfg.AccountsRefillInterval)
 	if err != nil {
 		return nil, nil, nil, err
 	}
