@@ -236,11 +236,13 @@ func main() {
 	parseEnvVar("RENTERD_SATELLITE_SEED", &satelliteCfg.satelliteSeed)
 
 	if satelliteCfg.enabled {
+		busCfg.BusConfig.Satellite.Enabled = true
 		workerCfg.WorkerConfig.Satellite.Enabled = true
 		autopilotCfg.SatelliteEnabled = true
 		if satelliteCfg.satelliteAddr == "" {
 			panic("satellite address not provided")
 		}
+		busCfg.BusConfig.Satellite.Address = satelliteCfg.satelliteAddr
 		workerCfg.WorkerConfig.Satellite.Address = satelliteCfg.satelliteAddr
 		var err error
 		key := strings.TrimPrefix(satelliteCfg.satelliteKey, "ed25519:")
@@ -248,11 +250,14 @@ func main() {
 		if err != nil || len(b) != 32 {
 			panic("wrong satellite public key")
 		}
+		copy(busCfg.BusConfig.Satellite.PublicKey[:], b)
 		copy(workerCfg.WorkerConfig.Satellite.PublicKey[:], b)
 		seed, err := hex.DecodeString(satelliteCfg.satelliteSeed)
 		if err != nil || len(seed) != 32 {
 			panic("wrong satellite seed")
 		}
+		busCfg.BusConfig.Satellite.RenterSeed = make([]byte, len(seed))
+		copy(busCfg.BusConfig.Satellite.RenterSeed, seed)
 		workerCfg.WorkerConfig.Satellite.RenterSeed = make([]byte, len(seed))
 		copy(workerCfg.WorkerConfig.Satellite.RenterSeed, seed)
 	}
@@ -319,17 +324,7 @@ func main() {
 	workerAddrs, workerPassword := workerCfg.remoteAddrs, workerCfg.apiPassword
 	if workerAddrs == "" {
 		if workerCfg.enabled {
-			// create a store for the satellite config
-			satelliteDir := filepath.Join(*dir, "satellite")
-			if err := os.MkdirAll(satelliteDir, 0700); err != nil {
-				log.Fatal("failed to create satellite dir", err)
-			}
-			s, err := stores.NewJSONSatelliteStore(satelliteDir)
-			if err != nil {
-				log.Fatal("failed to create JSON satellite store", err)
-			}
-
-			w, shutdownFn, err := node.NewWorker(workerCfg.WorkerConfig, s, bc, getSeed(), logger)
+			w, shutdownFn, err := node.NewWorker(workerCfg.WorkerConfig, bc, getSeed(), logger)
 			if err != nil {
 				log.Fatal("failed to create worker", err)
 			}

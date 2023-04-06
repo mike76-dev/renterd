@@ -224,17 +224,6 @@ type contractLocker interface {
 	ReleaseContract(ctx context.Context, fcid types.FileContractID, lockID uint64) (err error)
 }
 
-// SatelliteStore stores the satellite persistence.
-type SatelliteStore interface {
-	Config() api.SatelliteConfig
-	SetConfig(c api.SatelliteConfig) error
-	Contracts() map[types.FileContractID]types.PublicKey
-	Satellite(types.FileContractID) (types.PublicKey, bool)
-	AddContract(types.FileContractID, types.PublicKey) error
-	DeleteContract(types.FileContractID) error
-	DeleteAll() error
-}
-
 // A Bus is the source of truth within a renterd system.
 type Bus interface {
 	AccountStore
@@ -269,6 +258,7 @@ type Bus interface {
 	AddContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64) (added api.ContractMetadata, err error)
 	AddRenewedContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, renewedFrom types.FileContractID) (renewed api.ContractMetadata, err error)
 	SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) (err error)
+	SetSatelliteConfig(api.SatelliteConfig) error
 }
 
 // deriveSubKey can be used to derive a sub-masterkey from the worker's
@@ -332,10 +322,6 @@ type worker struct {
 	uploadSectorTimeout   time.Duration
 
 	logger *zap.SugaredLogger
-
-	// Satellite
-	satelliteContracts map[types.FileContractID]types.PublicKey
-	store              SatelliteStore
 }
 
 func (w *worker) recordPriceTableUpdate(hostKey types.PublicKey, pt hostdb.HostPriceTable, err error) {
@@ -1204,7 +1190,7 @@ func (w *worker) accountHandlerGET(jc jape.Context) {
 }
 
 // New returns an HTTP handler that serves the worker API.
-func New(s SatelliteStore, masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, l *zap.Logger, satelliteEnabled bool, satelliteAddr string, satelliteKey types.PublicKey, satelliteSeed []byte) *worker {
+func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, l *zap.Logger, satelliteEnabled bool, satelliteAddr string, satelliteKey types.PublicKey, satelliteSeed []byte) *worker {
 	w := &worker{
 		id:                    id,
 		bus:                   b,
@@ -1221,18 +1207,6 @@ func New(s SatelliteStore, masterKey [32]byte, id string, b Bus, sessionLockTime
 		downloadSectorTimeout: downloadSectorTimeout,
 		uploadSectorTimeout:   uploadSectorTimeout,
 		logger:                l.Sugar().Named("worker").Named(id),
-		store:                 s,
-	}
-	if satelliteEnabled {
-		err := w.store.SetConfig(api.SatelliteConfig{
-			Enabled:    satelliteEnabled,
-			Address:    satelliteAddr,
-			PublicKey:  satelliteKey,
-			RenterSeed: satelliteSeed,
-		})
-		if err != nil {
-			w.logger.Errorw(fmt.Sprintf("failed to save satellite config: %v", err))
-		}
 	}
 	w.initAccounts(b)
 	w.initContractSpendingRecorder()
@@ -1266,8 +1240,6 @@ func (w *worker) Handler() http.Handler {
 		"GET    /satellite/request": w.satelliteRequestContractsHandler,
 		"POST   /satellite/form":    w.satelliteFormContractsHandler,
 		"POST   /satellite/renew":   w.satelliteRenewContractsHandler,
-		"GET    /satellite/config":  w.satelliteConfigHandlerGET,
-		"PUT    /satellite/config":  w.satelliteConfigHandlerPUT,
 	}))
 }
 

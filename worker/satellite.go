@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 
 	rhpv2 "go.sia.tech/core/rhp/v2"
@@ -675,63 +674,3 @@ func satelliteUpdateRevision(rev rhpv2.ContractRevision, seed []byte, addr strin
 
 	return
 }
-
-// SatelliteConfig returns the satellite's current configuration.
-func (w *worker) SatelliteConfig() api.SatelliteConfig {
-	return w.store.Config()
-}
-
-// SetSatelliteConfig updates the satellite's configuration.
-func (w *worker) SetSatelliteConfig(c api.SatelliteConfig) error {
-	return w.store.SetConfig(c)
-}
-
-// satelliteConfig simplifies the data transfer over HTTP.
-type satelliteConfig struct {
-	Enabled    bool   `json:"enabled"`
-	Address    string `json:"address"`
-	PublicKey  string `json:"publicKey"`
-	RenterSeed string `json:"renterSeed"`
-}
-
-// satelliteConfigHandlerGET handles the /satellite/config requests.
-func (w *worker) satelliteConfigHandlerGET(jc jape.Context) {
-	c := w.SatelliteConfig()
-	sc := satelliteConfig{
-		Enabled:    c.Enabled,
-		Address:    c.Address,
-		PublicKey:  hex.EncodeToString(c.PublicKey[:]),
-		RenterSeed: hex.EncodeToString(c.RenterSeed),
-	}
-	jc.Encode(sc)
-}
-
-// satelliteConfigHandlerPUT handles the /satellite/config requests.
-func (w *worker) satelliteConfigHandlerPUT(jc jape.Context) {
-	var sc satelliteConfig
-	if jc.Decode(&sc) != nil {
-		return
-	}
-	c := api.SatelliteConfig{
-		Enabled: sc.Enabled,
-		Address: sc.Address,
-	}
-	pk, _ := hex.DecodeString(sc.PublicKey)
-	copy(c.PublicKey[:], pk)
-	c.RenterSeed, _ = hex.DecodeString(sc.RenterSeed)
-	if jc.Check("failed to set config", w.SetSatelliteConfig(c)) != nil {
-		return
-	}
-}
-
-// Config returns the satellite's current configuration.
-func (c *Client) Config() (cfg api.SatelliteConfig, err error) {
-	err = c.c.GET("/satellite/config", &cfg)
-	return
-}
-
-// SetConfig updates the satellite's configuration.
-func (c *Client) SetConfig(cfg api.SatelliteConfig) error {
-	return c.c.PUT("/satellite/config", cfg)
-}
-

@@ -129,6 +129,9 @@ type bus struct {
 
 	eas EphemeralAccountStore
 
+	// Satellite
+	sats SatelliteStore
+
 	logger        *zap.SugaredLogger
 	accounts      *accounts
 	contractLocks *contractLocks
@@ -1048,7 +1051,7 @@ func (b *bus) contractTaxHandlerGET(jc jape.Context) {
 }
 
 // New returns a new Bus.
-func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms MetadataStore, ss SettingStore, eas EphemeralAccountStore, l *zap.Logger) (*bus, error) {
+func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms MetadataStore, ss SettingStore, eas EphemeralAccountStore, sats SatelliteStore, l *zap.Logger, satelliteEnabled bool, satelliteAddr string, satelliteKey types.PublicKey, satelliteSeed []byte) (*bus, error) {
 	b := &bus{
 		s:             s,
 		cm:            cm,
@@ -1058,6 +1061,7 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 		ms:            ms,
 		ss:            ss,
 		eas:           eas,
+		sats:          sats,
 		contractLocks: newContractLocks(),
 		logger:        l.Sugar().Named("bus"),
 	}
@@ -1084,6 +1088,20 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 		return nil, err
 	}
 	b.accounts = newAccounts(accounts)
+
+	// Save the satellite config.
+	if satelliteEnabled {
+		err := b.SetSatelliteConfig(api.SatelliteConfig{
+			Enabled:    satelliteEnabled,
+			Address:    satelliteAddr,
+			PublicKey:  satelliteKey,
+			RenterSeed: satelliteSeed,
+		})
+		if err != nil {
+			b.logger.Errorw(fmt.Sprintf("failed to save satellite config: %v", err))
+		}
+	}
+
 	return b, nil
 }
 
@@ -1169,6 +1187,10 @@ func (b *bus) Handler() http.Handler {
 		"GET    /params/download": b.paramsHandlerDownloadGET,
 		"GET    /params/upload":   b.paramsHandlerUploadGET,
 		"GET    /params/gouging":  b.paramsHandlerGougingGET,
+
+		// Satellite.
+		"GET /satellite/config": b.satelliteConfigHandlerGET,
+		"PUT /satellite/config": b.satelliteConfigHandlerPUT,
 	}))
 }
 

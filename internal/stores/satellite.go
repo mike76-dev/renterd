@@ -12,21 +12,21 @@ import (
 	"go.sia.tech/siad/modules"
 )
 
-// EphemeralSatelliteStore implements worker.SatelliteStore in memory.
+// EphemeralSatelliteStore implements bus.SatelliteStore in memory.
 type EphemeralSatelliteStore struct {
 	mu        sync.Mutex
 	config    api.SatelliteConfig
 	contracts map[types.FileContractID]types.PublicKey
 }
 
-// Config implements worker.SatelliteStore.
+// Config implements bus.SatelliteStore.
 func (s *EphemeralSatelliteStore) Config() api.SatelliteConfig {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.config
 }
 
-// SetConfig implements worker.SatelliteStore.
+// SetConfig implements bus.SatelliteStore.
 func (s *EphemeralSatelliteStore) SetConfig(c api.SatelliteConfig) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -34,14 +34,14 @@ func (s *EphemeralSatelliteStore) SetConfig(c api.SatelliteConfig) error {
 	return nil
 }
 
-// Contracts implements worker.SatelliteStore.
+// Contracts implements bus.SatelliteStore.
 func (s *EphemeralSatelliteStore) Contracts() map[types.FileContractID]types.PublicKey {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.contracts
 }
 
-// Satellite implements worker.SatelliteStore.
+// Satellite implements bus.SatelliteStore.
 func (s *EphemeralSatelliteStore) Satellite(fcid types.FileContractID) (types.PublicKey, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -49,7 +49,7 @@ func (s *EphemeralSatelliteStore) Satellite(fcid types.FileContractID) (types.Pu
 	return pk, exists
 }
 
-// AddContract implements worker.SatelliteStore.
+// AddContract implements bus.SatelliteStore.
 func (s *EphemeralSatelliteStore) AddContract(fcid types.FileContractID, pk types.PublicKey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -57,7 +57,7 @@ func (s *EphemeralSatelliteStore) AddContract(fcid types.FileContractID, pk type
 	return nil
 }
 
-// DeleteContract implements worker.SatelliteStore.
+// DeleteContract implements bus.SatelliteStore.
 func (s *EphemeralSatelliteStore) DeleteContract(fcid types.FileContractID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -67,7 +67,7 @@ func (s *EphemeralSatelliteStore) DeleteContract(fcid types.FileContractID) erro
 	return nil
 }
 
-// DeleteAll implements worker.SatelliteStore.
+// DeleteAll implements bus.SatelliteStore.
 func (s *EphemeralSatelliteStore) DeleteAll() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -85,7 +85,7 @@ func NewEphemeralSatelliteStore() *EphemeralSatelliteStore {
 	return &EphemeralSatelliteStore{}
 }
 
-// JSONSatelliteStore implements worker.SatelliteStore in memory, backed by a JSON file.
+// JSONSatelliteStore implements bus.SatelliteStore in memory, backed by a JSON file.
 type JSONSatelliteStore struct {
 	*EphemeralSatelliteStore
 	dir      string
@@ -138,25 +138,25 @@ func (s *JSONSatelliteStore) load() error {
 	return nil
 }
 
-// SetConfig implements worker.SatelliteStore.
+// SetConfig implements bus.SatelliteStore.
 func (s *JSONSatelliteStore) SetConfig(c api.SatelliteConfig) error {
 	s.EphemeralSatelliteStore.SetConfig(c)
 	return s.save()
 }
 
-// AddContract implements worker.SatelliteStore.
+// AddContract implements bus.SatelliteStore.
 func (s *JSONSatelliteStore) AddContract(fcid types.FileContractID, pk types.PublicKey) error {
 	s.EphemeralSatelliteStore.AddContract(fcid, pk)
 	return s.save()
 }
 
-// DeleteContract implements worker.SatelliteStore.
+// DeleteContract implements bus.SatelliteStore.
 func (s *JSONSatelliteStore) DeleteContract(fcid types.FileContractID) error {
 	s.EphemeralSatelliteStore.DeleteContract(fcid)
 	return s.save()
 }
 
-// DeleteAll implements worker.SatelliteStore.
+// DeleteAll implements bus.SatelliteStore.
 func (s *JSONSatelliteStore) DeleteAll() error {
 	s.EphemeralSatelliteStore.DeleteAll()
 	return s.save()

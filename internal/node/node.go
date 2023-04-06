@@ -58,6 +58,9 @@ type BusConfig struct {
 	PersistInterval time.Duration
 
 	DBDialector gorm.Dialector
+
+	// Satellite.
+	Satellite SatelliteConfig
 }
 
 type AutopilotConfig struct {
@@ -275,7 +278,17 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 		tp.TransactionPoolSubscribe(m)
 	}
 
-	b, err := bus.New(syncer{g, tp}, chainManager{cs: cs, network: cfg.Network}, txpool{tp}, w, sqlStore, sqlStore, sqlStore, sqlStore, l)
+	// Create a store for the satellite persistence.
+	satelliteDir := filepath.Join(dir, "satellite")
+	if err := os.MkdirAll(satelliteDir, 0700); err != nil {
+		return nil, nil, err
+	}
+	s, err := stores.NewJSONSatelliteStore(satelliteDir)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	b, err := bus.New(syncer{g, tp}, chainManager{cs: cs, network: cfg.Network}, txpool{tp}, w, sqlStore, sqlStore, sqlStore, sqlStore, s, l, cfg.Satellite.Enabled, cfg.Satellite.Address, cfg.Satellite.PublicKey, cfg.Satellite.RenterSeed)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -292,9 +305,9 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 	return b.Handler(), shutdownFn, nil
 }
 
-func NewWorker(cfg WorkerConfig, s worker.SatelliteStore, b worker.Bus, seed types.PrivateKey, l *zap.Logger) (http.Handler, ShutdownFn, error) {
+func NewWorker(cfg WorkerConfig, b worker.Bus, seed types.PrivateKey, l *zap.Logger) (http.Handler, ShutdownFn, error) {
 	workerKey := blake2b.Sum256(append([]byte("worker"), seed...))
-	w := worker.New(s, workerKey, cfg.ID, b, cfg.SessionLockTimeout, cfg.SessionReconnectTimeout, cfg.SessionTTL, cfg.BusFlushInterval, cfg.DownloadSectorTimeout, cfg.UploadSectorTimeout, l, cfg.Satellite.Enabled, cfg.Satellite.Address, cfg.Satellite.PublicKey, cfg.Satellite.RenterSeed)
+	w := worker.New(workerKey, cfg.ID, b, cfg.SessionLockTimeout, cfg.SessionReconnectTimeout, cfg.SessionTTL, cfg.BusFlushInterval, cfg.DownloadSectorTimeout, cfg.UploadSectorTimeout, l, cfg.Satellite.Enabled, cfg.Satellite.Address, cfg.Satellite.PublicKey, cfg.Satellite.RenterSeed)
 	return w.Handler(), w.Shutdown, nil
 }
 
