@@ -255,6 +255,38 @@ func (cs *contractSet) DecodeFrom(d *types.Decoder) {
 	}
 }
 
+// extendedContract contains additionally the block height the contract
+// was created at.
+type extendedContract struct {
+	contract    rhpv2.ContractRevision
+	startHeight uint64
+}
+
+// extendedContractSet is a collection of extendedContracts.
+type extendedContractSet struct {
+	contracts []extendedContract
+}
+
+// EncodeTo implements types.ProtocolObject.
+func (ecs *extendedContractSet) EncodeTo(e *types.Encoder) {
+	// Nothing to do here.
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (ecs *extendedContractSet) DecodeFrom(d *types.Decoder) {
+	num := d.ReadUint64()
+	ecs.contracts = make([]extendedContract, 0, num)
+	var ec extendedContract
+	for num > 0 {
+		ec.contract.Revision.DecodeFrom(d)
+		ec.contract.Signatures[0].DecodeFrom(d)
+		ec.contract.Signatures[1].DecodeFrom(d)
+		ec.startHeight = d.ReadUint64()
+		ecs.contracts = append(ecs.contracts, ec)
+		num--
+	}
+}
+
 // rpcMessage represents a simple RPC response.
 type rpcMessage struct {
 	Error string
@@ -294,19 +326,13 @@ func (w *worker) satelliteRequestContractsHandler(jc jape.Context) {
 	rr.EncodeToWithoutSignature(h.E)
 	rr.Signature = sk.SignHash(h.Sum())
 
-	state, err := w.bus.ConsensusState(ctx)
-	if err != nil {
-		jc.Check("ERROR", errors.New("could not get consensus state"))
-		return
-	}
-
-	var cs contractSet
-	err = w.withTransportV2(ctx, w.pool.satellitePublicKey, w.pool.satelliteAddress, func(t *rhpv2.Transport) (err error) {
+	var ecs extendedContractSet
+	err := w.withTransportV2(ctx, w.pool.satellitePublicKey, w.pool.satelliteAddress, func(t *rhpv2.Transport) (err error) {
 		if err := t.WriteRequest(specifierRequestContracts, &rr); err != nil {
 			return err
 		}
 
-		if err := t.ReadResponse(&cs, 65536); err != nil {
+		if err := t.ReadResponse(&ecs, 65536); err != nil {
 			return err
 		}
 
@@ -325,14 +351,14 @@ func (w *worker) satelliteRequestContractsHandler(jc jape.Context) {
 		contracts = append(contracts, c.ID)
 	}
 
-	for _, cr := range cs.contracts {
-		id := cr.ID()
+	for _, ec := range ecs.contracts {
+		id := ec.contract.ID()
 		contracts = append(contracts, id)
 		_, err = w.bus.Contract(ctx, id)
 		if err == nil {
 			continue
 		}
-		a, err := w.bus.AddContract(ctx, cr, cr.RenterFunds(), state.BlockHeight)
+		a, err := w.bus.AddContract(ctx, ec.contract, ec.contract.RenterFunds(), ec.startHeight)
 		if jc.Check("couldn't add contract", err) != nil {
 			return
 		}
