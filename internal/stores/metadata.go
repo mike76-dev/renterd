@@ -307,6 +307,17 @@ func (s *SQLStore) AddContract(ctx context.Context, c rhpv2.ContractRevision, to
 	var added dbContract
 	if err = s.retryTransaction(func(tx *gorm.DB) error {
 		added, err = addContract(s.db, c, totalCost, startHeight, types.FileContractID{})
+		// If the contract is in the archive, remove it from there.
+		if err == nil {
+			var ac dbArchivedContract
+			err = tx.
+				Where(&dbArchivedContract{ContractCommon: ContractCommon{FCID: fileContractID(c.ID())}}).
+				Take(&ac).
+				Error
+			if err == nil {
+				err = tx.Delete(&ac).Error
+			}
+		}
 		return err
 	}); err != nil {
 		return
@@ -380,6 +391,22 @@ func (s *SQLStore) AddRenewedContract(ctx context.Context, c rhpv2.ContractRevis
 		if err != nil {
 			return err
 		}
+
+		// If the contract is in the archive, remove it from there.
+		if err == nil {
+			var ac dbArchivedContract
+			err = tx.
+				Where(&dbArchivedContract{ContractCommon: ContractCommon{FCID: fileContractID(c.ID())}}).
+				Take(&ac).
+				Error
+			if err == nil {
+				err = tx.Delete(&ac).Error
+				if err != nil {
+					return err
+				}
+			}
+		}
+
 		s.knownContracts[c.ID()] = struct{}{}
 
 		// Update the old contract in the contract set to the new one.
