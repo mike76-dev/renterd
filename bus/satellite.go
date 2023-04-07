@@ -100,3 +100,17 @@ func (c *Client) Satellite(fcid types.FileContractID) (pk types.PublicKey, err e
 	err = c.c.GET(fmt.Sprintf("/satellite/find/%s", fcid), &pk)
 	return
 }
+
+// satelliteAllHandler handles the /satellite/all requests.
+func (b *bus) satelliteAllHandler(jc jape.Context) {
+	c := api.SatelliteAllResponse{
+		Contracts: b.sats.Contracts(),
+	}
+	jc.Encode(c)
+}
+
+// SatelliteAll returns all satellite contracts.
+func (c *Client) SatelliteAll() (contracts map[types.FileContractID]types.PublicKey, err error) {
+	err = c.c.GET("/satellite/all", &contracts)
+	return
+}

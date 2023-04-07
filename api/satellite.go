@@ -26,9 +26,14 @@ type SatelliteRenewRequest struct {
 	Storage     uint64 `json:"storage"`
 }
 
-// SatelliteResponse is the response type for the /bus/satellite endpoint.
+// SatelliteResponse is the response type for the /bus/satellite/find endpoint.
 type SatelliteResponse struct {
 	Satellite types.PublicKey `json:"satellite"`
+}
+
+// SatelliteAllResponse is the response type for the /bus/satellite/all endpoint.
+type SatelliteAllResponse struct {
+	Contracts map[types.FileContractID]types.PublicKey `json:"contracts"`
 }
 
 // SatelliteConfig contains the satellite configuration parameters.
