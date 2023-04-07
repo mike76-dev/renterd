@@ -204,6 +204,7 @@ func recordRPC(ctx context.Context, t *rhpv2.Transport, c rhpv2.ContractRevision
 // A Session pairs a Transport with a Contract, enabling RPCs that modify the
 // Contract.
 type Session struct {
+	b           Bus
 	transport   *rhpv2.Transport
 	renewedFrom types.FileContractID
 	renewedTo   types.FileContractID
@@ -213,12 +214,6 @@ type Session struct {
 	settings    rhpv2.HostSettings
 	lastSeen    time.Time
 	mu          sync.Mutex
-
-	// Satellite-related fields.
-	satelliteEnabled    bool
-	satelliteAddress    string
-	satellitePublicKey  types.PublicKey
-	satelliteRenterSeed []byte
 }
 
 // Append calls the Write RPC with a single action, appending the provided
@@ -294,7 +289,7 @@ func (s *Session) Read(ctx context.Context, w io.Writer, sections []rhpv2.RPCRea
 	defer wrapErr(&err, "Read")
 	defer func() {
 		// send the new revision to the satellite
-		if err == nil && s.satelliteEnabled {
+		if err == nil {
 			s.satelliteUpdateRevision(api.ContractSpending{Downloads: price})
 		}
 	}()
@@ -632,7 +627,7 @@ func (s *Session) Write(ctx context.Context, actions []rhpv2.RPCWriteAction, pri
 	defer wrapErr(&err, "Write")
 	defer func() {
 		// send the new revision to the satellite
-		if err == nil && s.satelliteEnabled {
+		if err == nil {
 			s.satelliteUpdateRevision(api.ContractSpending{Uploads: price})
 		}
 	}()
