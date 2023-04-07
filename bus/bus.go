@@ -1111,7 +1111,7 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 
 	// Save the satellite config.
 	if satelliteEnabled {
-		err := b.SetSatelliteConfig(api.SatelliteConfig{
+		err := b.sats.SetConfig(api.SatelliteConfig{
 			Enabled:    satelliteEnabled,
 			Address:    satelliteAddr,
 			PublicKey:  satelliteKey,
