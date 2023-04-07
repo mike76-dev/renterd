@@ -304,7 +304,7 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 
 func NewWorker(cfg WorkerConfig, b worker.Bus, seed types.PrivateKey, l *zap.Logger) (http.Handler, ShutdownFn, error) {
 	workerKey := blake2b.Sum256(append([]byte("worker"), seed...))
-	w := worker.New(workerKey, cfg.ID, b, cfg.SessionLockTimeout, cfg.SessionReconnectTimeout, cfg.SessionTTL, cfg.BusFlushInterval, cfg.DownloadSectorTimeout, cfg.UploadSectorTimeout, l, cfg.Satellite.Enabled, cfg.Satellite.Address, cfg.Satellite.PublicKey, cfg.Satellite.RenterSeed)
+	w := worker.New(workerKey, cfg.ID, b, cfg.SessionLockTimeout, cfg.SessionReconnectTimeout, cfg.SessionTTL, cfg.BusFlushInterval, cfg.DownloadSectorTimeout, cfg.UploadSectorTimeout, l)
 	return w.Handler(), w.Shutdown, nil
 }
 

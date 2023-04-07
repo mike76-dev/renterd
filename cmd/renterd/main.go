@@ -237,12 +237,10 @@ func main() {
 
 	if satelliteCfg.enabled {
 		busCfg.BusConfig.Satellite.Enabled = true
-		workerCfg.WorkerConfig.Satellite.Enabled = true
 		if satelliteCfg.satelliteAddr == "" {
 			panic("satellite address not provided")
 		}
 		busCfg.BusConfig.Satellite.Address = satelliteCfg.satelliteAddr
-		workerCfg.WorkerConfig.Satellite.Address = satelliteCfg.satelliteAddr
 		var err error
 		key := strings.TrimPrefix(satelliteCfg.satelliteKey, "ed25519:")
 		b, err := hex.DecodeString(key)
@@ -250,15 +248,12 @@ func main() {
 			panic("wrong satellite public key")
 		}
 		copy(busCfg.BusConfig.Satellite.PublicKey[:], b)
-		copy(workerCfg.WorkerConfig.Satellite.PublicKey[:], b)
 		seed, err := hex.DecodeString(satelliteCfg.satelliteSeed)
 		if err != nil || len(seed) != 32 {
 			panic("wrong satellite seed")
 		}
 		busCfg.BusConfig.Satellite.RenterSeed = make([]byte, len(seed))
 		copy(busCfg.BusConfig.Satellite.RenterSeed, seed)
-		workerCfg.WorkerConfig.Satellite.RenterSeed = make([]byte, len(seed))
-		copy(workerCfg.WorkerConfig.Satellite.RenterSeed, seed)
 	}
 
 	var autopilotShutdownFn func(context.Context) error

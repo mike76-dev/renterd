@@ -258,6 +258,7 @@ type Bus interface {
 	AddContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, spk types.PublicKey) (added api.ContractMetadata, err error)
 	AddRenewedContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, renewedFrom types.FileContractID, spk types.PublicKey) (renewed api.ContractMetadata, err error)
 	SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) (err error)
+	SatelliteConfig() (cfg api.SatelliteConfig, err error)
 	SetSatelliteConfig(api.SatelliteConfig) error
 }
 
@@ -265,9 +266,13 @@ type Bus interface {
 // masterkey to use for a specific purpose. Such as deriving more keys for
 // ephemeral accounts.
 func (w *worker) deriveSubKey(purpose string) types.PrivateKey {
+	cfg, err := w.bus.SatelliteConfig()
+	if err != nil {
+		return types.PrivateKey{}
+	}
 	var seed [32]byte
-	if w.pool.satelliteEnabled {
-		copy(seed[:], w.pool.satelliteRenterSeed)
+	if cfg.Enabled {
+		copy(seed[:], cfg.RenterSeed)
 	} else {
 		seed = blake2b.Sum256(append(w.masterKey[:], []byte(purpose)...))
 	}
@@ -1190,7 +1195,7 @@ func (w *worker) accountHandlerGET(jc jape.Context) {
 }
 
 // New returns an HTTP handler that serves the worker API.
-func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, l *zap.Logger, satelliteEnabled bool, satelliteAddr string, satelliteKey types.PublicKey, satelliteSeed []byte) *worker {
+func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, l *zap.Logger) *worker {
 	w := &worker{
 		id:                    id,
 		bus:                   b,
@@ -1198,17 +1203,14 @@ func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionRecone
 		                         sessionLockTimeout,
 		                         sessionReconectTimeout,
 		                         sessionTTL,
-		                         satelliteEnabled,
-		                         satelliteAddr,
-		                         satelliteKey,
-		                         satelliteSeed),
+		                         b),
 		masterKey:             masterKey,
 		busFlushInterval:      busFlushInterval,
 		downloadSectorTimeout: downloadSectorTimeout,
 		uploadSectorTimeout:   uploadSectorTimeout,
 		logger:                l.Sugar().Named("worker").Named(id),
 	}
-	w.initAccounts(b)
+	go w.initAccounts(b) // to avoid blocking when the API is not working yet
 	w.initContractSpendingRecorder()
 	w.initPriceTables()
 	return w
