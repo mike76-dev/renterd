@@ -20,7 +20,6 @@ import (
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/siad/crypto"
-	"golang.org/x/crypto/blake2b"
 	"lukechampine.com/frand"
 )
 
@@ -151,7 +150,9 @@ func (w *worker) fundAccount(ctx context.Context, hk types.PublicKey, siamuxAddr
 				return fmt.Errorf("failed to fund account with %v;%w", amount, err)
 			}
 			// send the new revision to the satellite
-			w.satelliteUpdateRevision(rhpv2.ContractRevision{Revision: *revision,}, api.ContractSpending{FundAccount: cost})
+			if w.pool.satelliteEnabled {
+				w.satelliteUpdateRevision(rhpv2.ContractRevision{Revision: *revision,}, api.ContractSpending{FundAccount: cost})
+			}
 			w.contractSpendingRecorder.Record(revision.ParentID, api.ContractSpending{FundAccount: cost})
 			return nil
 		})
@@ -223,24 +224,13 @@ type (
 	}
 )
 
-func (w *worker) initAccounts(as AccountStore, satelliteEnabled bool, satelliteSeed []byte) {
+func (w *worker) initAccounts(as AccountStore) {
 	if w.accounts != nil {
 		panic("accounts already initialized") // developer error
 	}
-	// Derive the key manually as the API is not working yet.
-	var seed [32]byte
-	if satelliteEnabled {
-		copy(seed[:], satelliteSeed)
-	} else {
-		seed = blake2b.Sum256(append(w.masterKey[:], []byte("accountkey")...))
-	}
-	pk := types.NewPrivateKeyFromSeed(seed[:])
-	for i := range seed {
-		seed[i] = 0
-	}
 	w.accounts = &accounts{
 		store: as,
-		key:   pk,
+		key:   w.deriveSubKey("accountkey"),
 	}
 }
 

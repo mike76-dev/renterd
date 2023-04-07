@@ -38,6 +38,9 @@ type WorkerConfig struct {
 	SessionTTL              time.Duration
 	DownloadSectorTimeout   time.Duration
 	UploadSectorTimeout     time.Duration
+
+	// Satellite.
+	Satellite SatelliteConfig
 }
 
 type SatelliteConfig struct {
@@ -299,9 +302,9 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 	return b.Handler(), shutdownFn, nil
 }
 
-func NewWorker(cfg WorkerConfig, b worker.Bus, seed types.PrivateKey, l *zap.Logger, satelliteEnabled bool, satelliteSeed []byte) (http.Handler, ShutdownFn, error) {
+func NewWorker(cfg WorkerConfig, b worker.Bus, seed types.PrivateKey, l *zap.Logger) (http.Handler, ShutdownFn, error) {
 	workerKey := blake2b.Sum256(append([]byte("worker"), seed...))
-	w := worker.New(workerKey, cfg.ID, b, cfg.SessionLockTimeout, cfg.SessionReconnectTimeout, cfg.SessionTTL, cfg.BusFlushInterval, cfg.DownloadSectorTimeout, cfg.UploadSectorTimeout, l, satelliteEnabled, satelliteSeed)
+	w := worker.New(workerKey, cfg.ID, b, cfg.SessionLockTimeout, cfg.SessionReconnectTimeout, cfg.SessionTTL, cfg.BusFlushInterval, cfg.DownloadSectorTimeout, cfg.UploadSectorTimeout, l, cfg.Satellite.Enabled, cfg.Satellite.Address, cfg.Satellite.PublicKey, cfg.Satellite.RenterSeed)
 	return w.Handler(), w.Shutdown, nil
 }
 

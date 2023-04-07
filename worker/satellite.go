@@ -309,18 +309,13 @@ func generateKeyPair(seed []byte) (types.PublicKey, types.PrivateKey) {
 
 // satelliteRequestContractsHandler handles the /satellite/request requests.
 func (w *worker) satelliteRequestContractsHandler(jc jape.Context) {
-	cfg, err := w.bus.SatelliteConfig()
-	if err != nil {
-		jc.Check("ERROR", errors.New("failed to fetch satellite config"))
-		return
-	}
-	if !cfg.Enabled {
+	if !w.pool.satelliteEnabled {
 		jc.Check("ERROR", errors.New("satellite disabled"))
 		return
 	}
 	ctx := jc.Request.Context()
 
-	pk, sk := generateKeyPair(cfg.RenterSeed)
+	pk, sk := generateKeyPair(w.pool.satelliteRenterSeed)
 
 	rr := requestRequest{
 		PubKey: pk,
@@ -331,7 +326,7 @@ func (w *worker) satelliteRequestContractsHandler(jc jape.Context) {
 	rr.Signature = sk.SignHash(h.Sum())
 
 	var ecs extendedContractSet
-	err = w.withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
+	err := w.withTransportV2(ctx, w.pool.satellitePublicKey, w.pool.satelliteAddress, func(t *rhpv2.Transport) (err error) {
 		if err := t.WriteRequest(specifierRequestContracts, &rr); err != nil {
 			return err
 		}
@@ -362,7 +357,7 @@ func (w *worker) satelliteRequestContractsHandler(jc jape.Context) {
 		if err == nil {
 			continue
 		}
-		a, err := w.bus.AddContract(ctx, ec.contract, ec.contract.RenterFunds(), ec.startHeight, cfg.PublicKey)
+		a, err := w.bus.AddContract(ctx, ec.contract, ec.contract.RenterFunds(), ec.startHeight, w.pool.satellitePublicKey)
 		if jc.Check("couldn't add contract", err) != nil {
 			return
 		}
@@ -386,12 +381,7 @@ func (c *Client) RequestContracts(ctx context.Context) ([]api.ContractMetadata, 
 
 // satelliteFormContractsHandler handles the /satellite/form requests.
 func (w *worker) satelliteFormContractsHandler(jc jape.Context) {
-	cfg, err := w.bus.SatelliteConfig()
-	if err != nil {
-		jc.Check("ERROR", errors.New("failed to fetch satellite config"))
-		return
-	}
-	if !cfg.Enabled {
+	if !w.pool.satelliteEnabled {
 		jc.Check("ERROR", errors.New("satellite disabled"))
 		return
 	}
@@ -406,7 +396,7 @@ func (w *worker) satelliteFormContractsHandler(jc jape.Context) {
 		return
 	}
 
-	pk, sk := generateKeyPair(cfg.RenterSeed)
+	pk, sk := generateKeyPair(w.pool.satelliteRenterSeed)
 
 	fr := formRequest{
 		PubKey:      pk,
@@ -441,7 +431,7 @@ func (w *worker) satelliteFormContractsHandler(jc jape.Context) {
 	}
 
 	var cs contractSet
-	err = w.withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
+	err = w.withTransportV2(ctx, w.pool.satellitePublicKey, w.pool.satelliteAddress, func(t *rhpv2.Transport) (err error) {
 		if err := t.WriteRequest(specifierFormContracts, &fr); err != nil {
 			return err
 		}
@@ -468,7 +458,7 @@ func (w *worker) satelliteFormContractsHandler(jc jape.Context) {
 	for _, cr := range cs.contracts {
 		id := cr.ID()
 		contracts = append(contracts, id)
-		a, err := w.bus.AddContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, cfg.PublicKey)
+		a, err := w.bus.AddContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, w.pool.satellitePublicKey)
 		if jc.Check("couldn't add contract", err) != nil {
 			return
 		}
@@ -500,12 +490,7 @@ func (c *Client) FormContracts(ctx context.Context, hosts uint64, period uint64,
 
 // satelliteRenewContractsHandler handles the /satellite/renew requests.
 func (w *worker) satelliteRenewContractsHandler(jc jape.Context) {
-	cfg, err := w.bus.SatelliteConfig()
-	if err != nil {
-		jc.Check("ERROR", errors.New("failed to fetch satellite config"))
-		return
-	}
-	if !cfg.Enabled {
+	if !w.pool.satelliteEnabled {
 		jc.Check("ERROR", errors.New("satellite disabled"))
 		return
 	}
@@ -529,7 +514,7 @@ func (w *worker) satelliteRenewContractsHandler(jc jape.Context) {
 		return
 	}
 
-	pk, sk := generateKeyPair(cfg.RenterSeed)
+	pk, sk := generateKeyPair(w.pool.satelliteRenterSeed)
 
 	rr := renewRequest{
 		PubKey:      pk,
@@ -558,7 +543,7 @@ func (w *worker) satelliteRenewContractsHandler(jc jape.Context) {
 	rr.Signature = sk.SignHash(h.Sum())
 
 	var cs contractSet
-	err = w.withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
+	err = w.withTransportV2(ctx, w.pool.satellitePublicKey, w.pool.satelliteAddress, func(t *rhpv2.Transport) (err error) {
 		if err := t.WriteRequest(specifierRenewContracts, &rr); err != nil {
 			return err
 		}
@@ -586,9 +571,9 @@ func (w *worker) satelliteRenewContractsHandler(jc jape.Context) {
 		from, ok := renewedFrom[host]
 		var a api.ContractMetadata
 		if ok {
-			a, err = w.bus.AddRenewedContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, from, cfg.PublicKey)
+			a, err = w.bus.AddRenewedContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, from, w.pool.satellitePublicKey)
 		} else {
-			a, err = w.bus.AddContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, cfg.PublicKey)
+			a, err = w.bus.AddContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, w.pool.satellitePublicKey)
 		}
 		if jc.Check("couldn't add contract", err) != nil {
 			return
@@ -618,27 +603,13 @@ func (c *Client) RenewContracts(ctx context.Context, contracts []types.FileContr
 // satelliteUpdateRevision submits an updated contract revision to
 // the satellite.
 func (s *Session) satelliteUpdateRevision(spending api.ContractSpending) (err error) {
-	cfg, err := s.b.SatelliteConfig()
-	if err != nil {
-		return err
-	}
-	if !cfg.Enabled {
-		return nil
-	}
-	return satelliteUpdateRevision(s.Revision(), cfg.RenterSeed, cfg.Address, cfg.PublicKey, spending)
+	return satelliteUpdateRevision(s.Revision(), s.satelliteRenterSeed, s.satelliteAddress, s.satellitePublicKey, spending)
 }
 
 // satelliteUpdateRevision submits an updated contract revision to
 // the satellite.
 func (w *worker) satelliteUpdateRevision(rev rhpv2.ContractRevision, spending api.ContractSpending) (err error) {
-	cfg, err := w.bus.SatelliteConfig()
-	if err != nil {
-		return err
-	}
-	if !cfg.Enabled {
-		return nil
-	}
-	return satelliteUpdateRevision(rev, cfg.RenterSeed, cfg.Address, cfg.PublicKey, spending)
+	return satelliteUpdateRevision(rev, w.pool.satelliteRenterSeed, w.pool.satelliteAddress, w.pool.satellitePublicKey, spending)
 }
 
 // satelliteUpdateRevision submits an updated contract revision to
