@@ -215,6 +215,10 @@ github.com/mike76-dev/sia-web/renterd v0.0.0-20230406090047-fbdc84b0d1d9 h1:4nRw
 github.com/mike76-dev/sia-web/renterd v0.0.0-20230406090047-fbdc84b0d1d9/go.mod h1:KpHaBn2PzCE82wmfozdKpJhzh6bxVvzjyCCjZj4Rl5k=
 github.com/mike76-dev/sia-web/renterd v0.0.0-20230407114423-b08779a48bff h1:TQ3zkD5PlP3hIGNgHZoIdYED1OAiRQBbrNe1kUcpGDc=
 github.com/mike76-dev/sia-web/renterd v0.0.0-20230407114423-b08779a48bff/go.mod h1:KpHaBn2PzCE82wmfozdKpJhzh6bxVvzjyCCjZj4Rl5k=
+github.com/mike76-dev/sia-web/renterd v0.0.0-20230407163606-aa81fc0ecd25 h1:7bIrk4H+jtX+vAUGVgfZC+msl3WrQ8F88UD4aCJCSUk=
+github.com/mike76-dev/sia-web/renterd v0.0.0-20230407163606-aa81fc0ecd25/go.mod h1:KpHaBn2PzCE82wmfozdKpJhzh6bxVvzjyCCjZj4Rl5k=
+github.com/mike76-dev/sia-web/renterd v0.0.0-20230407165925-987fbd150db0 h1:BLY8Dt3SSLUP7EsqsLdIRefsNnT3kUMrz46Fr5Axm0A=
+github.com/mike76-dev/sia-web/renterd v0.0.0-20230407165925-987fbd150db0/go.mod h1:KpHaBn2PzCE82wmfozdKpJhzh6bxVvzjyCCjZj4Rl5k=
 github.com/mitchellh/go-homedir v1.1.0/go.mod h1:SfyaCUpYCn1Vlf4IUYiD9fPX4A5wJrkLzIz1N1q0pr0=
 github.com/mitchellh/mapstructure v1.1.2/go.mod h1:FVVH3fgwuzCH5S8UJGiWEs2h04kUh9fWfEaFds41c1Y=
 github.com/mwitkow/go-conntrack v0.0.0-20161129095857-cc309e4a2223/go.mod h1:qRWi+5nqEBWmkhHvq77mSJWrCKwh8bxhgT7d/eI7P4U=
