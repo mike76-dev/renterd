@@ -199,7 +199,7 @@ func main() {
 	flag.DurationVar(&nodeCfg.shutdownTimeout, "node.shutdownTimeout", 5*time.Minute, "the timeout applied to the node shutdown")
 
 	// Satellite-related flags.
-	flag.BoolVar(&satelliteCfg.enabled, "satellite.enabled", true, "enable/disable connecting to a satellite - can be overwritten using the RENTERD_SATELLITE_ENABLED environment variable")
+	flag.BoolVar(&satelliteCfg.enabled, "satellite.enabled", false, "enable/disable connecting to a satellite - can be overwritten using the RENTERD_SATELLITE_ENABLED environment variable")
 	flag.StringVar(&satelliteCfg.satelliteAddr, "satellite.addr", "", "URL of the satellite - can be overwritten using RENTERD_SATELLITE_ADDR environment variable")
 	flag.StringVar(&satelliteCfg.satelliteKey, "satellite.key", "", "public key of the satellite - can be overwritten using RENTERD_SATELLITE_KEY environment variable")
 	flag.StringVar(&satelliteCfg.satelliteSeed, "satellite.seed", "", "renter seed received from the satellite - can be overwritten using RENTERD_SATELLITE_SEED environment variable")
