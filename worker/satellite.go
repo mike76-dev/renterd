@@ -229,36 +229,14 @@ func (ur *updateRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
 }
 
-// contractSet is a collection of rhpv2.ContractRevision
-// objects.
-type contractSet struct {
-	contracts []rhpv2.ContractRevision
-}
-
-// EncodeTo implements types.ProtocolObject.
-func (cs *contractSet) EncodeTo(e *types.Encoder) {
-	// Nothing to do here.
-}
-
-// DecodeFrom implements types.ProtocolObject.
-func (cs *contractSet) DecodeFrom(d *types.Decoder) {
-	num := d.ReadUint64()
-	cs.contracts = make([]rhpv2.ContractRevision, 0, num)
-	var cr rhpv2.ContractRevision
-	for num > 0 {
-		cr.Revision.DecodeFrom(d)
-		cr.Signatures[0].DecodeFrom(d)
-		cr.Signatures[1].DecodeFrom(d)
-		cs.contracts = append(cs.contracts, cr)
-		num--
-	}
-}
-
-// extendedContract contains additionally the block height the contract
-// was created at.
+// extendedContract contains the contract and its metadata.
 type extendedContract struct {
-	contract    rhpv2.ContractRevision
-	startHeight uint64
+	contract            rhpv2.ContractRevision
+	startHeight         uint64
+	totalCost           types.Currency
+	uploadSpending      types.Currency
+	downloadSpending    types.Currency
+	fundAccountSpending types.Currency
 }
 
 // extendedContractSet is a collection of extendedContracts.
@@ -281,6 +259,10 @@ func (ecs *extendedContractSet) DecodeFrom(d *types.Decoder) {
 		ec.contract.Signatures[0].DecodeFrom(d)
 		ec.contract.Signatures[1].DecodeFrom(d)
 		ec.startHeight = d.ReadUint64()
+		ec.totalCost.DecodeFrom(d)
+		ec.uploadSpending.DecodeFrom(d)
+		ec.downloadSpending.DecodeFrom(d)
+		ec.fundAccountSpending.DecodeFrom(d)
 		ecs.contracts = append(ecs.contracts, ec)
 		num--
 	}
@@ -354,6 +336,7 @@ func (w *worker) satelliteRequestContractsHandler(jc jape.Context) {
 		contracts = append(contracts, c.ID)
 	}
 
+	var recs []api.ContractSpendingRecord
 	for _, ec := range ecs.contracts {
 		id := ec.contract.ID()
 		contracts = append(contracts, id)
@@ -361,12 +344,25 @@ func (w *worker) satelliteRequestContractsHandler(jc jape.Context) {
 		if err == nil {
 			continue
 		}
-		a, err := w.bus.AddContract(ctx, ec.contract, ec.contract.RenterFunds(), ec.startHeight, cfg.PublicKey)
+		a, err := w.bus.AddContract(ctx, ec.contract, ec.totalCost, ec.startHeight, cfg.PublicKey)
 		if jc.Check("couldn't add contract", err) != nil {
 			return
 		}
 		added = append(added, a)
+		recs = append(recs, api.ContractSpendingRecord{
+			ContractSpending: api.ContractSpending{
+				Uploads:     ec.uploadSpending,
+				Downloads:   ec.downloadSpending,
+				FundAccount: ec.fundAccountSpending,
+			},
+			ContractID:  id,
+		})
 	}
+	err = w.bus.RecordContractSpending(ctx, recs)
+	if jc.Check("couldn't update contract spendings", err) != nil {
+		return
+	}
+
 	err = w.bus.SetContractSet(ctx, "autopilot", contracts)
 	if jc.Check("couldn't set contract set", err) != nil {
 		return
@@ -432,19 +428,13 @@ func (w *worker) satelliteFormContractsHandler(jc jape.Context) {
 	fr.EncodeToWithoutSignature(h.E)
 	fr.Signature = sk.SignHash(h.Sum())
 
-	state, err := w.bus.ConsensusState(ctx)
-	if err != nil {
-		jc.Check("ERROR", errors.New("could not get consensus state"))
-		return
-	}
-
-	var cs contractSet
+	var ecs extendedContractSet
 	err = w.withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
 		if err := t.WriteRequest(specifierFormContracts, &fr); err != nil {
 			return err
 		}
 
-		if err := t.ReadResponse(&cs, 65536); err != nil {
+		if err := t.ReadResponse(&ecs, 65536); err != nil {
 			return err
 		}
 
@@ -463,10 +453,10 @@ func (w *worker) satelliteFormContractsHandler(jc jape.Context) {
 		contracts = append(contracts, c.ID)
 	}
 
-	for _, cr := range cs.contracts {
-		id := cr.ID()
+	for _, ec := range ecs.contracts {
+		id := ec.contract.ID()
 		contracts = append(contracts, id)
-		a, err := w.bus.AddContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, cfg.PublicKey)
+		a, err := w.bus.AddContract(ctx, ec.contract, ec.totalCost, ec.startHeight, cfg.PublicKey)
 		if jc.Check("couldn't add contract", err) != nil {
 			return
 		}
@@ -554,13 +544,13 @@ func (w *worker) satelliteRenewContractsHandler(jc jape.Context) {
 	rr.EncodeToWithoutSignature(h.E)
 	rr.Signature = sk.SignHash(h.Sum())
 
-	var cs contractSet
+	var ecs extendedContractSet
 	err = w.withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
 		if err := t.WriteRequest(specifierRenewContracts, &rr); err != nil {
 			return err
 		}
 
-		if err := t.ReadResponse(&cs, 65536); err != nil {
+		if err := t.ReadResponse(&ecs, 65536); err != nil {
 			return err
 		}
 
@@ -573,19 +563,14 @@ func (w *worker) satelliteRenewContractsHandler(jc jape.Context) {
 
 	var added []api.ContractMetadata
 
-	for _, cr := range cs.contracts {
-		state, err := w.bus.ConsensusState(ctx)
-		if err != nil {
-			jc.Check("ERROR", errors.New("could not get consensus state"))
-			return
-		}
-		host := cr.HostKey()
+	for _, ec := range ecs.contracts {
+		host := ec.contract.HostKey()
 		from, ok := renewedFrom[host]
 		var a api.ContractMetadata
 		if ok {
-			a, err = w.bus.AddRenewedContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, from, cfg.PublicKey)
+			a, err = w.bus.AddRenewedContract(ctx, ec.contract, ec.totalCost, ec.startHeight, from, cfg.PublicKey)
 		} else {
-			a, err = w.bus.AddContract(ctx, cr, cr.RenterFunds(), state.BlockHeight, cfg.PublicKey)
+			a, err = w.bus.AddContract(ctx, ec.contract, ec.totalCost, ec.startHeight, cfg.PublicKey)
 		}
 		if jc.Check("couldn't add contract", err) != nil {
 			return
