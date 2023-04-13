@@ -44,6 +44,7 @@ type formRequest struct {
 	MaxStoragePrice      types.Currency
 	MaxSectorAccessPrice types.Currency
 	MinMaxCollateral     types.Currency
+	BlockHeightLeeway    uint64
 
 	Signature types.Signature
 }
@@ -69,6 +70,7 @@ type renewRequest struct {
 	MaxStoragePrice      types.Currency
 	MaxSectorAccessPrice types.Currency
 	MinMaxCollateral     types.Currency
+	BlockHeightLeeway    uint64
 
 	Signature types.Signature
 }
@@ -118,6 +120,7 @@ func (fr *formRequest) EncodeTo(e *types.Encoder) {
 	fr.MaxStoragePrice.EncodeTo(e)
 	fr.MaxSectorAccessPrice.EncodeTo(e)
 	fr.MinMaxCollateral.EncodeTo(e)
+	e.WriteUint64(fr.BlockHeightLeeway)
 	fr.Signature.EncodeTo(e)
 }
 
@@ -140,6 +143,7 @@ func (fr *formRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	fr.MaxStoragePrice.EncodeTo(e)
 	fr.MaxSectorAccessPrice.EncodeTo(e)
 	fr.MinMaxCollateral.EncodeTo(e)
+	e.WriteUint64(fr.BlockHeightLeeway)
 }
 
 // DecodeFrom implements types.ProtocolObject.
@@ -168,6 +172,7 @@ func (rr *renewRequest) EncodeTo(e *types.Encoder) {
 	rr.MaxStoragePrice.EncodeTo(e)
 	rr.MaxSectorAccessPrice.EncodeTo(e)
 	rr.MinMaxCollateral.EncodeTo(e)
+	e.WriteUint64(rr.BlockHeightLeeway)
 	rr.Signature.EncodeTo(e)
 }
 
@@ -193,6 +198,7 @@ func (rr *renewRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	rr.MaxStoragePrice.EncodeTo(e)
 	rr.MaxSectorAccessPrice.EncodeTo(e)
 	rr.MinMaxCollateral.EncodeTo(e)
+	e.WriteUint64(rr.BlockHeightLeeway)
 }
 
 // DecodeFrom implements types.ProtocolObject.
@@ -429,6 +435,7 @@ func (w *worker) satelliteFormContractsHandler(jc jape.Context) {
 		MaxStoragePrice:      gp.GougingSettings.MaxStoragePrice,
 		MaxSectorAccessPrice: gp.GougingSettings.MaxRPCPrice.Mul64(10),
 		MinMaxCollateral:     gp.GougingSettings.MinMaxCollateral,
+		BlockHeightLeeway:    uint64(gp.GougingSettings.HostBlockHeightLeeway),
 	}
 
 	h := types.NewHasher()
@@ -545,6 +552,7 @@ func (w *worker) satelliteRenewContractsHandler(jc jape.Context) {
 		MaxStoragePrice:      gp.GougingSettings.MaxStoragePrice,
 		MaxSectorAccessPrice: gp.GougingSettings.MaxRPCPrice.Mul64(10),
 		MinMaxCollateral:     gp.GougingSettings.MinMaxCollateral,
+		BlockHeightLeeway:    uint64(gp.GougingSettings.HostBlockHeightLeeway),
 	}
 
 	h := types.NewHasher()
