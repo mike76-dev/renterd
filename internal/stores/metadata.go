@@ -338,20 +338,24 @@ func (s *SQLStore) AddRenewedContract(ctx context.Context, c rhpv2.ContractRevis
 	var renewed dbContract
 
 	if err = s.retryTransaction(func(tx *gorm.DB) error {
-		// Fetch contract we renew from.
-		oldContract, err := contract(tx, fileContractID(renewedFrom))
-		if err != nil {
-			return err
-		}
-
 		// Check if the old contract is in the archive already.
 		var ac dbArchivedContract
 		if err = tx.
 			Where(&dbArchivedContract{
-				ContractCommon: ContractCommon{FCID: fileContractID(oldContract.FCID)},
+				ContractCommon: ContractCommon{FCID: fileContractID(renewedFrom)},
 			}).
 			Take(&ac).
-			Error; err != nil {
+			Error; err == nil {
+			err = tx.Delete(&ac).Error
+			if err != nil {
+				return err
+			}
+		} else {
+			// Fetch contract we renew from.
+			oldContract, err := contract(tx, fileContractID(renewedFrom))
+			if err != nil {
+				return err
+			}
 
 			// Create copy in archive.
 			err = tx.Create(&dbArchivedContract{
@@ -379,6 +383,32 @@ func (s *SQLStore) AddRenewedContract(ctx context.Context, c rhpv2.ContractRevis
 			if err != nil {
 				return err
 			}
+
+			// Update the old contract in the contract set to the new one.
+			err = tx.Table("contract_set_contracts").
+				Where("db_contract_id = ?", oldContract.ID).
+				Update("db_contract_id", renewed.ID).Error
+			if err != nil {
+				return err
+			}
+
+			// Update the contract_sectors table from the old contract to the
+			// new one.
+			err = tx.Table("contract_sectors").
+				Where("db_contract_id = ?", oldContract.ID).
+				Update("db_contract_id", renewed.ID).Error
+			if err != nil {
+				return err
+			}
+
+			// Finally delete the old contract.
+			res := tx.Delete(&oldContract)
+			if err := res.Error; err != nil {
+				return err
+			}
+			if res.RowsAffected != 1 {
+				return fmt.Errorf("expected to delete 1 row, deleted %d", res.RowsAffected)
+			}
 		}
 
 		// Add the new contract.
@@ -388,32 +418,6 @@ func (s *SQLStore) AddRenewedContract(ctx context.Context, c rhpv2.ContractRevis
 		}
 
 		s.knownContracts[c.ID()] = struct{}{}
-
-		// Update the old contract in the contract set to the new one.
-		err = tx.Table("contract_set_contracts").
-			Where("db_contract_id = ?", oldContract.ID).
-			Update("db_contract_id", renewed.ID).Error
-		if err != nil {
-			return err
-		}
-
-		// Update the contract_sectors table from the old contract to the new
-		// one.
-		err = tx.Table("contract_sectors").
-			Where("db_contract_id = ?", oldContract.ID).
-			Update("db_contract_id", renewed.ID).Error
-		if err != nil {
-			return err
-		}
-
-		// Finally delete the old contract.
-		res := tx.Delete(&oldContract)
-		if err := res.Error; err != nil {
-			return err
-		}
-		if res.RowsAffected != 1 {
-			return fmt.Errorf("expected to delete 1 row, deleted %d", res.RowsAffected)
-		}
 
 		return nil
 	}); err != nil {

@@ -237,6 +237,7 @@ type extendedContract struct {
 	uploadSpending      types.Currency
 	downloadSpending    types.Currency
 	fundAccountSpending types.Currency
+	renewedFrom         types.FileContractID
 }
 
 // extendedContractSet is a collection of extendedContracts.
@@ -263,6 +264,7 @@ func (ecs *extendedContractSet) DecodeFrom(d *types.Decoder) {
 		ec.uploadSpending.DecodeFrom(d)
 		ec.downloadSpending.DecodeFrom(d)
 		ec.fundAccountSpending.DecodeFrom(d)
+		ec.renewedFrom.DecodeFrom(d)
 		ecs.contracts = append(ecs.contracts, ec)
 		num--
 	}
@@ -344,7 +346,12 @@ func (w *worker) satelliteRequestContractsHandler(jc jape.Context) {
 		if err == nil {
 			continue
 		}
-		a, err := w.bus.AddContract(ctx, ec.contract, ec.totalCost, ec.startHeight, cfg.PublicKey)
+		var a api.ContractMetadata
+		if (ec.renewedFrom == types.FileContractID{}) {
+			a, err = w.bus.AddContract(ctx, ec.contract, ec.totalCost, ec.startHeight, cfg.PublicKey)
+		} else {
+			a, err = w.bus.AddRenewedContract(ctx, ec.contract, ec.totalCost, ec.startHeight, ec.renewedFrom, cfg.PublicKey)
+		}
 		if jc.Check("couldn't add contract", err) != nil {
 			return
 		}
