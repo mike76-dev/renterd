@@ -276,21 +276,6 @@ func (ecs *extendedContractSet) DecodeFrom(d *types.Decoder) {
 	}
 }
 
-// rpcMessage represents a simple RPC response.
-type rpcMessage struct {
-	Error string
-}
-
-// EncodeTo implements types.ProtocolObject.
-func (r *rpcMessage) EncodeTo(e *types.Encoder) {
-	// Nothing to do here.
-}
-
-// DecodeFrom implements types.ProtocolObject.
-func (r *rpcMessage) DecodeFrom(d *types.Decoder) {
-	r.Error = d.ReadString()
-}
-
 // generateKeyPair generates the keypair from a given seed.
 func generateKeyPair(seed []byte) (types.PublicKey, types.PrivateKey) {
 	privKey := types.NewPrivateKeyFromSeed(seed)
@@ -655,7 +640,6 @@ func satelliteUpdateRevision(rev rhpv2.ContractRevision, seed []byte, addr strin
 	ur.EncodeToWithoutSignature(h.E)
 	ur.Signature = sk.SignHash(h.Sum())
 
-	var resp rpcMessage
 	ctx := context.Background()
 	conn, err := dial(ctx, addr, pubKey)
 	if err != nil {
@@ -689,13 +673,14 @@ func satelliteUpdateRevision(rev rhpv2.ContractRevision, seed []byte, addr strin
 		return
 	}
 
+	var resp rhpv2.RPCError
 	err = t.ReadResponse(&resp, 1024)
 	if err != nil {
 		return err
 	}
 
-	if resp.Error != "" {
-		return errors.New(resp.Error)
+	if resp.Description != "" {
+		return errors.New(resp.Description)
 	}
 
 	return
