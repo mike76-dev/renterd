@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	rhpv2 "go.sia.tech/core/rhp/v2"
@@ -14,6 +15,7 @@ import (
 	"go.sia.tech/core/types"
 	"go.sia.tech/jape"
 	"go.sia.tech/renterd/api"
+	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
 )
 
@@ -53,16 +55,19 @@ func (c *Client) RHPForm(ctx context.Context, endHeight uint64, hk types.PublicK
 }
 
 // RHPRenew renews an existing contract with a host.
-func (c *Client) RHPRenew(ctx context.Context, fcid types.FileContractID, endHeight uint64, hk types.PublicKey, hostIP string, renterAddress types.Address, renterFunds, newCollateral types.Currency) (rhpv2.ContractRevision, []types.Transaction, error) {
+func (c *Client) RHPRenew(ctx context.Context, fcid types.FileContractID, endHeight uint64, hk types.PublicKey, siamuxAddr string, hostAddress, renterAddress types.Address, renterFunds, newCollateral types.Currency, windowSize uint64) (rhpv2.ContractRevision, []types.Transaction, error) {
 	req := api.RHPRenewRequest{
 		ContractID:    fcid,
 		EndHeight:     endHeight,
+		HostAddress:   hostAddress,
 		HostKey:       hk,
-		HostIP:        hostIP,
 		NewCollateral: newCollateral,
 		RenterAddress: renterAddress,
 		RenterFunds:   renterFunds,
+		SiamuxAddr:    siamuxAddr,
+		WindowSize:    windowSize,
 	}
+
 	var resp api.RHPRenewResponse
 	err := c.c.WithContext(ctx).POST("/rhp/renew", req, &resp)
 	return resp.Contract, resp.TransactionSet, err
@@ -92,7 +97,7 @@ func (c *Client) RHPSync(ctx context.Context, contractID types.FileContractID, h
 }
 
 // RHPPriceTable fetches a price table for a host.
-func (c *Client) RHPPriceTable(ctx context.Context, hostKey types.PublicKey, siamuxAddr string) (pt rhpv3.HostPriceTable, err error) {
+func (c *Client) RHPPriceTable(ctx context.Context, hostKey types.PublicKey, siamuxAddr string) (pt hostdb.HostPriceTable, err error) {
 	req := api.RHPPriceTableRequest{
 		HostKey:    hostKey,
 		SiamuxAddr: siamuxAddr,
@@ -152,6 +157,7 @@ func (c *Client) UploadObject(ctx context.Context, r io.Reader, path string) (er
 }
 
 func (c *Client) object(ctx context.Context, path string, w io.Writer, entries *[]string) (err error) {
+	path = strings.TrimLeft(path, "/")
 	c.c.Custom("GET", fmt.Sprintf("/objects/%s", path), nil, (*[]string)(nil))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%v/objects/%v", c.c.BaseURL, path), nil)
@@ -186,12 +192,14 @@ func (c *Client) ObjectEntries(ctx context.Context, path string) (entries []stri
 // DownloadObject downloads the object at the given path, writing its data to
 // w.
 func (c *Client) DownloadObject(ctx context.Context, w io.Writer, path string) (err error) {
+	path = strings.TrimLeft(path, "/")
 	err = c.object(ctx, path, w, nil)
 	return
 }
 
 // DeleteObject deletes the object at the given path.
 func (c *Client) DeleteObject(ctx context.Context, path string) (err error) {
+	path = strings.TrimLeft(path, "/")
 	err = c.c.WithContext(ctx).DELETE(fmt.Sprintf("/objects/%s", path))
 	return
 }

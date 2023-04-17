@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
+	"strings"
 	"time"
 
 	rhpv2 "go.sia.tech/core/rhp/v2"
@@ -187,20 +188,22 @@ func (c *Client) WalletPrepareForm(ctx context.Context, renterAddress types.Addr
 }
 
 // WalletPrepareRenew funds and signs a contract renewal transaction.
-func (c *Client) WalletPrepareRenew(ctx context.Context, contract types.FileContractRevision, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, newCollateral types.Currency, hostKey types.PublicKey, hostSettings rhpv2.HostSettings, endHeight uint64) ([]types.Transaction, types.Currency, error) {
+func (c *Client) WalletPrepareRenew(ctx context.Context, revision types.FileContractRevision, hostAddress, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, newCollateral types.Currency, hostKey types.PublicKey, pt rhpv3.HostPriceTable, endHeight, windowSize uint64) (api.WalletPrepareRenewResponse, error) {
 	req := api.WalletPrepareRenewRequest{
-		Contract:      contract,
+		Revision:      revision,
 		EndHeight:     endHeight,
+		HostAddress:   hostAddress,
 		HostKey:       hostKey,
-		HostSettings:  hostSettings,
+		PriceTable:    pt,
 		NewCollateral: newCollateral,
 		RenterAddress: renterAddress,
 		RenterFunds:   renterFunds,
 		RenterKey:     renterKey,
+		WindowSize:    windowSize,
 	}
 	var resp api.WalletPrepareRenewResponse
 	err := c.c.WithContext(ctx).POST("/wallet/prepare/renew", req, &resp)
-	return resp.TransactionSet, resp.FinalPayment, err
+	return resp, err
 }
 
 // WalletPending returns the txpool transactions that are relevant to the
@@ -471,7 +474,7 @@ func (c *Client) Object(ctx context.Context, path, prefix string, offset, limit 
 	values.Set("prefix", prefix)
 	values.Set("offset", fmt.Sprint(offset))
 	values.Set("limit", fmt.Sprint(limit))
-
+	path = strings.TrimLeft(path, "/")
 	var or api.ObjectsResponse
 	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/objects/%s?"+values.Encode(), path), &or)
 	if or.Object != nil {

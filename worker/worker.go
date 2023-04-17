@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gotd/contrib/http_range"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -27,85 +28,55 @@ import (
 	"go.sia.tech/renterd/internal/tracing"
 	"go.sia.tech/renterd/metrics"
 	"go.sia.tech/renterd/object"
+	"go.sia.tech/siad/modules"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/blake2b"
 	"lukechampine.com/frand"
 )
 
 const (
-	lockingPriorityRenew      = 100 // highest
-	lockingPriorityPriceTable = 95
-	lockingPriorityFunding    = 90
-	lockingPrioritySyncing    = 80
+	lockingPriorityActiveContractRevision = 100 // highest
+	lockingPriorityRenew                  = 80
+	lockingPriorityPriceTable             = 60
+	lockingPriorityFunding                = 40
+	lockingPrioritySyncing                = 20
+	lockingPriorityUpload                 = 1 // lowest
 
-	lockingDurationRenew      = time.Minute
-	lockingDurationPriceTable = 30 * time.Second
-	lockingDurationFunding    = 30 * time.Second
-	lockingDurationSyncing    = 30 * time.Second
+	lockingDurationActiveContractRevision = time.Minute
+	lockingDurationRenew                  = time.Minute
+	lockingDurationPriceTable             = 30 * time.Second
+	lockingDurationFunding                = 30 * time.Second
+	lockingDurationSyncing                = 30 * time.Second
 
 	queryStringParamContractSet = "contractset"
 	queryStringParamMinShards   = "minshards"
 	queryStringParamTotalShards = "totalshards"
 )
 
-// parseRange parses a Range header string as per RFC 7233. Only the first range
-// is returned. If no range is specified, parseRange returns 0, size.
-func parseRange(s string, size int64) (offset, length int64, _ error) {
-	if s == "" {
-		return 0, size, nil
+// rangedResponseWriter is a wrapper around http.ResponseWriter. The difference
+// to the standard http.ResponseWriter is that it allows for overriding the
+// default status code that is sent upon the first call to Write with a custom
+// one.
+type rangedResponseWriter struct {
+	rw                http.ResponseWriter
+	defaultStatusCode int
+	headerWritten     bool
+}
+
+func (rw *rangedResponseWriter) Write(p []byte) (int, error) {
+	if !rw.headerWritten {
+		rw.WriteHeader(rw.defaultStatusCode)
 	}
-	const b = "bytes="
-	if !strings.HasPrefix(s, b) {
-		return 0, 0, errors.New("invalid range")
-	}
-	rs := strings.Split(s[len(b):], ",")
-	if len(rs) == 0 {
-		return 0, 0, errors.New("invalid range")
-	}
-	ra := strings.TrimSpace(rs[0])
-	if ra == "" {
-		return 0, 0, errors.New("invalid range")
-	}
-	i := strings.Index(ra, "-")
-	if i < 0 {
-		return 0, 0, errors.New("invalid range")
-	}
-	start, end := strings.TrimSpace(ra[:i]), strings.TrimSpace(ra[i+1:])
-	if start == "" {
-		if end == "" || end[0] == '-' {
-			return 0, 0, errors.New("invalid range")
-		}
-		i, err := strconv.ParseInt(end, 10, 64)
-		if i < 0 || err != nil {
-			return 0, 0, errors.New("invalid range")
-		}
-		if i > size {
-			i = size
-		}
-		offset = size - i
-		length = size - offset
-	} else {
-		i, err := strconv.ParseInt(start, 10, 64)
-		if err != nil || i < 0 {
-			return 0, 0, errors.New("invalid range")
-		} else if i >= size {
-			return 0, 0, errors.New("invalid range")
-		}
-		offset = i
-		if end == "" {
-			length = size - offset
-		} else {
-			i, err := strconv.ParseInt(end, 10, 64)
-			if err != nil || offset > i {
-				return 0, 0, errors.New("invalid range")
-			}
-			if i >= size {
-				i = size - 1
-			}
-			length = i - offset + 1
-		}
-	}
-	return offset, length, nil
+	return rw.rw.Write(p)
+}
+
+func (rw *rangedResponseWriter) Header() http.Header {
+	return rw.rw.Header()
+}
+
+func (rw *rangedResponseWriter) WriteHeader(statusCode int) {
+	rw.headerWritten = true
+	rw.rw.WriteHeader(statusCode)
 }
 
 func errToStr(err error) string {
@@ -229,6 +200,7 @@ type Bus interface {
 	AccountStore
 	contractLocker
 
+	BroadcastTransaction(ctx context.Context, txns []types.Transaction) error
 	ConsensusState(ctx context.Context) (api.ConsensusState, error)
 
 	ActiveContracts(ctx context.Context) ([]api.ContractMetadata, error)
@@ -251,7 +223,8 @@ type Bus interface {
 
 	WalletDiscard(ctx context.Context, txn types.Transaction) error
 	WalletPrepareForm(ctx context.Context, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, hostCollateral types.Currency, hostKey types.PublicKey, hostSettings rhpv2.HostSettings, endHeight uint64) (txns []types.Transaction, err error)
-	WalletPrepareRenew(ctx context.Context, contract types.FileContractRevision, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, newCollateral types.Currency, hostKey types.PublicKey, hostSettings rhpv2.HostSettings, endHeight uint64) ([]types.Transaction, types.Currency, error)
+	WalletPrepareRenew(ctx context.Context, revision types.FileContractRevision, hostAddress, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, newCollateral types.Currency, hostKey types.PublicKey, pt rhpv3.HostPriceTable, endHeight, windowSize uint64) (api.WalletPrepareRenewResponse, error)
+	WalletSign(ctx context.Context, txn *types.Transaction, toSign []types.Hash256, cf types.CoveredFields) error
 
 	// Satellite.
 	Contract(ctx context.Context, id types.FileContractID) (contract api.ContractMetadata, err error)
@@ -325,6 +298,7 @@ type worker struct {
 
 	downloadSectorTimeout time.Duration
 	uploadSectorTimeout   time.Duration
+	uploadMaxOverdrive    int
 
 	logger *zap.SugaredLogger
 }
@@ -437,34 +411,6 @@ func (w *worker) withHostV2(ctx context.Context, contractID types.FileContractID
 	})
 }
 
-func (w *worker) withRevisionV2(ctx context.Context, contractID types.FileContractID, hk types.PublicKey, hostIP string, lockPriority int, lockDuration time.Duration, fn func(revision types.FileContractRevision) error) error {
-	// acquire contract lock
-	if lockID, err := w.AcquireContract(ctx, contractID, lockPriority, lockDuration); err != nil {
-		return fmt.Errorf("%v: %w", "failed to acquire contract for funding EA", err)
-	} else {
-		defer func() {
-			if err := w.ReleaseContract(ctx, contractID, lockID); err != nil {
-				w.logger.Errorw(fmt.Sprintf("failed to release contract, err: %v", err), "hk", hk, "fcid", contractID)
-			}
-		}()
-	}
-
-	// fetch contract revision
-	var revision types.FileContractRevision
-	if err := w.withHostV2(ctx, contractID, hk, hostIP, func(ss sectorStore) error {
-		rev, err := ss.(*sharedSession).Revision(ctx)
-		if err != nil {
-			return err
-		}
-		revision = rev.Revision
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	return fn(revision)
-}
-
 func (w *worker) withRevisionV3(ctx context.Context, contractID types.FileContractID, hk types.PublicKey, siamuxAddr string, lockPriority int, lockDuration time.Duration, fn func(revision types.FileContractRevision) error) error {
 	// acquire contract lock
 	if lockID, err := w.AcquireContract(ctx, contractID, lockPriority, lockDuration); err != nil {
@@ -544,36 +490,43 @@ func (w *worker) rhpScanHandler(jc jape.Context) {
 		defer cancel()
 	}
 
+	// defer scan result
+	var err error
 	var settings rhpv2.HostSettings
+	var priceTable rhpv3.HostPriceTable
+	defer func() {
+		w.recordScan(rsr.HostKey, priceTable, settings, err)
+	}()
+
+	// fetch the host settings
 	start := time.Now()
-	pingErr := w.withTransportV2(ctx, rsr.HostKey, rsr.HostIP, func(t *rhpv2.Transport) (err error) {
-		settings, err = RPCSettings(ctx, t)
+	err = w.withTransportV2(ctx, rsr.HostKey, rsr.HostIP, func(t *rhpv2.Transport) (err error) {
+		if settings, err = RPCSettings(ctx, t); err == nil {
+			// NOTE: we overwrite the NetAddress with the host address here since we
+			// just used it to dial the host we know it's valid
+			settings.NetAddress = rsr.HostIP
+		}
 		return err
 	})
 	elapsed := time.Since(start)
 
-	var pt rhpv3.HostPriceTable
-	ptErr := withTransportV3(ctx, rsr.HostKey, settings.SiamuxAddr(), func(t *rhpv3.Transport) (err error) {
-		pt, err = RPCPriceTable(t, func(pt rhpv3.HostPriceTable) (rhpv3.PaymentMethod, error) { return nil, nil })
-		return err
-	})
-
-	w.recordScan(rsr.HostKey, pt, settings, pingErr)
-
-	var scanErrStr string
-	if pingErr != nil {
-		scanErrStr = pingErr.Error()
+	// fetch the host pricetable
+	if err == nil {
+		err = withTransportV3(ctx, rsr.HostKey, settings.SiamuxAddr(), func(t *rhpv3.Transport) (err error) {
+			priceTable, err = RPCPriceTable(t, func(pt rhpv3.HostPriceTable) (rhpv3.PaymentMethod, error) { return nil, nil })
+			return err
+		})
 	}
-	if ptErr != nil {
-		if scanErrStr != "" {
-			scanErrStr += "; "
-		}
-		scanErrStr += ptErr.Error()
+
+	// check error
+	var errStr string
+	if err != nil {
+		errStr = err.Error()
 	}
 
 	jc.Encode(api.RHPScanResponse{
 		Ping:      api.ParamDuration(elapsed),
-		ScanError: scanErrStr,
+		ScanError: errStr,
 		Settings:  settings,
 	})
 }
@@ -624,7 +577,25 @@ func (w *worker) rhpPriceTableHandler(jc jape.Context) {
 		return
 	}
 
-	jc.Encode(pt)
+	jc.Encode(hostdb.HostPriceTable{
+		HostPriceTable: pt,
+		Expiry:         time.Now().Add(pt.Validity),
+	})
+}
+
+func (w *worker) discardTxnOnErr(ctx context.Context, txn types.Transaction, errContext string, err *error) {
+	if *err == nil {
+		return
+	}
+	_, span := tracing.Tracer.Start(ctx, "discardTxn")
+	defer span.End()
+	// Attach the span to a new context derived from the background context.
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	timeoutCtx = trace.ContextWithSpan(timeoutCtx, span)
+	if err := w.bus.WalletDiscard(timeoutCtx, txn); err != nil {
+		w.logger.Errorf("%v: failed to discard txn: %v", err)
+	}
 }
 
 func (w *worker) rhpFormHandler(jc jape.Context) {
@@ -655,6 +626,9 @@ func (w *worker) rhpFormHandler(jc jape.Context) {
 		if err != nil {
 			return err
 		}
+		// NOTE: we overwrite the NetAddress with the host address here since we
+		// just used it to dial the host we know it's valid
+		hostSettings.NetAddress = hostIP
 
 		if breakdown := GougingCheckerFromContext(ctx).Check(&hostSettings, nil); breakdown.Gouging() {
 			return fmt.Errorf("failed to form contract, gouging check failed: %v", breakdown.Reasons())
@@ -664,10 +638,10 @@ func (w *worker) rhpFormHandler(jc jape.Context) {
 		if err != nil {
 			return err
 		}
+		defer w.discardTxnOnErr(ctx, renterTxnSet[len(renterTxnSet)-1], "rhpFormHandler", &err)
 
 		contract, txnSet, err = RPCFormContract(ctx, t, renterKey, renterTxnSet)
 		if err != nil {
-			w.bus.WalletDiscard(ctx, renterTxnSet[len(renterTxnSet)-1])
 			return err
 		}
 		return
@@ -675,6 +649,13 @@ func (w *worker) rhpFormHandler(jc jape.Context) {
 	if jc.Check("couldn't form contract", err) != nil {
 		return
 	}
+
+	// broadcast the transaction set
+	err = w.bus.BroadcastTransaction(jc.Request.Context(), txnSet)
+	if err != nil && !isErrDuplicateTransactionSet(err) {
+		w.logger.Warnf("failed to broadcast formation txn set: %v", err)
+	}
+
 	jc.Encode(api.RHPFormResponse{
 		ContractID:     contract.ID(),
 		Contract:       contract,
@@ -691,30 +672,30 @@ func (w *worker) rhpRenewHandler(jc jape.Context) {
 		return
 	}
 
+	// get consensus state
+	cs, err := w.bus.ConsensusState(ctx)
+	if jc.Check("could not get consensus state", err) != nil {
+		return
+	}
+
 	// attach gouging checker
 	gp, err := w.bus.GougingParams(ctx)
 	if jc.Check("could not get gouging parameters", err) != nil {
 		return
 	}
 	ctx = WithGougingChecker(ctx, gp)
+	rk := w.deriveRenterKey(rrr.HostKey)
 
 	// renew the contract
-	var renewed rhpv2.ContractRevision
-	var txnSet []types.Transaction
-	if jc.Check("couldn't renew contract", w.withRevisionV2(ctx, rrr.ContractID, rrr.HostKey, rrr.HostIP, lockingPriorityRenew, lockingDurationRenew, func(revision types.FileContractRevision) error {
-		return w.withHostV2(ctx, rrr.ContractID, rrr.HostKey, rrr.HostIP, func(ss sectorStore) error {
-			session := ss.(*sharedSession)
-			renewed, txnSet, err = session.RenewContract(ctx, func(rev types.FileContractRevision, host rhpv2.HostSettings) ([]types.Transaction, types.Currency, func(), error) {
-				renterTxnSet, finalPayment, err := w.bus.WalletPrepareRenew(ctx, rev, rrr.RenterAddress, w.deriveRenterKey(rrr.HostKey), rrr.RenterFunds, rrr.NewCollateral, rrr.HostKey, host, rrr.EndHeight)
-				if err != nil {
-					return nil, types.Currency{}, nil, err
-				}
-				return renterTxnSet, finalPayment, func() { w.bus.WalletDiscard(ctx, renterTxnSet[len(renterTxnSet)-1]) }, nil
-			})
-			return err
-		})
-	})) != nil {
+	renewed, txnSet, err := w.Renew(ctx, rrr, cs, rk)
+	if jc.Check("couldn't renew contract", err) != nil {
 		return
+	}
+
+	// broadcast the transaction set
+	err = w.bus.BroadcastTransaction(jc.Request.Context(), txnSet)
+	if err != nil && !isErrDuplicateTransactionSet(err) {
+		w.logger.Warnf("failed to broadcast renewal txn set: %v", err)
 	}
 
 	// send the response
@@ -938,16 +919,22 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 	// Read call. We can improve on this to some degree by buffering, but
 	// without knowing the exact ranges being requested, this will always be
 	// suboptimal. Thus, sadly, we have to roll our own range support.
-	offset, length, err := parseRange(jc.Request.Header.Get("Range"), obj.Size())
+	ranges, err := http_range.ParseRange(jc.Request.Header.Get("Range"), obj.Size())
 	if err != nil {
 		jc.Error(err, http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
-	if length < obj.Size() {
-		jc.ResponseWriter.WriteHeader(http.StatusPartialContent)
-		jc.ResponseWriter.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+length-1, obj.Size()))
+	var offset int64
+	length := obj.Size()
+	status := http.StatusOK
+	if len(ranges) > 0 {
+		status = http.StatusPartialContent
+		jc.ResponseWriter.Header().Set("Content-Range", ranges[0].ContentRange(obj.Size()))
+		offset, length = ranges[0].Start, ranges[0].Length
 	}
 	jc.ResponseWriter.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+	jc.ResponseWriter.Header().Set("Accept-Ranges", "bytes")
+	rw := rangedResponseWriter{rw: jc.ResponseWriter, defaultStatusCode: status}
 
 	// keep track of recent timings per host so we can favour faster hosts
 	performance := make(map[types.PublicKey]int64)
@@ -975,7 +962,7 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 		return
 	}
 
-	cw := obj.Key.Decrypt(jc.ResponseWriter, offset)
+	cw := obj.Key.Decrypt(&rw, offset)
 	for i, ss := range slabsForDownload(obj.Slabs, offset, length) {
 		// fetch contracts for the slab
 		contracts := contractsForSlab(ss.Slab)
@@ -1088,7 +1075,7 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 
 		// upload the slab
 		start := time.Now()
-		s, length, slowHosts, err = uploadSlab(ctx, w, lr, uint8(rs.MinShards), uint8(rs.TotalShards), contracts, &tracedContractLocker{w.bus}, w.uploadSectorTimeout, w.logger)
+		s, length, slowHosts, err = uploadSlab(ctx, w, lr, uint8(rs.MinShards), uint8(rs.TotalShards), contracts, &tracedContractLocker{w.bus}, w.uploadSectorTimeout, w.uploadMaxOverdrive, w.logger)
 		for _, h := range slowHosts {
 			slow[contracts[h].HostKey]++
 		}
@@ -1134,44 +1121,38 @@ func (w *worker) rhpActiveContractsHandlerGET(jc jape.Context) {
 		return
 	}
 
-	var hosttimeout api.ParamDuration
-	if jc.DecodeForm("hosttimeout", &hosttimeout) != nil {
+	var hosttimeout time.Duration
+	if jc.DecodeForm("hosttimeout", (*api.ParamDuration)(&hosttimeout)) != nil {
 		return
 	}
 
+	cs, err := w.bus.ConsensusState(ctx)
+	if jc.Check("could not get consensus state", err) != nil {
+		return
+	}
+	gp, err := w.bus.GougingParams(ctx)
+	if jc.Check("could not get gouging parameters", err) != nil {
+		return
+	}
+	ctx = WithGougingChecker(ctx, gp)
+
 	// fetch all contracts
 	var contracts []api.Contract
-	err = w.withHostsV2(jc.Request.Context(), busContracts, func(ss []sectorStore) error {
-		var errs HostErrorSet
-		for i, store := range ss {
-			func() {
-				ctx := jc.Request.Context()
-				if hosttimeout > 0 {
-					var cancel context.CancelFunc
-					ctx, cancel = context.WithTimeout(ctx, time.Duration(hosttimeout))
-					defer cancel()
-				}
-
-				rev, err := store.(*sharedSession).Revision(ctx)
-				if err != nil {
-					errs = append(errs, &HostError{HostKey: store.HostKey(), Err: err})
-					return
-				}
-				contracts = append(contracts, api.Contract{
-					ContractMetadata: busContracts[i],
-					Revision:         rev.Revision,
-				})
-			}()
+	var errs HostErrorSet
+	for _, contract := range busContracts {
+		rev, err := w.FetchRevision(ctx, hosttimeout, contract, cs.BlockHeight, lockingPriorityActiveContractRevision, lockingDurationActiveContractRevision)
+		if err != nil {
+			errs = append(errs, &HostError{HostKey: contract.HostKey, Err: err})
+			continue
 		}
-		if len(errs) > 0 {
-			return fmt.Errorf("couldn't retrieve contract(s): %s", errs.Error())
-		}
-		return nil
-	})
-
+		contracts = append(contracts, api.Contract{
+			ContractMetadata: contract,
+			Revision:         rev,
+		})
+	}
 	resp := api.ContractsResponse{Contracts: contracts}
-	if err != nil {
-		resp.Error = err.Error()
+	if errs != nil {
+		resp.Error = errs.Error()
 	}
 	jc.Encode(resp)
 }
@@ -1195,7 +1176,7 @@ func (w *worker) accountHandlerGET(jc jape.Context) {
 }
 
 // New returns an HTTP handler that serves the worker API.
-func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, l *zap.Logger) *worker {
+func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, maxUploadOverdrive int, l *zap.Logger) *worker {
 	w := &worker{
 		id:                    id,
 		bus:                   b,
@@ -1208,6 +1189,7 @@ func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionRecone
 		busFlushInterval:      busFlushInterval,
 		downloadSectorTimeout: downloadSectorTimeout,
 		uploadSectorTimeout:   uploadSectorTimeout,
+		uploadMaxOverdrive:    maxUploadOverdrive,
 		logger:                l.Sugar().Named("worker").Named(id),
 	}
 	go w.initAccounts(b) // to avoid blocking when the API is not working yet
@@ -1336,4 +1318,8 @@ func (w *worker) AcquireContract(ctx context.Context, fcid types.FileContractID,
 
 func (w *worker) ReleaseContract(ctx context.Context, fcid types.FileContractID, lockID uint64) (err error) {
 	return (&tracedContractLocker{w.bus}).ReleaseContract(ctx, fcid, lockID)
+}
+
+func isErrDuplicateTransactionSet(err error) bool {
+	return err != nil && strings.Contains(err.Error(), modules.ErrDuplicateTransactionSet.Error())
 }

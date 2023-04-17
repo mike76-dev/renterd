@@ -49,11 +49,17 @@ func ForEachAnnouncement(b types.Block, height uint64, fn func(types.PublicKey, 
 			} else if ha.Specifier != modules.PrefixHostAnnouncement {
 				continue
 			}
+
 			// verify signature
 			var hostKey types.PublicKey
 			copy(hostKey[:], ha.PublicKey.Key)
 			annHash := types.Hash256(crypto.HashObject(ha.HostAnnouncement)) // TODO
 			if !hostKey.VerifyHash(annHash, ha.Signature) {
+				continue
+			}
+
+			// verify net address
+			if ha.NetAddress == "" {
 				continue
 			}
 
@@ -93,18 +99,20 @@ type Interaction struct {
 // HostAddress contains the address of a specific host identified by a public
 // key.
 type HostAddress struct {
-	PublicKey  types.PublicKey `json:"public_key"`
-	NetAddress string          `json:"net_address"`
+	PublicKey  types.PublicKey `json:"publicKey"`
+	NetAddress string          `json:"netAddress"`
 }
 
 // A Host pairs a host's public key with a set of interactions.
 type Host struct {
-	KnownSince   time.Time           `json:"knownSince"`
-	PublicKey    types.PublicKey     `json:"public_key"`
-	NetAddress   string              `json:"netAddress"`
-	PriceTable   *HostPriceTable     `json:"priceTable"`
-	Settings     *rhpv2.HostSettings `json:"settings"`
-	Interactions Interactions        `json:"interactions"`
+	KnownSince       time.Time          `json:"knownSince"`
+	LastAnnouncement time.Time          `json:"lastAnnouncement"`
+	PublicKey        types.PublicKey    `json:"public_key"`
+	NetAddress       string             `json:"netAddress"`
+	PriceTable       HostPriceTable     `json:"priceTable"`
+	Settings         rhpv2.HostSettings `json:"settings"`
+	Interactions     Interactions       `json:"interactions"`
+	Scanned          bool               `json:"scanned"`
 }
 
 // A HostPriceTable extends the host price table with its expiry.
@@ -117,6 +125,11 @@ type HostPriceTable struct {
 type HostInfo struct {
 	Host
 	Blocked bool `json:"blocked"`
+}
+
+// IsAnnounced returns whether the host has been announced.
+func (h Host) IsAnnounced() bool {
+	return !h.LastAnnouncement.IsZero()
 }
 
 // IsOnline returns whether a host is considered online.
