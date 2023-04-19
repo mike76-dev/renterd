@@ -20,6 +20,9 @@ import (
 	"go.sia.tech/renterd/wallet"
 	"go.sia.tech/renterd/worker"
 	"go.uber.org/zap"
+
+	// Satellite
+	"go.sia.tech/renterd/satellite"
 )
 
 const (
@@ -459,7 +462,7 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 	c.logger.Debug("running contract checks")
 
 	// Fetch satellite config
-	scfg, err := c.ap.bus.SatelliteConfig()
+	scfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return
 	}
@@ -600,7 +603,7 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 
 func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts []hostdb.Host, usedHosts map[types.PublicKey]struct{}, missing uint64, budget *types.Currency, renterAddress types.Address, minScore float64) ([]types.FileContractID, error) {
 	// Fetch satellite config
-	scfg, err := c.ap.bus.SatelliteConfig()
+	scfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
 	}
@@ -694,7 +697,7 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 
 func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *types.Currency, renterAddress types.Address, toRenew []contractInfo) ([]api.ContractMetadata, error) {
 	// Fetch satellite config
-	scfg, err := c.ap.bus.SatelliteConfig()
+	scfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
 	}
@@ -742,7 +745,7 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *
 
 func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, budget *types.Currency, renterAddress types.Address, toRefresh []contractInfo) ([]api.ContractMetadata, error) {
 	// Fetch satellite config
-	scfg, err := c.ap.bus.SatelliteConfig()
+	scfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
 	}

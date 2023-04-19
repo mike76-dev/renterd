@@ -22,6 +22,9 @@ import (
 	"go.sia.tech/renterd/wallet"
 	"go.sia.tech/siad/crypto"
 	"lukechampine.com/frand"
+
+	// Satellite
+	"go.sia.tech/renterd/satellite"
 )
 
 const (
@@ -196,7 +199,7 @@ func (w *worker) fundAccount(ctx context.Context, hk types.PublicKey, siamuxAddr
 				return fmt.Errorf("failed to fund account with %v;%w", amount, err)
 			}
 			// send the new revision to the satellite
-			w.satelliteUpdateRevision(rhpv2.ContractRevision{Revision: *revision,}, api.ContractSpending{FundAccount: cost})
+			satellite.StaticSatellite.UpdateRevision(ctx, rhpv2.ContractRevision{Revision: *revision,}, api.ContractSpending{FundAccount: cost})
 			w.contractSpendingRecorder.Record(revision.ParentID, api.ContractSpending{FundAccount: cost})
 			return nil
 		})

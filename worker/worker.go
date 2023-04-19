@@ -32,6 +32,9 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/crypto/blake2b"
 	"lukechampine.com/frand"
+
+	// Satellite.
+	"go.sia.tech/renterd/satellite"
 )
 
 const (
@@ -225,21 +228,13 @@ type Bus interface {
 	WalletPrepareForm(ctx context.Context, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, hostCollateral types.Currency, hostKey types.PublicKey, hostSettings rhpv2.HostSettings, endHeight uint64) (txns []types.Transaction, err error)
 	WalletPrepareRenew(ctx context.Context, revision types.FileContractRevision, hostAddress, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, newCollateral types.Currency, hostKey types.PublicKey, pt rhpv3.HostPriceTable, endHeight, windowSize uint64) (api.WalletPrepareRenewResponse, error)
 	WalletSign(ctx context.Context, txn *types.Transaction, toSign []types.Hash256, cf types.CoveredFields) error
-
-	// Satellite.
-	Contract(ctx context.Context, id types.FileContractID) (contract api.ContractMetadata, err error)
-	AddContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, spk types.PublicKey) (added api.ContractMetadata, err error)
-	AddRenewedContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, renewedFrom types.FileContractID, spk types.PublicKey) (renewed api.ContractMetadata, err error)
-	SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) (err error)
-	SatelliteConfig() (cfg api.SatelliteConfig, err error)
-	SetSatelliteConfig(api.SatelliteConfig) error
 }
 
 // deriveSubKey can be used to derive a sub-masterkey from the worker's
 // masterkey to use for a specific purpose. Such as deriving more keys for
 // ephemeral accounts.
 func (w *worker) deriveSubKey(purpose string) types.PrivateKey {
-	cfg, err := w.bus.SatelliteConfig()
+	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return types.PrivateKey{}
 	}
@@ -1183,8 +1178,7 @@ func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionRecone
 		pool:                  newSessionPool(
 		                         sessionLockTimeout,
 		                         sessionReconectTimeout,
-		                         sessionTTL,
-		                         b),
+		                         sessionTTL),
 		masterKey:             masterKey,
 		busFlushInterval:      busFlushInterval,
 		downloadSectorTimeout: downloadSectorTimeout,
@@ -1192,7 +1186,7 @@ func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionRecone
 		uploadMaxOverdrive:    maxUploadOverdrive,
 		logger:                l.Sugar().Named("worker").Named(id),
 	}
-	go w.initAccounts(b) // to avoid blocking when the API is not working yet
+	go w.initAccounts(b) // to avoid blocking if the API is not available yet
 	w.initContractSpendingRecorder()
 	w.initPriceTables()
 	return w
@@ -1219,11 +1213,6 @@ func (w *worker) Handler() http.Handler {
 		"GET    /objects/*path": w.objectsHandlerGET,
 		"PUT    /objects/*path": w.objectsHandlerPUT,
 		"DELETE /objects/*path": w.objectsHandlerDELETE,
-
-		// Satellite.
-		"GET    /satellite/request": w.satelliteRequestContractsHandler,
-		"POST   /satellite/form":    w.satelliteFormContractsHandler,
-		"POST   /satellite/renew":   w.satelliteRenewContractsHandler,
 	}))
 }
 

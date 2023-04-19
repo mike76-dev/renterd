@@ -39,16 +39,6 @@ type WorkerConfig struct {
 	DownloadSectorTimeout   time.Duration
 	UploadSectorTimeout     time.Duration
 	UploadMaxOverdrive      int
-
-	// Satellite.
-	Satellite SatelliteConfig
-}
-
-type SatelliteConfig struct {
-	Enabled    bool
-	Address    string
-	PublicKey  types.PublicKey
-	RenterSeed []byte
 }
 
 type BusConfig struct {
@@ -59,9 +49,6 @@ type BusConfig struct {
 	PersistInterval time.Duration
 
 	DBDialector gorm.Dialector
-
-	// Satellite.
-	Satellite SatelliteConfig
 }
 
 type AutopilotConfig struct {
@@ -276,17 +263,7 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 		tp.TransactionPoolSubscribe(m)
 	}
 
-	// Create a store for the satellite persistence.
-	satelliteDir := filepath.Join(dir, "satellite")
-	if err := os.MkdirAll(satelliteDir, 0700); err != nil {
-		return nil, nil, err
-	}
-	s, err := stores.NewJSONSatelliteStore(satelliteDir)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	b, err := bus.New(syncer{g, tp}, chainManager{cs: cs, network: cfg.Network}, txpool{tp}, w, sqlStore, sqlStore, sqlStore, sqlStore, s, l, cfg.Satellite.Enabled, cfg.Satellite.Address, cfg.Satellite.PublicKey, cfg.Satellite.RenterSeed)
+	b, err := bus.New(syncer{g, tp}, chainManager{cs: cs, network: cfg.Network}, txpool{tp}, w, sqlStore, sqlStore, sqlStore, sqlStore, l)
 	if err != nil {
 		return nil, nil, err
 	}

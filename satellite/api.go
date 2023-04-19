@@ -1,11 +1,13 @@
-package api
+package satellite
 
 import (
+	rhpv2 "go.sia.tech/core/rhp/v2"
 	"go.sia.tech/core/types"
+	"go.sia.tech/renterd/api"
 )
 
-// SatelliteFormRequest is the request type for the /worker/satellite/form endpoint.
-type SatelliteFormRequest struct {
+// FormRequest is the request type for the FormContracts RPC.
+type FormRequest struct {
 	Hosts uint64 `json:"hosts"`
 	// Contract configuration (all units are blocks or bytes).
 	Period      uint64 `json:"period"`
@@ -15,8 +17,8 @@ type SatelliteFormRequest struct {
 	Storage     uint64 `json:"storage"`
 }
 
-// SatelliteRenewRequest is the request type for the /worker/satellite/renew endpoint.
-type SatelliteRenewRequest struct {
+// RenewRequest is the request type for the RenewContracts RPC.
+type RenewRequest struct {
 	Contracts []types.FileContractID `json:"contracts"`
 	// Contract configuration (all units are blocks or bytes).
 	Period      uint64 `json:"period"`
@@ -26,18 +28,25 @@ type SatelliteRenewRequest struct {
 	Storage     uint64 `json:"storage"`
 }
 
-// SatelliteResponse is the response type for the /bus/satellite/find endpoint.
-type SatelliteResponse struct {
-	Satellite types.PublicKey `json:"satellite"`
+// UpdateRevisionRequest is the request type for the UpdateRevision RPC.
+type UpdateRevisionRequest struct {
+	Revision rhpv2.ContractRevision `json:"revision"`
+	Spending api.ContractSpending   `json:"spending"`
 }
 
-// SatelliteAllResponse is the response type for the /bus/satellite/all endpoint.
-type SatelliteAllResponse struct {
+// ContractAddRequest is the request type for the /contract request.
+type ContractAddRequest struct {
+	FCID types.FileContractID `json:"id"`
+	PK   types.PublicKey      `json:"publickey"`
+}
+
+// ContractsAllResponse is the response type for the /all request.
+type ContractsAllResponse struct {
 	Contracts map[types.FileContractID]types.PublicKey `json:"contracts"`
 }
 
-// SatelliteConfig contains the satellite configuration parameters.
-type SatelliteConfig struct {
+// Config contains the satellite configuration parameters.
+type Config struct {
 	Enabled    bool            `json:"enabled"`
 	Address    string          `json:"address"`
 	PublicKey  types.PublicKey `json:"publicKey"`

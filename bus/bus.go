@@ -21,6 +21,9 @@ import (
 	"go.sia.tech/renterd/object"
 	"go.sia.tech/renterd/wallet"
 	"go.uber.org/zap"
+
+	// Satellite
+	"go.sia.tech/renterd/satellite"
 )
 
 type (
@@ -129,9 +132,6 @@ type bus struct {
 	ss  SettingStore
 
 	eas EphemeralAccountStore
-
-	// Satellite
-	sats SatelliteStore
 
 	logger        *zap.SugaredLogger
 	accounts      *accounts
@@ -636,16 +636,14 @@ func (b *bus) contractIDHandlerPOST(jc jape.Context) {
 		return
 	}
 
-	if (req.PublicKey != types.PublicKey{}) {
-		err := b.sats.AddContract(id, req.PublicKey)
-		if jc.Check("couldn't store contract ID", err) != nil {
-			return
-		}
-	}
-
 	a, err := b.ms.AddContract(jc.Request.Context(), req.Contract, req.TotalCost, req.StartHeight)
 	if jc.Check("couldn't store contract", err) == nil {
 		jc.Encode(a)
+	}
+
+	if (req.PublicKey != types.PublicKey{}) {
+		err := satellite.StaticSatellite.AddContract(id, req.PublicKey)
+		jc.Check("couldn't store contract ID", err)
 	}
 }
 
@@ -660,16 +658,14 @@ func (b *bus) contractIDRenewedHandlerPOST(jc jape.Context) {
 		return
 	}
 
-	if (req.PublicKey != types.PublicKey{}) {
-		err := b.sats.AddContract(id, req.PublicKey)
-		if jc.Check("couldn't store contract ID", err) != nil {
-			return
-		}
-	}
-
 	r, err := b.ms.AddRenewedContract(jc.Request.Context(), req.Contract, req.TotalCost, req.StartHeight, req.RenewedFrom)
 	if jc.Check("couldn't store contract", err) == nil {
 		jc.Encode(r)
+	}
+
+	if (req.PublicKey != types.PublicKey{}) {
+		err := satellite.StaticSatellite.AddContract(id, req.PublicKey)
+		jc.Check("couldn't store contract ID", err)
 	}
 }
 
@@ -678,17 +674,17 @@ func (b *bus) contractIDHandlerDELETE(jc jape.Context) {
 	if jc.DecodeParam("id", &id) != nil {
 		return
 	}
-	if jc.Check("couldn't delete contract ID", b.sats.DeleteContract(id)) != nil {
+	if jc.Check("couldn't remove contract", b.ms.ArchiveContract(jc.Request.Context(), id, api.ContractArchivalReasonRemoved)) != nil {
 		return
 	}
-	jc.Check("couldn't remove contract", b.ms.ArchiveContract(jc.Request.Context(), id, api.ContractArchivalReasonRemoved))
+	jc.Check("couldn't delete contract ID", satellite.StaticSatellite.DeleteContract(id))
 }
 
 func (b *bus) contractsAllHandlerDELETE(jc jape.Context) {
-	if jc.Check("couldn't delete contract IDs", b.sats.DeleteAll()) != nil {
+	if jc.Check("couldn't remove contracts", b.ms.ArchiveAllContracts(jc.Request.Context(), api.ContractArchivalReasonRemoved)) != nil	{
 		return
 	}
-	jc.Check("couldn't remove contracts", b.ms.ArchiveAllContracts(jc.Request.Context(), api.ContractArchivalReasonRemoved))
+	jc.Check("couldn't delete contract IDs", satellite.StaticSatellite.DeleteContracts())
 }
 
 func (b *bus) searchObjectsHandlerGET(jc jape.Context) {
@@ -1082,7 +1078,7 @@ func (b *bus) contractTaxHandlerGET(jc jape.Context) {
 }
 
 // New returns a new Bus.
-func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms MetadataStore, ss SettingStore, eas EphemeralAccountStore, sats SatelliteStore, l *zap.Logger, satelliteEnabled bool, satelliteAddr string, satelliteKey types.PublicKey, satelliteSeed []byte) (*bus, error) {
+func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms MetadataStore, ss SettingStore, eas EphemeralAccountStore, l *zap.Logger) (*bus, error) {
 	b := &bus{
 		s:             s,
 		cm:            cm,
@@ -1092,7 +1088,6 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 		ms:            ms,
 		ss:            ss,
 		eas:           eas,
-		sats:          sats,
 		contractLocks: newContractLocks(),
 		logger:        l.Sugar().Named("bus"),
 	}
@@ -1119,19 +1114,6 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 		return nil, err
 	}
 	b.accounts = newAccounts(accounts)
-
-	// Save the satellite config.
-	if satelliteEnabled {
-		err := b.sats.SetConfig(api.SatelliteConfig{
-			Enabled:    satelliteEnabled,
-			Address:    satelliteAddr,
-			PublicKey:  satelliteKey,
-			RenterSeed: satelliteSeed,
-		})
-		if err != nil {
-			b.logger.Errorw(fmt.Sprintf("failed to save satellite config: %v", err))
-		}
-	}
 
 	return b, nil
 }
@@ -1218,12 +1200,6 @@ func (b *bus) Handler() http.Handler {
 		"GET    /params/download": b.paramsHandlerDownloadGET,
 		"GET    /params/upload":   b.paramsHandlerUploadGET,
 		"GET    /params/gouging":  b.paramsHandlerGougingGET,
-
-		// Satellite.
-		"GET /satellite/config":   b.satelliteConfigHandlerGET,
-		"PUT /satellite/config":   b.satelliteConfigHandlerPUT,
-		"GET /satellite/find/:id": b.satelliteFindHandler,
-		"GET /satellite/all":      b.satelliteAllHandler,
 	}))
 }
 

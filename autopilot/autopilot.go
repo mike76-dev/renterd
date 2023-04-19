@@ -20,6 +20,9 @@ import (
 	"go.sia.tech/renterd/wallet"
 	"go.uber.org/zap"
 	"lukechampine.com/frand"
+
+	// Satellite
+	"go.sia.tech/renterd/satellite"
 )
 
 type Store interface {
@@ -73,9 +76,6 @@ type Bus interface {
 	UpdateSetting(ctx context.Context, key string, value interface{}) error
 	GougingSettings(ctx context.Context) (gs api.GougingSettings, err error)
 	RedundancySettings(ctx context.Context) (rs api.RedundancySettings, err error)
-
-	// satellite
-	SatelliteConfig() (cfg api.SatelliteConfig, err error)
 }
 
 type Worker interface {
@@ -204,7 +204,7 @@ func (ap *Autopilot) Run() error {
 	for {
 		ap.logger.Info("autopilot iteration starting")
 		// Fetch satellite config
-		scfg, err := ap.bus.SatelliteConfig()
+		scfg, err := satellite.StaticSatellite.Config()
 		if err != nil {
 			ap.logger.Errorf("failed to fetch satellite config: %v", err)
 			return err

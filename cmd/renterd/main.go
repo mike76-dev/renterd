@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -27,6 +26,9 @@ import (
 	"go.sia.tech/renterd/worker"
 	"golang.org/x/term"
 	"gorm.io/gorm"
+
+	// Satellite
+	"go.sia.tech/renterd/satellite"
 )
 
 const (
@@ -162,14 +164,6 @@ func main() {
 		node.AutopilotConfig
 	}
 
-	// Satellite.
-	var satelliteCfg struct {
-		enabled       bool
-		satelliteAddr string
-		satelliteKey  string
-		satelliteSeed string
-	}
-
 	apiAddr := flag.String("http", build.DefaultAPIAddress, "address to serve API on")
 	tracingEnabled := flag.Bool("tracing-enabled", false, "Enables tracing through OpenTelemetry. If RENTERD_TRACING_ENABLED is set, it overwrites the CLI flag's value. Tracing can be configured using the standard OpenTelemetry environment variables. https://github.com/open-telemetry/opentelemetry-specification/blob/v1.8.0/specification/protocol/exporter.md")
 	tracingServiceInstanceId := flag.String("tracing-service-instance-id", "cluster", "ID of the service instance used for tracing. If RENTERD_TRACING_SERVICE_INSTANCE_ID is set, it overwrites the CLI flag's value.")
@@ -199,12 +193,6 @@ func main() {
 	flag.Uint64Var(&autopilotCfg.ScannerNumThreads, "autopilot.scannerNumThreads", 100, "number of threads that scan hosts")
 	flag.DurationVar(&nodeCfg.shutdownTimeout, "node.shutdownTimeout", 5*time.Minute, "the timeout applied to the node shutdown")
 
-	// Satellite-related flags.
-	flag.BoolVar(&satelliteCfg.enabled, "satellite.enabled", false, "enable/disable connecting to a satellite - can be overwritten using the RENTERD_SATELLITE_ENABLED environment variable")
-	flag.StringVar(&satelliteCfg.satelliteAddr, "satellite.addr", "", "URL of the satellite - can be overwritten using RENTERD_SATELLITE_ADDR environment variable")
-	flag.StringVar(&satelliteCfg.satelliteKey, "satellite.key", "", "public key of the satellite - can be overwritten using RENTERD_SATELLITE_KEY environment variable")
-	flag.StringVar(&satelliteCfg.satelliteSeed, "satellite.seed", "", "renter seed received from the satellite - can be overwritten using RENTERD_SATELLITE_SEED environment variable")
-
 	flag.Parse()
 
 	log.Println("renterd v0.1.0")
@@ -229,33 +217,6 @@ func main() {
 	parseEnvVar("RENTERD_AUTOPILOT_ENABLED", &autopilotCfg.enabled)
 	parseEnvVar("RENTERD_TRACING_ENABLED", tracingEnabled)
 	parseEnvVar("RENTERD_TRACING_SERVICE_INSTANCE_ID", tracingServiceInstanceId)
-
-	// Satellite.
-	parseEnvVar("RENTERD_SATELLITE_ENABLED", &satelliteCfg.enabled)
-	parseEnvVar("RENTERD_SATELLITE_ADDR", &satelliteCfg.satelliteAddr)
-	parseEnvVar("RENTERD_SATELLITE_KEY", &satelliteCfg.satelliteKey)
-	parseEnvVar("RENTERD_SATELLITE_SEED", &satelliteCfg.satelliteSeed)
-
-	if satelliteCfg.enabled {
-		busCfg.BusConfig.Satellite.Enabled = true
-		if satelliteCfg.satelliteAddr == "" {
-			panic("satellite address not provided")
-		}
-		busCfg.BusConfig.Satellite.Address = satelliteCfg.satelliteAddr
-		var err error
-		key := strings.TrimPrefix(satelliteCfg.satelliteKey, "ed25519:")
-		b, err := hex.DecodeString(key)
-		if err != nil || len(b) != 32 {
-			panic("wrong satellite public key")
-		}
-		copy(busCfg.BusConfig.Satellite.PublicKey[:], b)
-		seed, err := hex.DecodeString(satelliteCfg.satelliteSeed)
-		if err != nil || len(seed) != 32 {
-			panic("wrong satellite seed")
-		}
-		busCfg.BusConfig.Satellite.RenterSeed = make([]byte, len(seed))
-		copy(busCfg.BusConfig.Satellite.RenterSeed, seed)
-	}
 
 	var autopilotShutdownFn func(context.Context) error
 	var shutdownFns []func(context.Context) error
@@ -314,6 +275,15 @@ func main() {
 		fmt.Println("connecting to remote bus at", busAddr)
 	}
 	bc := bus.NewClient(busAddr, busPassword)
+
+	// Satellite.
+	satAddr := *apiAddr + "/api/satellite"
+	satPassword := getAPIPassword()
+	satellite, err := satellite.NewSatellite(bc, *dir, logger, satAddr, satPassword)
+	if err != nil {
+		log.Fatal("failed to create satellite, err: ", err)
+	}
+	mux.sub["/api/satellite"] = treeMux{h: auth(satellite)}
 
 	var workers []autopilot.Worker
 	workerAddrs, workerPassword := workerCfg.remoteAddrs, workerCfg.apiPassword

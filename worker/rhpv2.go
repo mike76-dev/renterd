@@ -19,6 +19,9 @@ import (
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/metrics"
+
+	// Satellite
+	"go.sia.tech/renterd/satellite"
 )
 
 var (
@@ -213,7 +216,6 @@ type Session struct {
 	settings    rhpv2.HostSettings
 	lastSeen    time.Time
 	mu          sync.Mutex
-	b           Bus
 }
 
 // Append calls the Write RPC with a single action, appending the provided
@@ -290,7 +292,7 @@ func (s *Session) Read(ctx context.Context, w io.Writer, sections []rhpv2.RPCRea
 	defer func() {
 		// send the new revision to the satellite
 		if err == nil {
-			s.satelliteUpdateRevision(api.ContractSpending{Downloads: price})
+			satellite.StaticSatellite.UpdateRevision(ctx, s.revision, api.ContractSpending{Downloads: price})
 		}
 	}()
 	defer recordRPC(ctx, s.transport, s.revision, rhpv2.RPCReadID, &err)()
@@ -628,7 +630,7 @@ func (s *Session) Write(ctx context.Context, actions []rhpv2.RPCWriteAction, pri
 	defer func() {
 		// send the new revision to the satellite
 		if err == nil {
-			s.satelliteUpdateRevision(api.ContractSpending{Uploads: price})
+			satellite.StaticSatellite.UpdateRevision(ctx, s.revision, api.ContractSpending{Uploads: price})
 		}
 	}()
 	defer recordRPC(ctx, s.transport, s.revision, rhpv2.RPCWriteID, &err)()
