@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"mime"
 	"net"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,6 +70,10 @@ type rangedResponseWriter struct {
 
 func (rw *rangedResponseWriter) Write(p []byte) (int, error) {
 	if !rw.headerWritten {
+		contentType := rw.Header().Get("Content-Type")
+		if contentType == "" {
+			rw.Header().Set("Content-Type", http.DetectContentType(p))
+		}
 		rw.WriteHeader(rw.defaultStatusCode)
 	}
 	return rw.rw.Write(p)
@@ -808,8 +814,16 @@ func (w *worker) slabMigrateHandler(jc jape.Context) {
 		return
 	}
 
+	// fetch the upload parameters
 	up, err := w.bus.UploadParams(ctx)
 	if jc.Check("couldn't fetch upload parameters from bus", err) != nil {
+		return
+	}
+
+	// cancel the upload if consensus is not synced
+	if !up.ConsensusState.Synced {
+		w.logger.Errorf("migration cancelled, err: ", api.ErrConsensusNotSynced)
+		jc.Error(api.ErrConsensusNotSynced, http.StatusServiceUnavailable)
 		return
 	}
 
@@ -929,6 +943,11 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 	}
 	jc.ResponseWriter.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 	jc.ResponseWriter.Header().Set("Accept-Ranges", "bytes")
+	if ext := filepath.Ext(path); ext != "" {
+		if mimeType := mime.TypeByExtension(ext); mimeType != "" {
+			jc.ResponseWriter.Header().Set("Content-Type", mimeType)
+		}
+	}
 	rw := rangedResponseWriter{rw: jc.ResponseWriter, defaultStatusCode: status}
 
 	// keep track of recent timings per host so we can favour faster hosts
@@ -1006,13 +1025,21 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 	// fetch the path
 	path := strings.TrimPrefix(jc.PathParam("path"), "/")
 
+	// fetch the upload parameters
 	up, err := w.bus.UploadParams(ctx)
 	if jc.Check("couldn't fetch upload parameters from bus", err) != nil {
 		return
 	}
-	rs := up.RedundancySettings
+
+	// cancel the upload if consensus is not synced
+	if !up.ConsensusState.Synced {
+		w.logger.Errorf("upload cancelled, err: ", api.ErrConsensusNotSynced)
+		jc.Error(api.ErrConsensusNotSynced, http.StatusServiceUnavailable)
+		return
+	}
 
 	// allow overriding the redundancy settings
+	rs := up.RedundancySettings
 	if jc.DecodeForm(queryStringParamMinShards, &rs.MinShards) != nil {
 		return
 	}
