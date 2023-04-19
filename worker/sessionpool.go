@@ -10,14 +10,24 @@ import (
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/internal/tracing"
+
+	// Satellite
+	"go.sia.tech/renterd/satellite"
 )
 
 func (s *Session) appendSector(ctx context.Context, sector *[rhpv2.SectorSize]byte, currentHeight uint64) (types.Hash256, error) {
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		return types.Hash256{}, nil
+	}
 	if currentHeight > uint64(s.Revision().Revision.WindowStart) {
 		return types.Hash256{}, fmt.Errorf("contract has expired")
 	}
 	storageDuration := uint64(s.Revision().Revision.WindowStart) - currentHeight
 	price, collateral := rhpv2.RPCAppendCost(s.settings, storageDuration)
+	if cfg.Enabled {
+		price = price.Mul64(125).Div64(100) // to prevent a low payment error
+	}
 	root, err := s.Append(ctx, sector, price, collateral)
 	if err != nil {
 		return root, err
