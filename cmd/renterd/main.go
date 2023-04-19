@@ -28,7 +28,7 @@ import (
 	"gorm.io/gorm"
 
 	// Satellite
-	"go.sia.tech/renterd/satellite"
+	"github.com/mike76-dev/renterd-satellite"
 )
 
 const (

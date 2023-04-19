@@ -22,7 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	// Satellite
-	"go.sia.tech/renterd/satellite"
+	"github.com/mike76-dev/renterd-satellite"
 )
 
 const (
