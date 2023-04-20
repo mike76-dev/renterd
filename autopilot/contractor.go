@@ -595,13 +595,11 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 
 func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts []hostdb.Host, usedHosts map[types.PublicKey]struct{}, missing uint64, budget *types.Currency, renterAddress types.Address, minScore float64) ([]types.FileContractID, error) {
 	// Fetch satellite config
-	scfg, err := satellite.StaticSatellite.Config()
+	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
 	}
-	if scfg.Enabled {
-		return nil, nil
-	}
+
 	ctx, span := tracing.Tracer.Start(ctx, "runContractFormations")
 	defer span.End()
 
@@ -609,6 +607,17 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 		return nil, nil
 	}
 	var formed []types.FileContractID
+
+	if cfg.Enabled {
+		// Form contracts with the satellite
+		formedContracts, err := c.formContractsWithSatellite(ctx, missing)
+		if err == nil {
+			for _, fc := range formedContracts {
+				formed = append(formed, fc.ID)
+			}
+		}
+		return formed, nil
+	}
 
 	c.logger.Debugw(
 		"run contract formations",
@@ -689,18 +698,24 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 
 func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *types.Currency, renterAddress types.Address, toRenew []contractInfo) ([]api.ContractMetadata, error) {
 	// Fetch satellite config
-	scfg, err := satellite.StaticSatellite.Config()
+	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
-	}
-	if scfg.Enabled {
-		return nil, nil
 	}
 
 	ctx, span := tracing.Tracer.Start(ctx, "runContractRenewals")
 	defer span.End()
 
 	renewed := make([]api.ContractMetadata, 0, len(toRenew))
+
+	if cfg.Enabled {
+	 // Renew contracts with the satellite
+		renewedContracts, err := c.renewContractsWithSatellite(ctx, toRenew)
+		if err == nil {
+			renewed = append(renewed, renewedContracts...)
+		}
+		return renewed, nil
+	}
 
 	c.logger.Debugw(
 		"run contracts renewals",
@@ -737,18 +752,24 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *
 
 func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, budget *types.Currency, renterAddress types.Address, toRefresh []contractInfo) ([]api.ContractMetadata, error) {
 	// Fetch satellite config
-	scfg, err := satellite.StaticSatellite.Config()
+	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
-	}
-	if scfg.Enabled {
-		return nil, nil
 	}
 
 	ctx, span := tracing.Tracer.Start(ctx, "runContractRefreshes")
 	defer span.End()
 
 	refreshed := make([]api.ContractMetadata, 0, len(toRefresh))
+
+	if cfg.Enabled {
+	 // Refresh contracts with the satellite
+		refreshedContracts, err := c.refreshContractsWithSatellite(ctx, toRefresh)
+		if err == nil {
+			refreshed = append(refreshed, refreshedContracts...)
+		}
+		return refreshed, nil
+	}
 
 	c.logger.Debugw(
 		"run contracts refreshes",
@@ -1366,4 +1387,40 @@ func renterFundsToExpectedStorage(renterFunds types.Currency, duration uint64, h
 		return math.MaxUint64
 	}
 	return expectedStorage.Big().Uint64()
+}
+
+func (c *contractor) formContractsWithSatellite(ctx context.Context, hosts uint64) ([]api.ContractMetadata, error) {
+	cfg := c.ap.state.cfg
+	cs := c.ap.state.cs
+	period := cfg.Contracts.Period + c.currentPeriod() - cs.BlockHeight
+	return satellite.StaticSatellite.FormContracts(ctx, hosts, period, cfg.Contracts.RenewWindow, cfg.Contracts.Storage, cfg.Contracts.Upload, cfg.Contracts.Download)
+}
+
+func (c *contractor) renewContractsWithSatellite(ctx context.Context, toRenew []contractInfo) ([]api.ContractMetadata, error) {
+	if len(toRenew) == 0 {
+		return nil, errors.New("nothing to renew")
+	}
+	cfg := c.ap.state.cfg
+	cs := c.ap.state.cs
+	period := cfg.Contracts.Period + c.currentPeriod() - cs.BlockHeight
+	contracts := make([]types.FileContractID, 0, len(toRenew))
+	for _, ci := range toRenew {
+		contracts = append(contracts, ci.contract.ID)
+	}
+	return satellite.StaticSatellite.RenewContracts(ctx, contracts, period, cfg.Contracts.RenewWindow, cfg.Contracts.Storage, cfg.Contracts.Upload, cfg.Contracts.Download)
+}
+
+func (c *contractor) refreshContractsWithSatellite(ctx context.Context, toRefresh []contractInfo) ([]api.ContractMetadata, error) {
+	if len(toRefresh) == 0 {
+		return nil, errors.New("nothing to refresh")
+	}
+	cfg := c.ap.state.cfg
+	cs := c.ap.state.cs
+	ci := toRefresh[0] // fetch the params from the first contract to refresh
+	period := ci.contract.EndHeight() + ci.contract.ContractMetadata.WindowStart - ci.contract.ContractMetadata.WindowEnd - cs.BlockHeight
+	contracts := make([]types.FileContractID, 0, len(toRefresh))
+	for _, ci := range toRefresh {
+		contracts = append(contracts, ci.contract.ID)
+	}
+	return satellite.StaticSatellite.RenewContracts(ctx, contracts, period, cfg.Contracts.RenewWindow, cfg.Contracts.Storage, cfg.Contracts.Upload, cfg.Contracts.Download)
 }
