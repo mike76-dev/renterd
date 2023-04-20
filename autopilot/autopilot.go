@@ -20,9 +20,6 @@ import (
 	"go.sia.tech/renterd/wallet"
 	"go.uber.org/zap"
 	"lukechampine.com/frand"
-
-	// Satellite
-	"github.com/mike76-dev/renterd-satellite"
 )
 
 type Store interface {
@@ -203,12 +200,6 @@ func (ap *Autopilot) Run() error {
 	var launchAccountRefillsOnce sync.Once
 	for {
 		ap.logger.Info("autopilot iteration starting")
-		// Fetch satellite config
-		scfg, err := satellite.StaticSatellite.Config()
-		if err != nil {
-			ap.logger.Errorf("failed to fetch satellite config: %v", err)
-			return err
-		}
 		ap.workers.withWorker(func(w Worker) {
 			defer ap.logger.Info("autopilot iteration ended")
 			ctx, span := tracing.Tracer.Start(context.Background(), "Autopilot Iteration")
@@ -256,11 +247,9 @@ func (ap *Autopilot) Run() error {
 			ap.c.updateCurrentPeriod()
 
 			// perform wallet maintenance
-			if !scfg.Enabled {
-				err = ap.c.performWalletMaintenance(ctx)
-				if err != nil {
-					ap.logger.Errorf("wallet maintenance failed, err: %v", err)
-				}
+			err = ap.c.performWalletMaintenance(ctx)
+			if err != nil {
+				ap.logger.Errorf("wallet maintenance failed, err: %v", err)
 			}
 
 			// perform maintenance
