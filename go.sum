@@ -213,6 +213,8 @@ github.com/mattn/go-sqlite3 v1.14.16/go.mod h1:2eHXhiwb8IkHr+BDWZGa96P6+rkvnG63S
 github.com/matttproud/golang_protobuf_extensions v1.0.1/go.mod h1:D8He9yQNgCq6Z5Ld7szi9bcBfOoFv/3dc6xSMkL2PC0=
 github.com/mike76-dev/renterd-satellite v0.0.0-20230419201559-3e8066bf88eb h1:QMeSwmTyYjde/Hb0xgmOlDdWkqqetUMXcf54Fs9gBBs=
 github.com/mike76-dev/renterd-satellite v0.0.0-20230419201559-3e8066bf88eb/go.mod h1:Fumxq2hV66xikSB1yYvEmDWcnGRfzBd/6xmLmbxjqxU=
+github.com/mike76-dev/renterd-satellite v0.0.0-20230420081439-3b27093321dc h1:0Pv+H2AbXvrBmQUuqUl/0omDjVWMakrDqRF8Ur04Dl8=
+github.com/mike76-dev/renterd-satellite v0.0.0-20230420081439-3b27093321dc/go.mod h1:Fumxq2hV66xikSB1yYvEmDWcnGRfzBd/6xmLmbxjqxU=
 github.com/mike76-dev/sia-web/renterd v0.0.0-20230419143140-c2dff7bad202 h1:9JQRyVK9Nnr1du6ZsgxT9wEj6mtECf8CjhGrjF0QP4c=
 github.com/mike76-dev/sia-web/renterd v0.0.0-20230419143140-c2dff7bad202/go.mod h1:KpHaBn2PzCE82wmfozdKpJhzh6bxVvzjyCCjZj4Rl5k=
 github.com/mitchellh/go-homedir v1.1.0/go.mod h1:SfyaCUpYCn1Vlf4IUYiD9fPX4A5wJrkLzIz1N1q0pr0=

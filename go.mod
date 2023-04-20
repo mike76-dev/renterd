@@ -6,7 +6,7 @@ require (
 	github.com/google/go-cmp v0.5.9
 	github.com/gotd/contrib v0.15.0
 	github.com/klauspost/reedsolomon v1.11.7
-	github.com/mike76-dev/renterd-satellite v0.0.0-20230419201559-3e8066bf88eb
+	github.com/mike76-dev/renterd-satellite v0.0.0-20230420081439-3b27093321dc
 	github.com/mike76-dev/sia-web/renterd v0.0.0-20230419143140-c2dff7bad202
 	gitlab.com/NebulousLabs/encoding v0.0.0-20200604091946-456c3dc907fe
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.40.0
