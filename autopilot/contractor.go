@@ -461,12 +461,6 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 	}
 	c.logger.Debug("running contract checks")
 
-	// Fetch satellite config
-	scfg, err := satellite.StaticSatellite.Config()
-	if err != nil {
-		return
-	}
-
 	var notfound int
 	defer func() {
 		c.logger.Debugw(
@@ -528,13 +522,11 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 		}
 
 		// decide whether the host is still good
-		if !scfg.Enabled {
-			usable, unusableResult := isUsableHost(state.cfg, state.rs, gc, f, host.Host, minScore,	 contract.FileSize())
-			if !usable {
-				c.logger.Infow("unusable host", "hk", hk, "fcid", fcid, "reasons", unusableResult.reasons())
-				toIgnore = append(toIgnore, fcid)
-				continue
-			}
+		usable, unusableResult := isUsableHost(state.cfg, state.rs, gc, f, host.Host, minScore,	 contract.FileSize())
+		if !usable {
+			c.logger.Infow("unusable host", "hk", hk, "fcid", fcid, "reasons", unusableResult.reasons())
+			toIgnore = append(toIgnore, fcid)
+			continue
 		}
 
 		// decide whether the contract is still good
