@@ -18,7 +18,7 @@ import (
 func (s *Session) appendSector(ctx context.Context, sector *[rhpv2.SectorSize]byte, currentHeight uint64) (types.Hash256, error) {
 	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
-		return types.Hash256{}, nil
+		return types.Hash256{}, err
 	}
 	if currentHeight > uint64(s.Revision().Revision.WindowStart) {
 		return types.Hash256{}, fmt.Errorf("contract has expired")
