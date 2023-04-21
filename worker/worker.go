@@ -34,9 +34,6 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/crypto/blake2b"
 	"lukechampine.com/frand"
-
-	// Satellite.
-	"github.com/mike76-dev/renterd-satellite"
 )
 
 const (
