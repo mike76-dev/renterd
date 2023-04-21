@@ -282,7 +282,7 @@ func main() {
 	// Satellite.
 	satAddr := *apiAddr + "/api/satellite"
 	satPassword := getAPIPassword()
-	satellite, err := satellite.NewSatellite(bc, *dir, logger, satAddr, satPassword)
+	satellite, err := satellite.NewSatellite(bc, *dir, getSeed(), logger, satAddr, satPassword)
 	if err != nil {
 		log.Fatal("failed to create satellite, err: ", err)
 	}

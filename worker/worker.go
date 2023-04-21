@@ -240,16 +240,7 @@ type Bus interface {
 // masterkey to use for a specific purpose. Such as deriving more keys for
 // ephemeral accounts.
 func (w *worker) deriveSubKey(purpose string) types.PrivateKey {
-	cfg, err := satellite.StaticSatellite.Config()
-	if err != nil {
-		return types.PrivateKey{}
-	}
-	var seed [32]byte
-	if cfg.Enabled {
-		copy(seed[:], cfg.RenterSeed)
-	} else {
-		seed = blake2b.Sum256(append(w.masterKey[:], []byte(purpose)...))
-	}
+	seed := blake2b.Sum256(append(w.masterKey[:], []byte(purpose)...))
 	pk := types.NewPrivateKeyFromSeed(seed[:])
 	for i := range seed {
 		seed[i] = 0
@@ -1213,7 +1204,7 @@ func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionRecone
 		uploadMaxOverdrive:    maxUploadOverdrive,
 		logger:                l.Sugar().Named("worker").Named(id),
 	}
-	go w.initAccounts(b) // to avoid blocking if the API is not available yet
+	w.initAccounts(b)
 	w.initContractSpendingRecorder()
 	w.initPriceTables()
 	return w
