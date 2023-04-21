@@ -12,6 +12,9 @@ import (
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/object"
 	"gorm.io/gorm"
+
+	// Satellite
+	"github.com/mike76-dev/renterd-satellite"
 )
 
 const (
@@ -417,6 +420,7 @@ func (s *SQLStore) ArchiveContracts(ctx context.Context, toArchive map[types.Fil
 	var ids []types.FileContractID
 	for id := range toArchive {
 		ids = append(ids, id)
+		satellite.StaticSatellite.DeleteContract(id) // inform satellite
 	}
 
 	// fetch contracts
@@ -436,6 +440,9 @@ func (s *SQLStore) ArchiveContracts(ctx context.Context, toArchive map[types.Fil
 }
 
 func (s *SQLStore) ArchiveAllContracts(ctx context.Context, reason string) error {
+	// inform satellite
+	satellite.StaticSatellite.DeleteContracts()
+
 	// fetch contract ids
 	var fcids []fileContractID
 	if err := s.db.
