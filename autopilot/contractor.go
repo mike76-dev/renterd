@@ -1393,12 +1393,18 @@ func (c *contractor) formContractsWithSatellite(ctx context.Context, hosts uint6
 	cfg := c.ap.state.cfg
 	cs := c.ap.state.cs
 	period := cfg.Contracts.Period + c.currentPeriod() - cs.BlockHeight
+	if hosts > 10 {
+		hosts = 10 // form contracts in batches to avoid satellite overloading
+	}
 	return satellite.StaticSatellite.FormContracts(ctx, hosts, period, cfg.Contracts.RenewWindow, cfg.Contracts.Storage, cfg.Contracts.Upload, cfg.Contracts.Download)
 }
 
 func (c *contractor) renewContractsWithSatellite(ctx context.Context, toRenew []contractInfo) ([]api.ContractMetadata, error) {
 	if len(toRenew) == 0 {
 		return nil, errors.New("nothing to renew")
+	}
+	if len(toRenew) > 10 {
+		toRenew = toRenew[:10] // renew in batches to avoid satellite overloading
 	}
 	cfg := c.ap.state.cfg
 	cs := c.ap.state.cs
@@ -1413,6 +1419,9 @@ func (c *contractor) renewContractsWithSatellite(ctx context.Context, toRenew []
 func (c *contractor) refreshContractsWithSatellite(ctx context.Context, toRefresh []contractInfo) ([]api.ContractMetadata, error) {
 	if len(toRefresh) == 0 {
 		return nil, errors.New("nothing to refresh")
+	}
+	if len(toRefresh) > 10 {
+		toRefresh = toRefresh[:10] // refresh in batches to avoid satellite overloading
 	}
 	cfg := c.ap.state.cfg
 	cs := c.ap.state.cs
