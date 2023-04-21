@@ -44,7 +44,8 @@ require (
 	github.com/julienschmidt/httprouter v1.3.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.4 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
-	github.com/mike76-dev/sia-web/renterd v0.0.0-20230420202230-d13e11e6ab5f // indirect
+	github.com/mike76-dev/sia-web v0.0.0-20230421120922-a8e3ce5a0f08 // indirect
+	github.com/mike76-dev/sia-web/renterd v0.1.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	gitlab.com/NebulousLabs/bolt v1.4.4 // indirect
 	gitlab.com/NebulousLabs/demotemutex v0.0.0-20151003192217-235395f71c40 // indirect
