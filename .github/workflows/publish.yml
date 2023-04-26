@@ -74,7 +74,6 @@ jobs:
           mkdir -p release
           go build -tags='netgo' -trimpath -o bin/ -a -ldflags '-s -w' ./cmd/renterd
           cp README.md LICENSE bin/
-          /usr/bin/codesign --deep -f -v --timestamp -o runtime,library bin/renterd
           ditto -ck bin $ZIP_OUTPUT
       - name: Build arm64
         env:
@@ -86,7 +85,6 @@ jobs:
           mkdir -p release
           go build -tags='netgo' -trimpath -o bin/ -a -ldflags '-s -w' ./cmd/renterd
           cp README.md LICENSE bin/
-          /usr/bin/codesign --deep -f -v --timestamp -o runtime,library bin/renterd
           ditto -ck bin $ZIP_OUTPUT
       - uses: actions/upload-artifact@v3
         with:
