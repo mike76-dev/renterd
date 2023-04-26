@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"unicode/utf8"
 
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	"go.sia.tech/core/types"
@@ -574,7 +575,7 @@ func (s *SQLStore) ObjectEntries(ctx context.Context, path, prefix string, offse
 		) AS i
 	) AS m
 	GROUP BY name
-	LIMIT ? OFFSET ?`, concat("?", "trimmed"), concat("?", "substr(trimmed, 1, slashindex)")), path, path, "/", len(path)+1, path+"%", limit, offset)
+	LIMIT ? OFFSET ?`, concat("?", "trimmed"), concat("?", "substr(trimmed, 1, slashindex)")), path, path, "/", utf8.RuneCountInString(path)+1, path+"%", limit, offset)
 
 	// apply prefix
 	if prefix != "" {
@@ -1002,6 +1003,7 @@ func contracts(tx *gorm.DB, ids []types.FileContractID) (dbContracts []dbContrac
 	err = tx.
 		Model(&dbContract{}).
 		Where("fcid IN (?)", fcids).
+		Preload("Host").
 		Find(&dbContracts).
 		Error
 	return
@@ -1077,6 +1079,11 @@ func addContract(tx *gorm.DB, c rhpv2.ContractRevision, totalCost types.Currency
 // NOTE: this function archives the contracts without setting a renewed ID
 func archiveContracts(tx *gorm.DB, contracts []dbContract, toArchive map[types.FileContractID]string) error {
 	for _, contract := range contracts {
+		// sanity check the host is populated
+		if contract.Host.ID == 0 {
+			return fmt.Errorf("host not populated for contract %v", contract.FCID)
+		}
+
 		// create a copy in the archive
 		if err := tx.Create(&dbArchivedContract{
 			Host:   publicKey(contract.Host.PublicKey),

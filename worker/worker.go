@@ -287,6 +287,7 @@ type worker struct {
 
 	downloadSectorTimeout time.Duration
 	uploadSectorTimeout   time.Duration
+	downloadMaxOverdrive  int
 	uploadMaxOverdrive    int
 
 	logger *zap.SugaredLogger
@@ -518,6 +519,49 @@ func (w *worker) rhpScanHandler(jc jape.Context) {
 		ScanError: errStr,
 		Settings:  settings,
 	})
+}
+
+func (w *worker) fetchActiveContracts(ctx context.Context, metadatas []api.ContractMetadata, timeout time.Duration, bh uint64) (contracts []api.Contract, errs HostErrorSet) {
+	// create requests channel
+	reqs := make(chan api.ContractMetadata)
+
+	// create worker function
+	var mu sync.Mutex
+	worker := func() {
+		for metadata := range reqs {
+			rev, err := w.FetchRevision(ctx, timeout, metadata, bh, lockingPriorityActiveContractRevision, lockingDurationActiveContractRevision)
+			mu.Lock()
+			if err != nil {
+				errs = append(errs, &HostError{HostKey: metadata.HostKey, Err: err})
+			} else {
+				contracts = append(contracts, api.Contract{
+					ContractMetadata: metadata,
+					Revision:         rev,
+				})
+			}
+			mu.Unlock()
+		}
+	}
+
+	// launch all workers
+	var wg sync.WaitGroup
+	for t := 0; t < 10 && t < len(metadatas); t++ {
+		wg.Add(1)
+		go func() {
+			worker()
+			wg.Done()
+		}()
+	}
+
+	// launch all requests
+	for _, metadata := range metadatas {
+		reqs <- metadata
+	}
+	close(reqs)
+
+	// wait until they're done
+	wg.Wait()
+	return
 }
 
 func (w *worker) fetchPriceTable(ctx context.Context, hk types.PublicKey, siamuxAddr string, revision *types.FileContractRevision) (hpt hostdb.HostPriceTable, err error) {
@@ -949,32 +993,39 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 	}
 
 	// build contract map
-	contracts := make(map[types.PublicKey]api.ContractMetadata)
+	availableContracts := make(map[types.PublicKey]api.ContractMetadata)
 	for _, contract := range set {
-		contracts[contract.HostKey] = contract
-	}
-
-	// create a function that returns the contracts for a given slab
-	contractsForSlab := func(s object.Slab) (c []api.ContractMetadata) {
-		for _, shard := range s.Shards {
-			if contract, exists := contracts[shard.Host]; exists {
-				c = append(c, contract)
-			}
-		}
-		return
+		availableContracts[contract.HostKey] = contract
 	}
 
 	cw := obj.Key.Decrypt(&rw, offset)
 	for i, ss := range slabsForDownload(obj.Slabs, offset, length) {
-		// fetch contracts for the slab
-		contracts := contractsForSlab(ss.Slab)
-		if len(contracts) < int(ss.MinShards) {
-			err = fmt.Errorf("not enough contracts to download the slab, %d<%d", len(contracts), ss.MinShards)
+		// fetch available hosts for the slab
+		hostMap := make(map[types.PublicKey]api.ContractMetadata)
+		availableShards := 0
+		for _, shard := range ss.Shards {
+			if _, available := availableContracts[shard.Host]; !available {
+				continue
+			}
+			availableShards++
+			hostMap[shard.Host] = availableContracts[shard.Host]
+		}
+
+		// check if enough slabs are available
+		if availableShards < int(ss.MinShards) {
+			err = fmt.Errorf("not enough available shards to download the slab, %d<%d", availableShards, ss.MinShards)
 			w.logger.Errorf("couldn't download object '%v' slab %d, err: %v", path, i, err)
 			if i == 0 {
 				jc.Error(err, http.StatusInternalServerError)
 			}
 			return
+		}
+
+		// flatten host map to get a slice of contracts which is deduplicated
+		// already and contains only contracts relevant to the slab.
+		contracts := make([]api.ContractMetadata, 0, len(hostMap))
+		for _, c := range hostMap {
+			contracts = append(contracts, c)
 		}
 
 		// make sure consecutive slabs are downloaded from hosts that performed
@@ -983,7 +1034,7 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 			return performance[contracts[i].HostKey] < performance[contracts[j].HostKey]
 		})
 
-		timings, err := downloadSlab(ctx, w, cw, ss, contracts, w.downloadSectorTimeout, w.logger)
+		timings, err := downloadSlab(ctx, w, cw, ss, contracts, w.downloadSectorTimeout, w.downloadMaxOverdrive, w.logger)
 
 		// update historic host performance
 		//
@@ -1130,6 +1181,10 @@ func (w *worker) rhpActiveContractsHandlerGET(jc jape.Context) {
 	if jc.Check("failed to fetch contracts from bus", err) != nil {
 		return
 	}
+	if len(busContracts) == 0 {
+		jc.Encode(api.ContractsResponse{Contracts: nil})
+		return
+	}
 
 	var hosttimeout time.Duration
 	if jc.DecodeForm("hosttimeout", (*api.ParamDuration)(&hosttimeout)) != nil {
@@ -1146,20 +1201,7 @@ func (w *worker) rhpActiveContractsHandlerGET(jc jape.Context) {
 	}
 	ctx = WithGougingChecker(ctx, gp)
 
-	// fetch all contracts
-	var contracts []api.Contract
-	var errs HostErrorSet
-	for _, contract := range busContracts {
-		rev, err := w.FetchRevision(ctx, hosttimeout, contract, cs.BlockHeight, lockingPriorityActiveContractRevision, lockingDurationActiveContractRevision)
-		if err != nil {
-			errs = append(errs, &HostError{HostKey: contract.HostKey, Err: err})
-			continue
-		}
-		contracts = append(contracts, api.Contract{
-			ContractMetadata: contract,
-			Revision:         rev,
-		})
-	}
+	contracts, errs := w.fetchActiveContracts(ctx, busContracts, hosttimeout, cs.BlockHeight)
 	resp := api.ContractsResponse{Contracts: contracts}
 	if errs != nil {
 		resp.Error = errs.Error()
@@ -1186,7 +1228,7 @@ func (w *worker) accountHandlerGET(jc jape.Context) {
 }
 
 // New returns an HTTP handler that serves the worker API.
-func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, maxUploadOverdrive int, l *zap.Logger) *worker {
+func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, maxDownloadOverdrive, maxUploadOverdrive int, l *zap.Logger) *worker {
 	w := &worker{
 		id:                    id,
 		bus:                   b,
@@ -1198,6 +1240,7 @@ func New(masterKey [32]byte, id string, b Bus, sessionLockTimeout, sessionRecone
 		busFlushInterval:      busFlushInterval,
 		downloadSectorTimeout: downloadSectorTimeout,
 		uploadSectorTimeout:   uploadSectorTimeout,
+		downloadMaxOverdrive:  maxDownloadOverdrive,
 		uploadMaxOverdrive:    maxUploadOverdrive,
 		logger:                l.Sugar().Named("worker").Named(id),
 	}
