@@ -22,7 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	// Satellite
-	"github.com/mike76-dev/renterd-satellite"
+	"go.sia.tech/renterd/satellite"
 )
 
 const (
@@ -474,7 +474,7 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 }
 
 func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts []hostdb.Host, usedHosts map[types.PublicKey]struct{}, missing uint64, budget *types.Currency, renterAddress types.Address, minScore float64) ([]types.FileContractID, error) {
-	// Fetch satellite config
+	// fetch satellite config
 	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
@@ -487,17 +487,6 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 		return nil, nil
 	}
 	var formed []types.FileContractID
-
-	if cfg.Enabled {
-		// Form contracts with the satellite
-		formedContracts, err := c.formContractsWithSatellite(ctx, missing)
-		if err == nil {
-			for _, fc := range formedContracts {
-				formed = append(formed, fc.ID)
-			}
-		}
-		return formed, nil
-	}
 
 	c.logger.Debugw(
 		"run contract formations",
@@ -562,7 +551,14 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 			continue
 		}
 
-		formedContract, proceed, err := c.formContract(ctx, w, host, minInitialContractFunds, maxInitialContractFunds, budget, renterAddress)
+		var formedContract api.ContractMetadata
+		var proceed bool
+		if cfg.Enabled {
+			formedContract, err = satellite.StaticSatellite.FormContract(ctx, host.PublicKey, endHeight(state.cfg, c.currentPeriod()), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
+			proceed = true
+		} else {
+			formedContract, proceed, err = c.formContract(ctx, w, host, minInitialContractFunds, maxInitialContractFunds, budget, renterAddress)
+		}
 		if err == nil {
 			// add contract to contract set
 			formed = append(formed, formedContract.ID)
@@ -577,7 +573,7 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 }
 
 func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *types.Currency, renterAddress types.Address, toRenew []contractInfo) ([]api.ContractMetadata, error) {
-	// Fetch satellite config
+	// fetch satellite config
 	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
@@ -587,15 +583,6 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *
 	defer span.End()
 
 	renewed := make([]api.ContractMetadata, 0, len(toRenew))
-
-	if cfg.Enabled {
-	 // Renew contracts with the satellite
-		renewedContracts, err := c.renewContractsWithSatellite(ctx, toRenew)
-		if err == nil {
-			renewed = append(renewed, renewedContracts...)
-		}
-		return renewed, nil
-	}
 
 	c.logger.Debugw(
 		"run contracts renewals",
@@ -618,7 +605,15 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *
 			break
 		}
 
-		contract, proceed, err := c.renewContract(ctx, w, ci, budget, renterAddress)
+		state := c.ap.state
+		var contract api.ContractMetadata
+		var proceed bool
+		if cfg.Enabled {
+			contract, err = satellite.StaticSatellite.RenewContract(ctx, ci.contract.ID, endHeight(state.cfg, c.currentPeriod()), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
+			proceed = true
+		} else {
+			contract, proceed, err = c.renewContract(ctx, w, ci, budget, renterAddress)
+		}
 		if err == nil {
 			renewed = append(renewed, contract)
 		}
@@ -631,7 +626,7 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *
 }
 
 func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, budget *types.Currency, renterAddress types.Address, toRefresh []contractInfo) ([]api.ContractMetadata, error) {
-	// Fetch satellite config
+	// fetch satellite config
 	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
@@ -641,15 +636,6 @@ func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, budget 
 	defer span.End()
 
 	refreshed := make([]api.ContractMetadata, 0, len(toRefresh))
-
-	if cfg.Enabled {
-	 // Refresh contracts with the satellite
-		refreshedContracts, err := c.refreshContractsWithSatellite(ctx, toRefresh)
-		if err == nil {
-			refreshed = append(refreshed, refreshedContracts...)
-		}
-		return refreshed, nil
-	}
 
 	c.logger.Debugw(
 		"run contracts refreshes",
@@ -672,7 +658,15 @@ func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, budget 
 			break
 		}
 
-		contract, proceed, err := c.refreshContract(ctx, w, ci, budget, renterAddress)
+		state := c.ap.state
+		var contract api.ContractMetadata
+		var proceed bool
+		if cfg.Enabled {
+			contract, err = satellite.StaticSatellite.RenewContract(ctx, ci.contract.ID, ci.contract.EndHeight(), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
+			proceed = true
+		} else {
+			contract, proceed, err = c.refreshContract(ctx, w, ci, budget, renterAddress)
+		}
 		if err == nil {
 			refreshed = append(refreshed, contract)
 		}

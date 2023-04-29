@@ -211,10 +211,6 @@ github.com/mattn/go-sqlite3 v1.14.15/go.mod h1:2eHXhiwb8IkHr+BDWZGa96P6+rkvnG63S
 github.com/mattn/go-sqlite3 v1.14.16 h1:yOQRA0RpS5PFz/oikGwBEqvAWhWg5ufRz4ETLjwpU1Y=
 github.com/mattn/go-sqlite3 v1.14.16/go.mod h1:2eHXhiwb8IkHr+BDWZGa96P6+rkvnG63S2DGjv9HUNg=
 github.com/matttproud/golang_protobuf_extensions v1.0.1/go.mod h1:D8He9yQNgCq6Z5Ld7szi9bcBfOoFv/3dc6xSMkL2PC0=
-github.com/mike76-dev/renterd-satellite v0.1.0 h1:SDXPIGLhqWQ1lzgGemfef5dH9ny9xq6SAB+eEsu+AI4=
-github.com/mike76-dev/renterd-satellite v0.1.0/go.mod h1:SWZOizj//w0McHuqxZhKQZQ3WfE4k64YYeuwGyF6il0=
-github.com/mike76-dev/renterd-satellite v0.1.1 h1:PDDS/nmX6LgpXu8IeQV3/A6st+8p5oa7bxO+0ya+A6w=
-github.com/mike76-dev/renterd-satellite v0.1.1/go.mod h1:SWZOizj//w0McHuqxZhKQZQ3WfE4k64YYeuwGyF6il0=
 github.com/mike76-dev/sia-web/renterd v0.1.0 h1:laeegLgF30dNBz0CvTPFaNuP1nAf2zmWlvYhQbnFjSg=
 github.com/mike76-dev/sia-web/renterd v0.1.0/go.mod h1:KpHaBn2PzCE82wmfozdKpJhzh6bxVvzjyCCjZj4Rl5k=
 github.com/mitchellh/go-homedir v1.1.0/go.mod h1:SfyaCUpYCn1Vlf4IUYiD9fPX4A5wJrkLzIz1N1q0pr0=

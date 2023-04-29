@@ -12,7 +12,7 @@ import (
 	"go.sia.tech/renterd/internal/tracing"
 
 	// Satellite
-	"github.com/mike76-dev/renterd-satellite"
+	"go.sia.tech/renterd/satellite"
 )
 
 func (s *Session) appendSector(ctx context.Context, sector *[rhpv2.SectorSize]byte, currentHeight uint64) (types.Hash256, error) {

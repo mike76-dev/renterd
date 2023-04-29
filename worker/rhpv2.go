@@ -21,7 +21,7 @@ import (
 	"go.sia.tech/renterd/metrics"
 
 	// Satellite
-	"github.com/mike76-dev/renterd-satellite"
+	"go.sia.tech/renterd/satellite"
 )
 
 var (

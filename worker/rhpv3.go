@@ -24,7 +24,7 @@ import (
 	"lukechampine.com/frand"
 
 	// Satellite
-	"github.com/mike76-dev/renterd-satellite"
+	"go.sia.tech/renterd/satellite"
 )
 
 const (
