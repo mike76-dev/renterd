@@ -9,7 +9,7 @@ import (
 
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	"go.sia.tech/core/types"
-	"go.sia.tech/renterd/internal/tracing"
+	"go.sia.tech/renterd/tracing"
 
 	// Satellite
 	"go.sia.tech/renterd/satellite"
