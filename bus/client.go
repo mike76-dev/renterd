@@ -280,7 +280,7 @@ func (c *Client) RecordInteractions(ctx context.Context, interactions []hostdb.I
 	return
 }
 
-// RecordContractSpending records contract spending metrics for contrats.
+// RecordContractSpending records contract spending metrics for contracts.
 func (c *Client) RecordContractSpending(ctx context.Context, records []api.ContractSpendingRecord) (err error) {
 	err = c.c.WithContext(ctx).POST("/contracts/spending", records, nil)
 	return
@@ -530,12 +530,6 @@ func (c *Client) UpdateSlab(ctx context.Context, slab object.Slab, usedContracts
 		Slab:          slab,
 		UsedContracts: usedContracts,
 	})
-	return
-}
-
-// DownloadParams returns parameters used for downloading slabs.
-func (c *Client) DownloadParams(ctx context.Context) (dp api.DownloadParams, err error) {
-	err = c.c.WithContext(ctx).GET("/params/download", &dp)
 	return
 }
 

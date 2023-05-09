@@ -37,6 +37,8 @@ import (
 )
 
 const (
+	defaultRevisionFetchTimeout = 30 * time.Second
+
 	lockingPriorityActiveContractRevision = 100 // highest
 	lockingPriorityRenew                  = 80
 	lockingPriorityPriceTable             = 60
@@ -190,12 +192,12 @@ type AccountStore interface {
 	ScheduleSync(ctx context.Context, id rhpv3.Account, hk types.PublicKey) error
 }
 
-type contractReleaser interface {
+type revisionUnlocker interface {
 	Release(context.Context) error
 }
 
-type contractLocker interface {
-	AcquireContract(ctx context.Context, fcid types.FileContractID, priority int) (_ contractReleaser, err error)
+type revisionLocker interface {
+	withRevision(ctx context.Context, timeout time.Duration, contractID types.FileContractID, hk types.PublicKey, siamuxAddr string, lockPriority int, fn func(revision types.FileContractRevision) error) error
 }
 
 type ContractLocker interface {
@@ -219,7 +221,6 @@ type Bus interface {
 
 	Host(ctx context.Context, hostKey types.PublicKey) (hostdb.HostInfo, error)
 
-	DownloadParams(ctx context.Context) (api.DownloadParams, error)
 	GougingParams(ctx context.Context) (api.GougingParams, error)
 	UploadParams(ctx context.Context) (api.UploadParams, error)
 
@@ -291,8 +292,8 @@ type worker struct {
 	contractLockingDuration time.Duration
 	downloadSectorTimeout   time.Duration
 	uploadSectorTimeout     time.Duration
-	downloadMaxOverdrive    int
-	uploadMaxOverdrive      int
+	downloadMaxOverdrive    uint64
+	uploadMaxOverdrive      uint64
 
 	transportPoolV3 *transportPoolV3
 	logger          *zap.SugaredLogger
@@ -369,37 +370,56 @@ func (w *worker) withTransportV2(ctx context.Context, hostKey types.PublicKey, h
 	return fn(t)
 }
 
-func (w *worker) withHostV2(ctx context.Context, contractID types.FileContractID, hostKey types.PublicKey, hostIP string, fn func(sectorStore) error) (err error) {
+func (w *worker) withHostV2(ctx context.Context, contractID types.FileContractID, hostKey types.PublicKey, hostIP string, fn func(hostV2) error) (err error) {
 	return w.withHostsV2(ctx, []api.ContractMetadata{{
 		ID:      contractID,
 		HostKey: hostKey,
 		HostIP:  hostIP,
-	}}, func(ss []sectorStore) error {
+	}}, func(ss []hostV2) error {
 		return fn(ss[0])
 	})
 }
 
-func (w *worker) withRevisionV3(ctx context.Context, contractID types.FileContractID, hk types.PublicKey, siamuxAddr string, lockPriority int, fn func(revision types.FileContractRevision) error) error {
-	// acquire contract lock
-	contractLock, err := w.AcquireContract(ctx, contractID, lockPriority)
-	if err != nil {
-		return fmt.Errorf("%v: %w", "failed to acquire contract for funding EA", err)
-	}
-	defer func() {
-		if err := contractLock.Release(ctx); err != nil {
-			w.logger.Errorw(fmt.Sprintf("failed to release contract, err: %v", err), "hk", hk, "fcid", contractID)
+func (w *worker) withRevision(ctx context.Context, fetchTimeout time.Duration, contractID types.FileContractID, hk types.PublicKey, siamuxAddr string, lockPriority int, fn func(revision types.FileContractRevision) error) error {
+	timeoutCtx := func() (context.Context, context.CancelFunc) {
+		if fetchTimeout > 0 {
+			return context.WithTimeout(ctx, fetchTimeout)
 		}
-	}()
+		return ctx, func() {}
+	}
+	cs, err := w.bus.ConsensusState(ctx)
+	if err != nil {
+		return err
+	}
 
-	// fetch contract revision
-	rev, err := w.FetchRevisionWithContract(ctx, hk, siamuxAddr, contractID)
+	// Lock the revision for the duration of the operation.
+	contractLock, err := w.acquireRevision(ctx, contractID, lockPriority)
+	if err != nil {
+		return err
+	}
+	defer contractLock.Release(ctx)
+
+	// Try to fetch the revision with an account first.
+	ctx, cancel := timeoutCtx()
+	defer cancel()
+	rev, err := w.FetchRevisionWithAccount(ctx, hk, siamuxAddr, cs.BlockHeight, contractID)
+	if err != nil && !isBalanceInsufficient(err) {
+		return err
+	} else if err == nil {
+		return fn(rev)
+	}
+
+	// Fall back to using the contract to pay for the revision.
+	ctx, cancel = timeoutCtx()
+	defer cancel()
+	rev, err = w.FetchRevisionWithContract(ctx, hk, siamuxAddr, contractID)
 	if err != nil {
 		return err
 	}
 	return fn(rev)
 }
 
-func (w *worker) unlockHosts(hosts []sectorStore) {
+func (w *worker) unlockHosts(hosts []hostV2) {
 	// apply a pessimistic timeout, ensuring unlocking the contract or force
 	// closing the session does not deadlock and keep this goroutine around
 	// forever. Use a background context as the parent to avoid timing out
@@ -418,8 +438,8 @@ func (w *worker) unlockHosts(hosts []sectorStore) {
 	wg.Wait()
 }
 
-func (w *worker) withHostsV2(ctx context.Context, contracts []api.ContractMetadata, fn func([]sectorStore) error) (err error) {
-	var hosts []sectorStore
+func (w *worker) withHostsV2(ctx context.Context, contracts []api.ContractMetadata, fn func([]hostV2) error) (err error) {
+	var hosts []hostV2
 	for _, c := range contracts {
 		renterKey := w.deriveRenterKey(c.HostKey)
 		hosts = append(hosts, w.pool.session(c.HostKey, c.HostIP, c.ID, renterKey))
@@ -481,7 +501,7 @@ func (w *worker) rhpScanHandler(jc jape.Context) {
 	// fetch the host pricetable
 	if err == nil {
 		err = w.transportPoolV3.withTransportV3(ctx, rsr.HostKey, settings.SiamuxAddr(), func(t *transportV3) (err error) {
-			priceTable, err = RPCPriceTable(t, func(pt rhpv3.HostPriceTable) (rhpv3.PaymentMethod, error) { return nil, nil })
+			priceTable, err = RPCPriceTable(ctx, t, func(pt rhpv3.HostPriceTable) (rhpv3.PaymentMethod, error) { return nil, nil })
 			return err
 		})
 	}
@@ -499,22 +519,26 @@ func (w *worker) rhpScanHandler(jc jape.Context) {
 	})
 }
 
-func (w *worker) fetchActiveContracts(ctx context.Context, metadatas []api.ContractMetadata, timeout time.Duration, bh uint64) (contracts []api.Contract, errs HostErrorSet) {
+func (w *worker) fetchActiveContracts(ctx context.Context, metadatas []api.ContractMetadata, timeout time.Duration) (contracts []api.Contract, errs HostErrorSet) {
 	// create requests channel
 	reqs := make(chan api.ContractMetadata)
 
 	// create worker function
 	var mu sync.Mutex
 	worker := func() {
-		for metadata := range reqs {
-			rev, err := w.FetchRevision(ctx, timeout, metadata, bh, lockingPriorityActiveContractRevision)
+		for md := range reqs {
+			var revision types.FileContractRevision
+			err := w.withRevision(ctx, timeout, md.ID, md.HostKey, md.SiamuxAddr, lockingPriorityActiveContractRevision, func(rev types.FileContractRevision) error {
+				revision = rev
+				return nil
+			})
 			mu.Lock()
 			if err != nil {
-				errs = append(errs, &HostError{HostKey: metadata.HostKey, Err: err})
+				errs = append(errs, &HostError{HostKey: md.HostKey, Err: err})
 			} else {
 				contracts = append(contracts, api.Contract{
-					ContractMetadata: metadata,
-					Revision:         rev,
+					ContractMetadata: md,
+					Revision:         revision,
 				})
 			}
 			mu.Unlock()
@@ -548,7 +572,7 @@ func (w *worker) fetchPriceTable(ctx context.Context, hk types.PublicKey, siamux
 	// fetchPT is a helper function that performs the RPC given a payment function
 	fetchPT := func(paymentFn PriceTablePaymentFunc) (hpt hostdb.HostPriceTable, err error) {
 		err = w.transportPoolV3.withTransportV3(ctx, hk, siamuxAddr, func(t *transportV3) (err error) {
-			pt, err := RPCPriceTable(t, paymentFn)
+			pt, err := RPCPriceTable(ctx, t, paymentFn)
 			if err != nil {
 				return err
 			}
@@ -582,7 +606,7 @@ func (w *worker) rhpPriceTableHandler(jc jape.Context) {
 
 	var pt rhpv3.HostPriceTable
 	if jc.Check("could not get price table", w.transportPoolV3.withTransportV3(jc.Request.Context(), rptr.HostKey, rptr.SiamuxAddr, func(t *transportV3) (err error) {
-		pt, err = RPCPriceTable(t, func(pt rhpv3.HostPriceTable) (rhpv3.PaymentMethod, error) { return nil, nil })
+		pt, err = RPCPriceTable(jc.Request.Context(), t, func(pt rhpv3.HostPriceTable) (rhpv3.PaymentMethod, error) { return nil, nil })
 		return
 	})) != nil {
 		return
@@ -734,7 +758,7 @@ func (w *worker) rhpFundHandler(jc jape.Context) {
 	ctx = WithGougingChecker(ctx, gp)
 
 	// fund the account
-	jc.Check("couldn't fund account", w.withRevisionV3(ctx, rfr.ContractID, rfr.HostKey, rfr.SiamuxAddr, lockingPriorityFunding, func(revision types.FileContractRevision) (err error) {
+	jc.Check("couldn't fund account", w.withRevision(ctx, defaultRevisionFetchTimeout, rfr.ContractID, rfr.HostKey, rfr.SiamuxAddr, lockingPriorityFunding, func(revision types.FileContractRevision) (err error) {
 		err = w.fundAccount(ctx, rfr.HostKey, rfr.SiamuxAddr, rfr.Balance, &revision)
 		if isMaxBalanceExceeded(err) {
 			// sync the account
@@ -767,7 +791,7 @@ func (w *worker) rhpRegistryReadHandler(jc jape.Context) {
 	}
 	var value rhpv3.RegistryValue
 	err := w.transportPoolV3.withTransportV3(jc.Request.Context(), rrrr.HostKey, rrrr.SiamuxAddr, func(t *transportV3) (err error) {
-		value, err = RPCReadRegistry(t, &rrrr.Payment, rrrr.RegistryKey)
+		value, err = RPCReadRegistry(jc.Request.Context(), t, &rrrr.Payment, rrrr.RegistryKey)
 		return
 	})
 	if jc.Check("couldn't read registry", err) != nil {
@@ -786,7 +810,7 @@ func (w *worker) rhpRegistryUpdateHandler(jc jape.Context) {
 	cost, _ := rc.Total()
 	payment := w.preparePayment(rrur.HostKey, cost, pt.HostBlockHeight)
 	err := w.transportPoolV3.withTransportV3(jc.Request.Context(), rrur.HostKey, rrur.SiamuxAddr, func(t *transportV3) (err error) {
-		return RPCUpdateRegistry(t, &payment, rrur.RegistryKey, rrur.RegistryValue)
+		return RPCUpdateRegistry(jc.Request.Context(), t, &payment, rrur.RegistryKey, rrur.RegistryValue)
 	})
 	if jc.Check("couldn't update registry", err) != nil {
 		return
@@ -812,7 +836,7 @@ func (w *worker) rhpSyncHandler(jc jape.Context) {
 	ctx = WithGougingChecker(ctx, up.GougingParams)
 
 	// sync the account
-	jc.Check("couldn't sync account", w.withRevisionV3(ctx, rsr.ContractID, rsr.HostKey, rsr.SiamuxAddr, lockingPrioritySyncing, func(revision types.FileContractRevision) error {
+	jc.Check("couldn't sync account", w.withRevision(ctx, defaultRevisionFetchTimeout, rsr.ContractID, rsr.HostKey, rsr.SiamuxAddr, lockingPrioritySyncing, func(revision types.FileContractRevision) error {
 		return w.syncAccount(ctx, rsr.HostKey, rsr.SiamuxAddr, &revision)
 	}))
 }
@@ -851,13 +875,20 @@ func (w *worker) slabMigrateHandler(jc jape.Context) {
 	// attach contract spending recorder to the context.
 	ctx = WithContractSpendingRecorder(ctx, w.contractSpendingRecorder)
 
-	contracts, err := w.bus.Contracts(ctx, up.ContractSet)
+	// fetch all active contracts
+	dlContracts, err := w.bus.ActiveContracts(ctx)
+	if jc.Check("couldn't fetch contracts from bus", err) != nil {
+		return
+	}
+
+	// fetch all contract set contracts
+	ulContracts, err := w.bus.Contracts(ctx, up.ContractSet)
 	if jc.Check("couldn't fetch contracts from bus", err) != nil {
 		return
 	}
 
 	w.pool.setCurrentHeight(up.CurrentHeight)
-	err = migrateSlab(ctx, w, &slab, contracts, w, w.downloadSectorTimeout, w.uploadSectorTimeout, w.logger)
+	err = migrateSlab(ctx, w, &slab, dlContracts, ulContracts, w, w.downloadSectorTimeout, w.uploadSectorTimeout, w.logger)
 	if jc.Check("couldn't migrate slabs", err) != nil {
 		return
 	}
@@ -868,7 +899,7 @@ func (w *worker) slabMigrateHandler(jc jape.Context) {
 			continue
 		}
 
-		for _, c := range contracts {
+		for _, c := range ulContracts {
 			if c.HostKey == ss.Host {
 				usedContracts[ss.Host] = c.ID
 				break
@@ -916,21 +947,13 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 		return
 	}
 
-	dp, err := w.bus.DownloadParams(ctx)
+	gp, err := w.bus.GougingParams(ctx)
 	if jc.Check("couldn't fetch download parameters from bus", err) != nil {
 		return
 	}
 
-	// allow overriding contract set
-	var contractset string
-	if jc.DecodeForm(queryStringParamContractSet, &contractset) != nil {
-		return
-	} else if contractset != "" {
-		dp.ContractSet = contractset
-	}
-
 	// attach gouging checker to the context
-	ctx = WithGougingChecker(ctx, dp.GougingParams)
+	ctx = WithGougingChecker(ctx, gp)
 
 	// NOTE: ideally we would use http.ServeContent in this handler, but that
 	// has performance issues. If we implemented io.ReadSeeker in the most
@@ -964,7 +987,7 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 	performance := make(map[types.PublicKey]int64)
 
 	// fetch contracts
-	set, err := w.bus.Contracts(ctx, dp.ContractSet)
+	contracts, err := w.bus.ActiveContracts(ctx)
 	if err != nil {
 		jc.Error(err, http.StatusInternalServerError)
 		return
@@ -972,7 +995,7 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 
 	// build contract map
 	availableContracts := make(map[types.PublicKey]api.ContractMetadata)
-	for _, contract := range set {
+	for _, contract := range contracts {
 		availableContracts[contract.HostKey] = contract
 	}
 
@@ -1169,17 +1192,13 @@ func (w *worker) rhpActiveContractsHandlerGET(jc jape.Context) {
 		return
 	}
 
-	cs, err := w.bus.ConsensusState(ctx)
-	if jc.Check("could not get consensus state", err) != nil {
-		return
-	}
 	gp, err := w.bus.GougingParams(ctx)
 	if jc.Check("could not get gouging parameters", err) != nil {
 		return
 	}
 	ctx = WithGougingChecker(ctx, gp)
 
-	contracts, errs := w.fetchActiveContracts(ctx, busContracts, hosttimeout, cs.BlockHeight)
+	contracts, errs := w.fetchActiveContracts(ctx, busContracts, hosttimeout)
 	resp := api.ContractsResponse{Contracts: contracts}
 	if errs != nil {
 		resp.Error = errs.Error()
@@ -1206,7 +1225,29 @@ func (w *worker) accountHandlerGET(jc jape.Context) {
 }
 
 // New returns an HTTP handler that serves the worker API.
-func New(masterKey [32]byte, id string, b Bus, contractLockingDuration, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, maxDownloadOverdrive, maxUploadOverdrive int, l *zap.Logger) *worker {
+func New(masterKey [32]byte, id string, b Bus, contractLockingDuration, sessionLockTimeout, sessionReconectTimeout, sessionTTL, busFlushInterval, downloadSectorTimeout, uploadSectorTimeout time.Duration, maxDownloadOverdrive, maxUploadOverdrive uint64, l *zap.Logger) (*worker, error) {
+	if contractLockingDuration == 0 {
+		return nil, errors.New("contract lock duration must be positive")
+	}
+	if sessionLockTimeout == 0 {
+		return nil, errors.New("session lock timeout must be positive")
+	}
+	if sessionReconectTimeout == 0 {
+		return nil, errors.New("session reconnect timeout must be positive")
+	}
+	if sessionTTL == 0 {
+		return nil, errors.New("session TTL must be positive")
+	}
+	if busFlushInterval == 0 {
+		return nil, errors.New("bus flush interval must be positive")
+	}
+	if downloadSectorTimeout == 0 {
+		return nil, errors.New("download sector timeout must be positive")
+	}
+	if uploadSectorTimeout == 0 {
+		return nil, errors.New("upload sector timeout must be positive")
+	}
+
 	w := &worker{
 		contractLockingDuration: contractLockingDuration,
 		id:                      id,
@@ -1224,7 +1265,7 @@ func New(masterKey [32]byte, id string, b Bus, contractLockingDuration, sessionL
 	w.initAccounts(b)
 	w.initContractSpendingRecorder()
 	w.initPriceTables()
-	return w
+	return w, nil
 }
 
 // Handler returns an HTTP handler that serves the worker API.
@@ -1304,11 +1345,12 @@ type contractLock struct {
 	locker ContractLocker
 	logger *zap.SugaredLogger
 
-	ctx      context.Context
-	stopChan chan struct{}
+	stopCtx       context.Context
+	stopCtxCancel context.CancelFunc
 }
 
-func newContractLock(ctx context.Context, fcid types.FileContractID, lockID uint64, d time.Duration, locker ContractLocker, logger *zap.SugaredLogger) *contractLock {
+func newContractLock(fcid types.FileContractID, lockID uint64, d time.Duration, locker ContractLocker, logger *zap.SugaredLogger) *contractLock {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &contractLock{
 		lockID: lockID,
 		fcid:   fcid,
@@ -1316,8 +1358,8 @@ func newContractLock(ctx context.Context, fcid types.FileContractID, lockID uint
 		locker: locker,
 		logger: logger,
 
-		ctx:      ctx,
-		stopChan: make(chan struct{}),
+		stopCtx:       ctx,
+		stopCtxCancel: cancel,
 	}
 }
 
@@ -1326,7 +1368,7 @@ func (cl *contractLock) Release(ctx context.Context) error {
 	defer span.End()
 
 	// Stop background loop.
-	close(cl.stopChan)
+	cl.stopCtxCancel()
 
 	// Create a new context with the span that times out after a certain amount
 	// of time.  That's because the context passed to this method might be
@@ -1361,20 +1403,18 @@ func (cl *contractLock) keepaliveLoop() {
 	// Loop until stopped.
 	for {
 		select {
-		case <-cl.ctx.Done():
-			return // interrupted
-		case <-cl.stopChan:
+		case <-cl.stopCtx.Done():
 			return // released
 		case <-t.C:
 		}
-		if err := cl.locker.KeepaliveContract(cl.ctx, cl.fcid, cl.lockID, cl.d); err != nil {
+		if err := cl.locker.KeepaliveContract(cl.stopCtx, cl.fcid, cl.lockID, cl.d); err != nil && !errors.Is(err, context.Canceled) {
 			cl.logger.Errorw(fmt.Sprintf("failed to send keepalive: %v", err), "contract", cl.fcid, "lockID", cl.lockID)
 			return
 		}
 	}
 }
 
-func (w *worker) AcquireContract(ctx context.Context, fcid types.FileContractID, priority int) (_ contractReleaser, err error) {
+func (w *worker) acquireRevision(ctx context.Context, fcid types.FileContractID, priority int) (_ revisionUnlocker, err error) {
 	ctx, span := tracing.Tracer.Start(ctx, "tracedContractLocker.AcquireContract")
 	defer span.End()
 	span.SetAttributes(attribute.Stringer("contract", fcid))
@@ -1385,7 +1425,7 @@ func (w *worker) AcquireContract(ctx context.Context, fcid types.FileContractID,
 		span.RecordError(err)
 		return nil, err
 	}
-	cl := newContractLock(ctx, fcid, lockID, w.contractLockingDuration, w.bus, w.logger)
+	cl := newContractLock(fcid, lockID, w.contractLockingDuration, w.bus, w.logger)
 	go cl.keepaliveLoop()
 	return cl, nil
 }

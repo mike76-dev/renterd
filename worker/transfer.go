@@ -31,21 +31,24 @@ var (
 	errUploadSectorTimeout   = errors.New("upload sector timed out")
 )
 
-// A sectorStore stores contract data.
-type sectorStore interface {
+type hostV2 interface {
 	Contract() types.FileContractID
 	HostKey() types.PublicKey
-	UploadSector(ctx context.Context, sector *[rhpv2.SectorSize]byte) (types.Hash256, error)
-	DownloadSector(ctx context.Context, w io.Writer, root types.Hash256, offset, length uint64) error
 	DeleteSectors(ctx context.Context, roots []types.Hash256) error
 }
 
-type storeProvider interface {
-	withHostV2(context.Context, types.FileContractID, types.PublicKey, string, func(sectorStore) error) (err error)
-	withHostV3(context.Context, types.FileContractID, types.PublicKey, string, func(sectorStore) error) (err error)
+type hostV3 interface {
+	hostV2
+	UploadSector(ctx context.Context, sector *[rhpv2.SectorSize]byte, rev *types.FileContractRevision) (types.Hash256, error)
+	DownloadSector(ctx context.Context, w io.Writer, root types.Hash256, offset, length uint64) error
 }
 
-func parallelUploadSlab(ctx context.Context, sp storeProvider, shards [][]byte, contracts []api.ContractMetadata, locker contractLocker, uploadSectorTimeout time.Duration, maxOverdrive int, logger *zap.SugaredLogger) ([]object.Sector, []int, error) {
+type hostProvider interface {
+	withHostV2(context.Context, types.FileContractID, types.PublicKey, string, func(hostV2) error) (err error)
+	withHostV3(context.Context, types.FileContractID, types.PublicKey, string, func(hostV3) error) (err error)
+}
+
+func parallelUploadSlab(ctx context.Context, hp hostProvider, shards [][]byte, contracts []api.ContractMetadata, locker revisionLocker, uploadSectorTimeout time.Duration, maxOverdrive uint64, logger *zap.SugaredLogger) ([]object.Sector, []int, error) {
 	// ensure the context is cancelled when the slab is uploaded
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -66,9 +69,8 @@ func parallelUploadSlab(ctx context.Context, sp storeProvider, shards [][]byte, 
 		err       error
 	}
 	respChan := make(chan resp, 2*len(contracts)) // every host can send up to 2 responses
-	worker := func(r req, hostIndex int) {
+	worker := func(r req, hostIndex int, contract api.ContractMetadata) {
 		doneChan := make(chan struct{})
-		contract := contracts[hostIndex]
 
 		// Trace the upload.
 		ctx, span := tracing.Tracer.Start(r.finishedCtx, "upload-request")
@@ -77,33 +79,29 @@ func parallelUploadSlab(ctx context.Context, sp storeProvider, shards [][]byte, 
 
 		go func(r req) {
 			defer close(doneChan)
-
-			contractLock, err := locker.AcquireContract(ctx, contract.ID, lockingPriorityUpload)
-			if err != nil {
-				respChan <- resp{hostIndex, r, types.Hash256{}, err}
-				span.SetStatus(codes.Error, "acquiring the contract failed")
-				span.RecordError(err)
-				return
+			var root types.Hash256
+			var err error
+			err = locker.withRevision(ctx, defaultRevisionFetchTimeout, contract.ID, contract.HostKey, contract.SiamuxAddr, lockingPriorityUpload, func(rev types.FileContractRevision) error {
+				return hp.withHostV3(ctx, contract.ID, contract.HostKey, contract.SiamuxAddr, func(ss hostV3) error {
+					root, err = ss.UploadSector(ctx, (*[rhpv2.SectorSize]byte)(shards[r.shardIndex]), &rev)
+					return err
+				})
+			})
+			var aborted bool
+			select {
+			case <-ctx.Done():
+				aborted = true
+			default:
 			}
-
-			var res resp
-			if err := sp.withHostV2(ctx, contract.ID, contract.HostKey, contract.HostIP, func(ss sectorStore) error {
-				root, err := ss.UploadSector(ctx, (*[rhpv2.SectorSize]byte)(shards[r.shardIndex]))
-				if err != nil {
-					span.SetStatus(codes.Error, "uploading the sector failed")
-					span.RecordError(err)
-				}
-				res = resp{hostIndex, r, root, err}
-				return nil // only return the error in the response
-			}); err != nil && !errors.Is(err, context.Canceled) {
-				logger.Errorf("withHostV2 failed when uploading sector, err: %v", err)
+			if err != nil && !aborted {
+				logger.Errorf("%x: withHostV3 failed when uploading sector, err: %v", contract.HostKey[:4], err)
 			}
-
-			// NOTE: we release before sending the response to ensure the context isn't cancelled
-			if err := contractLock.Release(ctx); err != nil {
-				logger.Errorf("failed to release lock on contract %v, err: %v", contract.ID, err)
+			respChan <- resp{
+				err:       err,
+				hostIndex: hostIndex,
+				req:       r,
+				root:      root,
 			}
-			respChan <- res
 		}(r)
 
 		if uploadSectorTimeout > 0 {
@@ -151,7 +149,7 @@ func parallelUploadSlab(ctx context.Context, sp storeProvider, shards [][]byte, 
 	// helper function for handling requests. Will return true if either a new
 	// worker was launched for the request or if the request was already
 	// finished.
-	inflight := 0
+	var inflight uint64
 	handleRequest := func(r req) bool {
 		if isReqFinished(r) {
 			return true
@@ -160,7 +158,7 @@ func parallelUploadSlab(ctx context.Context, sp storeProvider, shards [][]byte, 
 		if hostIndex == -1 {
 			return false
 		}
-		go worker(r, hostIndex)
+		go worker(r, hostIndex, contracts[hostIndex])
 		inflight++
 		return true
 	}
@@ -180,7 +178,7 @@ func parallelUploadSlab(ctx context.Context, sp storeProvider, shards [][]byte, 
 	// collect responses
 	var errs HostErrorSet
 	sectors := make([]object.Sector, len(shards))
-	rem := len(shards)
+	rem := uint64(len(shards))
 	var toLaunch []req
 	var slowResponses []resp
 	for inflight > 0 {
@@ -253,7 +251,7 @@ func parallelUploadSlab(ctx context.Context, sp storeProvider, shards [][]byte, 
 	return sectors, slowHosts, nil
 }
 
-func uploadSlab(ctx context.Context, sp storeProvider, r io.Reader, m, n uint8, contracts []api.ContractMetadata, locker contractLocker, uploadSectorTimeout time.Duration, maxOverdrive int, logger *zap.SugaredLogger) (object.Slab, int, []int, error) {
+func uploadSlab(ctx context.Context, hp hostProvider, r io.Reader, m, n uint8, contracts []api.ContractMetadata, locker revisionLocker, uploadSectorTimeout time.Duration, maxOverdrive uint64, logger *zap.SugaredLogger) (object.Slab, int, []int, error) {
 	ctx, span := tracing.Tracer.Start(ctx, "uploadSlab")
 	defer span.End()
 
@@ -270,7 +268,7 @@ func uploadSlab(ctx context.Context, sp storeProvider, r io.Reader, m, n uint8, 
 	s.Encode(buf, shards)
 	s.Encrypt(shards)
 
-	sectors, slowHosts, err := parallelUploadSlab(ctx, sp, shards, contracts, locker, uploadSectorTimeout, maxOverdrive, logger)
+	sectors, slowHosts, err := parallelUploadSlab(ctx, hp, shards, contracts, locker, uploadSectorTimeout, maxOverdrive, logger)
 	if err != nil {
 		return object.Slab{}, 0, nil, err
 	}
@@ -279,7 +277,7 @@ func uploadSlab(ctx context.Context, sp storeProvider, r io.Reader, m, n uint8, 
 	return s, length, slowHosts, nil
 }
 
-func parallelDownloadSlab(ctx context.Context, sp storeProvider, ss object.SlabSlice, contracts []api.ContractMetadata, downloadSectorTimeout time.Duration, maxOverdrive int, logger *zap.SugaredLogger) ([][]byte, []int64, error) {
+func parallelDownloadSlab(ctx context.Context, hp hostProvider, ss object.SlabSlice, contracts []api.ContractMetadata, downloadSectorTimeout time.Duration, maxOverdrive uint64, logger *zap.SugaredLogger) ([][]byte, []int64, error) {
 	// prepopulate the timings with a value for all hosts to ensure unused hosts aren't necessarily favoured in consecutive downloads
 	timings := make([]int64, len(contracts))
 	for i := 0; i < len(contracts); i++ {
@@ -334,7 +332,7 @@ func parallelDownloadSlab(ctx context.Context, sp storeProvider, ss object.SlabS
 			contract := contracts[hostIndex]
 			shard := &ss.Shards[r.shardIndex]
 
-			if err := sp.withHostV3(ctx, contract.ID, contract.HostKey, contract.SiamuxAddr, func(ss sectorStore) error {
+			if err := hp.withHostV3(ctx, contract.ID, contract.HostKey, contract.SiamuxAddr, func(ss hostV3) error {
 				buf := bytes.NewBuffer(make([]byte, 0, rhpv2.SectorSize))
 				err := ss.DownloadSector(ctx, buf, shard.Root, r.offset, r.length)
 				if err != nil {
@@ -381,7 +379,7 @@ func parallelDownloadSlab(ctx context.Context, sp storeProvider, ss object.SlabS
 	}
 
 	// helper to find worker for a shard.
-	inflight := 0
+	var inflight uint64
 	workerForSlab := func() (int, int) {
 		for shardIndex := range ss.Shards {
 			if shardInfos[shardIndex].done {
@@ -432,7 +430,7 @@ func parallelDownloadSlab(ctx context.Context, sp storeProvider, ss object.SlabS
 	var errs HostErrorSet
 	shards := make([][]byte, len(ss.Shards))
 	rem := ss.MinShards
-	var overdrive int
+	var overdrive uint64
 	for inflight > 0 {
 		resp := <-respChan
 
@@ -469,7 +467,7 @@ func parallelDownloadSlab(ctx context.Context, sp storeProvider, ss object.SlabS
 		}
 
 		// launch more hosts if necessary
-		for inflight < int(ss.MinShards)+overdrive {
+		for inflight < uint64(ss.MinShards)+overdrive {
 			if !launchWorker() {
 				break
 			}
@@ -486,11 +484,11 @@ func parallelDownloadSlab(ctx context.Context, sp storeProvider, ss object.SlabS
 	return shards, timings, nil
 }
 
-func downloadSlab(ctx context.Context, sp storeProvider, out io.Writer, ss object.SlabSlice, contracts []api.ContractMetadata, downloadSectorTimeout time.Duration, maxOverdrive int, logger *zap.SugaredLogger) ([]int64, error) {
+func downloadSlab(ctx context.Context, hp hostProvider, out io.Writer, ss object.SlabSlice, contracts []api.ContractMetadata, downloadSectorTimeout time.Duration, maxOverdrive uint64, logger *zap.SugaredLogger) ([]int64, error) {
 	ctx, span := tracing.Tracer.Start(ctx, "parallelDownloadSlab")
 	defer span.End()
 
-	shards, timings, err := parallelDownloadSlab(ctx, sp, ss, contracts, downloadSectorTimeout, maxOverdrive, logger)
+	shards, timings, err := parallelDownloadSlab(ctx, hp, ss, contracts, downloadSectorTimeout, maxOverdrive, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -531,20 +529,20 @@ func slabsForDownload(slabs []object.SlabSlice, offset, length int64) []object.S
 	return slabs
 }
 
-func deleteSlabs(ctx context.Context, slabs []object.Slab, hosts []sectorStore) error {
-	rootsBysectorStore := make(map[types.PublicKey][]types.Hash256)
+func deleteSlabs(ctx context.Context, slabs []object.Slab, hosts []hostV2) error {
+	rootsByHost := make(map[types.PublicKey][]types.Hash256)
 	for _, s := range slabs {
 		for _, sector := range s.Shards {
-			rootsBysectorStore[sector.Host] = append(rootsBysectorStore[sector.Host], sector.Root)
+			rootsByHost[sector.Host] = append(rootsByHost[sector.Host], sector.Root)
 		}
 	}
 
 	errChan := make(chan *HostError)
 	for _, h := range hosts {
-		go func(h sectorStore) {
+		go func(h hostV2) {
 			// NOTE: if host is not storing any sectors, the map lookup will return
 			// nil, making this a no-op
-			err := h.DeleteSectors(ctx, rootsBysectorStore[h.HostKey()])
+			err := h.DeleteSectors(ctx, rootsByHost[h.HostKey()])
 			if err != nil {
 				errChan <- &HostError{h.HostKey(), err}
 			} else {
@@ -565,7 +563,7 @@ func deleteSlabs(ctx context.Context, slabs []object.Slab, hosts []sectorStore) 
 	return nil
 }
 
-func migrateSlab(ctx context.Context, sp storeProvider, s *object.Slab, contracts []api.ContractMetadata, locker contractLocker, downloadSectorTimeout, uploadSectorTimeout time.Duration, logger *zap.SugaredLogger) error {
+func migrateSlab(ctx context.Context, hp hostProvider, s *object.Slab, dlContracts, ulContracts []api.ContractMetadata, locker revisionLocker, downloadSectorTimeout, uploadSectorTimeout time.Duration, logger *zap.SugaredLogger) error {
 	ctx, span := tracing.Tracer.Start(ctx, "migrateSlab")
 	defer span.End()
 
@@ -573,7 +571,7 @@ func migrateSlab(ctx context.Context, sp storeProvider, s *object.Slab, contract
 	usedMap := make(map[types.PublicKey]struct{})
 
 	// make a map of good hosts
-	for _, c := range contracts {
+	for _, c := range ulContracts {
 		hostsMap[c.HostKey] = struct{}{}
 	}
 
@@ -601,11 +599,9 @@ func migrateSlab(ctx context.Context, sp storeProvider, s *object.Slab, contract
 		return nil
 	}
 
-	// perform some sanity checks
+	// perform some sanity check
 	if len(s.Shards)-len(shardIndices) < int(s.MinShards) {
 		return fmt.Errorf("not enough hosts to download unhealthy shard, %d<%d", len(s.Shards)-len(shardIndices), int(s.MinShards))
-	} else if len(shardIndices) > len(contracts) {
-		return errors.New("not enough hosts to migrate shard")
 	}
 
 	// download + reconstruct slab
@@ -614,7 +610,7 @@ func migrateSlab(ctx context.Context, sp storeProvider, s *object.Slab, contract
 		Offset: 0,
 		Length: uint32(s.MinShards) * rhpv2.SectorSize,
 	}
-	shards, _, err := parallelDownloadSlab(ctx, sp, ss, contracts, downloadSectorTimeout, 0, logger) // no overdrive for downloads
+	shards, _, err := parallelDownloadSlab(ctx, hp, ss, dlContracts, downloadSectorTimeout, 0, logger) // no overdrive for downloads
 	if err != nil {
 		return fmt.Errorf("failed to download slab for migration: %w", err)
 	}
@@ -631,8 +627,8 @@ func migrateSlab(ctx context.Context, sp storeProvider, s *object.Slab, contract
 	shards = shards[:len(shardIndices)]
 
 	// filter out the hosts we used already
-	filtered := contracts[:0]
-	for _, c := range contracts {
+	filtered := ulContracts[:0]
+	for _, c := range ulContracts {
 		if _, used := usedMap[c.HostKey]; !used {
 			filtered = append(filtered, c)
 		}
@@ -643,7 +639,7 @@ func migrateSlab(ctx context.Context, sp storeProvider, s *object.Slab, contract
 
 	// reupload those shards. migrations are not time-sensitive, so we can use a
 	// max overdrive of 0.
-	uploaded, _, err := parallelUploadSlab(ctx, sp, shards, filtered, locker, uploadSectorTimeout, 0, logger)
+	uploaded, _, err := parallelUploadSlab(ctx, hp, shards, filtered, locker, uploadSectorTimeout, 0, logger)
 	if err != nil {
 		return fmt.Errorf("failed to upload slab for migration: %w", err)
 	}

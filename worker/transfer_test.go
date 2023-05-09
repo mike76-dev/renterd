@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	rhpv3 "go.sia.tech/core/rhp/v3"
@@ -32,7 +33,7 @@ func (h *mockHost) HostKey() types.PublicKey {
 	return h.publicKey
 }
 
-func (h *mockHost) UploadSector(_ context.Context, sector *[rhpv2.SectorSize]byte) (types.Hash256, error) {
+func (h *mockHost) UploadSector(_ context.Context, sector *[rhpv2.SectorSize]byte, rev *types.FileContractRevision) (types.Hash256, error) {
 	root := rhpv2.SectorRoot(sector)
 	h.sectors[root] = append([]byte(nil), sector[:]...)
 	return root, nil
@@ -66,39 +67,25 @@ func newMockHost() *mockHost {
 	}
 }
 
-type mockContractLocker struct {
-	mu       sync.Mutex
-	acquired int
-	released int
+type mockRevisionLocker struct {
+	mu    sync.Mutex
+	calls int
 }
 
-type mockReleaser struct {
-	l *mockContractLocker
-}
-
-func (r *mockReleaser) Release(ctx context.Context) error {
-	r.l.mu.Lock()
-	defer r.l.mu.Unlock()
-	r.l.released++
-	return nil
-}
-
-func (l *mockContractLocker) AcquireContract(ctx context.Context, fcid types.FileContractID, priority int) (lock contractReleaser, err error) {
+func (l *mockRevisionLocker) withRevision(ctx context.Context, _ time.Duration, contractID types.FileContractID, hk types.PublicKey, siamuxAddr string, lockPriority int, fn func(revision types.FileContractRevision) error) error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.acquired++
-	return &mockReleaser{
-		l: l,
-	}, nil
+	l.calls++
+	l.mu.Unlock()
+	return fn(types.FileContractRevision{})
 }
 
-type mockStoreProvider struct {
-	hosts map[types.PublicKey]sectorStore
+type mockHostProvider struct {
+	hosts map[types.PublicKey]hostV3
 }
 
-func newMockStoreProvider(hosts []sectorStore) *mockStoreProvider {
-	sp := &mockStoreProvider{
-		hosts: make(map[types.PublicKey]sectorStore),
+func newMockHostProvider(hosts []hostV3) *mockHostProvider {
+	sp := &mockHostProvider{
+		hosts: make(map[types.PublicKey]hostV3),
 	}
 	for _, h := range hosts {
 		sp.hosts[h.HostKey()] = h
@@ -106,7 +93,7 @@ func newMockStoreProvider(hosts []sectorStore) *mockStoreProvider {
 	return sp
 }
 
-func (sp *mockStoreProvider) withHostV2(ctx context.Context, contractID types.FileContractID, hostKey types.PublicKey, hostIP string, f func(sectorStore) error) (err error) {
+func (sp *mockHostProvider) withHostV2(ctx context.Context, contractID types.FileContractID, hostKey types.PublicKey, hostIP string, f func(hostV2) error) (err error) {
 	h, exists := sp.hosts[hostKey]
 	if !exists {
 		panic("doesn't exist")
@@ -114,7 +101,7 @@ func (sp *mockStoreProvider) withHostV2(ctx context.Context, contractID types.Fi
 	return f(h)
 }
 
-func (sp *mockStoreProvider) withHostV3(ctx context.Context, contractID types.FileContractID, hostKey types.PublicKey, siamuxAddr string, f func(sectorStore) error) (err error) {
+func (sp *mockHostProvider) withHostV3(ctx context.Context, contractID types.FileContractID, hostKey types.PublicKey, siamuxAddr string, f func(hostV3) error) (err error) {
 	h, exists := sp.hosts[hostKey]
 	if !exists {
 		panic("doesn't exist")
@@ -123,7 +110,7 @@ func (sp *mockStoreProvider) withHostV3(ctx context.Context, contractID types.Fi
 }
 
 func TestMultipleObjects(t *testing.T) {
-	mockLocker := &mockContractLocker{}
+	mockLocker := &mockRevisionLocker{}
 	// generate object data
 	data := [][]byte{
 		frand.Bytes(111),
@@ -143,11 +130,11 @@ func TestMultipleObjects(t *testing.T) {
 	r := io.MultiReader(rs...)
 
 	// Prepare hosts.
-	var hosts []sectorStore
+	var hosts []hostV3
 	for i := 0; i < 10; i++ {
 		hosts = append(hosts, newMockHost())
 	}
-	sp := newMockStoreProvider(hosts)
+	sp := newMockHostProvider(hosts)
 	var contracts []api.ContractMetadata
 	for _, h := range hosts {
 		contracts = append(contracts, api.ContractMetadata{ID: h.Contract(), HostKey: h.HostKey()})
@@ -221,11 +208,8 @@ func TestMultipleObjects(t *testing.T) {
 	}
 
 	mockLocker.mu.Lock()
-	if mockLocker.acquired == 0 {
-		t.Errorf("should have acquired")
-	}
-	if mockLocker.released == 0 {
-		t.Errorf("should have released")
+	if mockLocker.calls == 0 {
+		t.Errorf("should have called the locker")
 	}
 	mockLocker.mu.Unlock()
 }

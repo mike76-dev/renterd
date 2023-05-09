@@ -160,6 +160,16 @@ func checkPriceGougingHS(gs api.GougingSettings, hs rhpv2.HostSettings) error {
 		return fmt.Errorf("MaxCollateral is below minimum: %v < %v", hs.MaxCollateral, gs.MinMaxCollateral)
 	}
 
+	// check max EA balance
+	if hs.MaxEphemeralAccountBalance.Cmp(gs.MinMaxEphemeralAccountBalance) < 0 {
+		return fmt.Errorf("'MaxEphemeralAccountBalance' is less than the allowed minimum value, %v < %v", hs.MaxEphemeralAccountBalance, gs.MinMaxEphemeralAccountBalance)
+	}
+
+	// check EA expiry
+	if hs.EphemeralAccountExpiry < gs.MinAccountExpiry {
+		return fmt.Errorf("'EphemeralAccountExpiry' is less than the allowed minimum value, %v < %v", hs.EphemeralAccountExpiry, gs.MinAccountExpiry)
+	}
+
 	return nil
 }
 
@@ -290,6 +300,11 @@ func checkPriceGougingPT(gs api.GougingSettings, cs api.ConsensusState, txnFee t
 	// check TxnFeeMinRecommended - expect it to be lower or equal than the max
 	if pt.TxnFeeMinRecommended.Cmp(pt.TxnFeeMaxRecommended) > 0 {
 		return fmt.Errorf("TxnFeeMinRecommended is greater than TxnFeeMaxRecommended, %v > %v", pt.TxnFeeMinRecommended, pt.TxnFeeMaxRecommended)
+	}
+
+	// check Validity
+	if pt.Validity < gs.MinPriceTableValidity {
+		return fmt.Errorf("'Validity' is less than the allowed minimum value, %v < %v", pt.Validity, gs.MinPriceTableValidity)
 	}
 
 	return nil
@@ -455,6 +470,10 @@ func sectorReadCostRHPv3(pt rhpv3.HostPriceTable) (types.Currency, bool) {
 	if overflow {
 		return types.ZeroCurrency, true
 	}
+	base, overflow = base.AddWithOverflow(pt.InitBaseCost)
+	if overflow {
+		return types.ZeroCurrency, true
+	}
 	// bandwidth
 	ingress, overflow := pt.UploadBandwidthCost.Mul64WithOverflow(32)
 	if overflow {
@@ -483,6 +502,10 @@ func sectorUploadCostPerMonthRHPv3(pt rhpv3.HostPriceTable) (types.Currency, boo
 		return types.ZeroCurrency, true
 	}
 	writeCost, overflow = writeCost.AddWithOverflow(pt.WriteBaseCost)
+	if overflow {
+		return types.ZeroCurrency, true
+	}
+	writeCost, overflow = writeCost.AddWithOverflow(pt.InitBaseCost)
 	if overflow {
 		return types.ZeroCurrency, true
 	}

@@ -844,13 +844,34 @@ func (b *bus) settingKeyHandlerPUT(jc jape.Context) {
 		return
 	}
 
-	js, err := json.Marshal(value)
+	data, err := json.Marshal(value)
 	if err != nil {
 		jc.Error(fmt.Errorf("couldn't marshal the given value, error: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	jc.Check("could not update setting", b.ss.UpdateSetting(jc.Request.Context(), key, string(js)))
+	switch key {
+	case api.SettingGouging:
+		var gs api.GougingSettings
+		if err := json.Unmarshal(data, &gs); err != nil {
+			jc.Error(fmt.Errorf("couldn't update gouging settings, invalid request body, %t", value), http.StatusBadRequest)
+			return
+		} else if err := gs.Validate(); err != nil {
+			jc.Error(fmt.Errorf("couldn't update gouging settings, error: %v", err), http.StatusBadRequest)
+			return
+		}
+	case api.SettingRedundancy:
+		var rs api.RedundancySettings
+		if err := json.Unmarshal(data, &rs); err != nil {
+			jc.Error(fmt.Errorf("couldn't update redundancy settings, invalid request body"), http.StatusBadRequest)
+			return
+		} else if err := rs.Validate(); err != nil {
+			jc.Error(fmt.Errorf("couldn't update redundancy settings, error: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+
+	jc.Check("could not update setting", b.ss.UpdateSetting(jc.Request.Context(), key, string(data)))
 }
 
 func (b *bus) settingKeyHandlerDELETE(jc jape.Context) {
@@ -876,26 +897,6 @@ func (b *bus) contractIDAncestorsHandler(jc jape.Context) {
 		return
 	}
 	jc.Encode(ancestors)
-}
-
-func (b *bus) paramsHandlerDownloadGET(jc jape.Context) {
-	gp, err := b.gougingParams(jc.Request.Context())
-	if jc.Check("could not get gouging parameters", err) != nil {
-		return
-	}
-
-	var css api.ContractSetSettings
-	if csss, err := b.ss.Setting(jc.Request.Context(), api.SettingContractSet); err != nil {
-		jc.Error(fmt.Errorf("could not fetch contract set setting, err: %v", err), http.StatusInternalServerError)
-		return
-	} else if err := json.Unmarshal([]byte(csss), &css); err != nil {
-		b.logger.Panicf("failed to unmarshal gouging settings '%s': %v", csss, err)
-	}
-
-	jc.Encode(api.DownloadParams{
-		ContractSet:   css.Set,
-		GougingParams: gp,
-	})
 }
 
 func (b *bus) paramsHandlerUploadGET(jc jape.Context) {
@@ -1130,6 +1131,56 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 		}
 	}
 
+	// Check redundancy settings for validity
+	var rs api.RedundancySettings
+	if rss, err := b.ss.Setting(ctx, api.SettingRedundancy); err != nil {
+		return nil, err
+	} else if err := json.Unmarshal([]byte(rss), &rs); err != nil {
+		return nil, err
+	} else if err := rs.Validate(); err != nil {
+		l.Warn(fmt.Sprintf("invalid redundancy setting found '%v', overwriting the redundancy settings with the default settings", rss))
+		bytes, _ := json.Marshal(api.DefaultRedundancySettings)
+		if err := b.ss.UpdateSetting(ctx, api.SettingRedundancy, string(bytes)); err != nil {
+			return nil, err
+		}
+	}
+
+	// Check gouging settings for validity
+	var gs api.GougingSettings
+	if gss, err := b.ss.Setting(ctx, api.SettingGouging); err != nil {
+		return nil, err
+	} else if err := json.Unmarshal([]byte(gss), &gs); err != nil {
+		return nil, err
+	} else if err := gs.Validate(); err != nil {
+		// compat: apply default EA gouging settings
+		gs.MinMaxEphemeralAccountBalance = api.DefaultGougingSettings.MinMaxEphemeralAccountBalance
+		gs.MinPriceTableValidity = api.DefaultGougingSettings.MinPriceTableValidity
+		gs.MinAccountExpiry = api.DefaultGougingSettings.MinAccountExpiry
+		if err := gs.Validate(); err == nil {
+			l.Info(fmt.Sprintf("updating gouging settings with default EA settings: %+v", gs))
+			bytes, _ := json.Marshal(gs)
+			if err := b.ss.UpdateSetting(ctx, api.SettingGouging, string(bytes)); err != nil {
+				return nil, err
+			}
+		} else {
+			// compat: apply default host block leeway settings
+			gs.HostBlockHeightLeeway = api.DefaultGougingSettings.HostBlockHeightLeeway
+			if err := gs.Validate(); err == nil {
+				l.Info(fmt.Sprintf("updating gouging settings with default HostBlockHeightLeeway settings: %v", gs))
+				bytes, _ := json.Marshal(gs)
+				if err := b.ss.UpdateSetting(ctx, api.SettingGouging, string(bytes)); err != nil {
+					return nil, err
+				}
+			} else {
+				l.Warn(fmt.Sprintf("invalid gouging setting found '%v', overwriting the gouging settings with the default settings", gss))
+				bytes, _ := json.Marshal(api.DefaultGougingSettings)
+				if err := b.ss.UpdateSetting(ctx, api.SettingGouging, string(bytes)); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
 	// Load the accounts into memory. They're saved when the bus is stopped.
 	accounts, err := eas.Accounts(ctx)
 	if err != nil {
@@ -1221,9 +1272,8 @@ func (b *bus) Handler() http.Handler {
 		"PUT    /setting/:key": b.settingKeyHandlerPUT,
 		"DELETE /setting/:key": b.settingKeyHandlerDELETE,
 
-		"GET    /params/download": b.paramsHandlerDownloadGET,
-		"GET    /params/upload":   b.paramsHandlerUploadGET,
-		"GET    /params/gouging":  b.paramsHandlerGougingGET,
+		"GET    /params/upload":  b.paramsHandlerUploadGET,
+		"GET    /params/gouging": b.paramsHandlerGougingGET,
 	}))
 }
 
