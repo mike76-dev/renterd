@@ -396,7 +396,7 @@ func (s *SQLStore) AddContract(ctx context.Context, c rhpv2.ContractRevision, to
 	return added.convert(), nil
 }
 
-func (s *SQLStore) ActiveContracts(ctx context.Context) ([]api.ContractMetadata, error) {
+func (s *SQLStore) Contracts(ctx context.Context) ([]api.ContractMetadata, error) {
 	var dbContracts []dbContract
 	err := s.db.
 		Model(&dbContract{}).
@@ -542,7 +542,7 @@ func (s *SQLStore) Contract(ctx context.Context, id types.FileContractID) (api.C
 	return contract.convert(), nil
 }
 
-func (s *SQLStore) Contracts(ctx context.Context, set string) ([]api.ContractMetadata, error) {
+func (s *SQLStore) ContractSetContracts(ctx context.Context, set string) ([]api.ContractMetadata, error) {
 	dbContracts, err := s.contracts(ctx, set)
 	if err != nil {
 		return nil, err

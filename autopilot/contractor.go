@@ -37,8 +37,8 @@ const (
 
 	// leewayPctRequiredContracts is the leeway we apply on the amount of
 	// contracts the config dictates we should have, we'll only form new
-	// contracts if the number of active contracts dips below 87.5% of the
-	// required contracts
+	// contracts if the number of contracts dips below 87.5% of the required
+	// contracts
 	leewayPctRequiredContracts = 0.875
 
 	// maxInitialContractFundingDivisor and minInitialContractFundingDivisor
@@ -131,7 +131,7 @@ func (c *contractor) performContractMaintenance(ctx context.Context, w Worker) (
 	}
 
 	// fetch current contract set
-	currentSet, err := c.ap.bus.Contracts(ctx, state.cfg.Contracts.Set)
+	currentSet, err := c.ap.bus.ContractSetContracts(ctx, state.cfg.Contracts.Set)
 	if err != nil && !strings.Contains(err.Error(), api.ErrContractSetNotFound.Error()) {
 		return err
 	}
@@ -139,7 +139,7 @@ func (c *contractor) performContractMaintenance(ctx context.Context, w Worker) (
 
 	// fetch all contracts from the worker.
 	start := time.Now()
-	resp, err := w.ActiveContracts(ctx, timeoutHostRevision)
+	resp, err := w.Contracts(ctx, timeoutHostRevision)
 	if err != nil {
 		return err
 	}
@@ -394,7 +394,7 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 	// return variables
 	toArchive = make(map[types.FileContractID]string)
 
-	// check every active contract
+	// check all contracts
 	for _, contract := range contracts {
 		// convenience variables
 		fcid := contract.ID
