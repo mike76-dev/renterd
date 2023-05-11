@@ -421,36 +421,23 @@ func (s *SQLStore) Contracts(ctx context.Context) ([]api.ContractMetadata, error
 func (s *SQLStore) AddRenewedContract(ctx context.Context, c rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, renewedFrom types.FileContractID) (_ api.ContractMetadata, err error) {
 	var renewed dbContract
 
-	if err = s.retryTransaction(func(tx *gorm.DB) error {
-		// Check if the old contract is in the archive already.
-		var ac dbArchivedContract
-		if err = tx.
-			Where(&dbArchivedContract{
-				ContractCommon: ContractCommon{FCID: fileContractID(renewedFrom)},
-			}).
-			Take(&ac).
-			Error; err == nil {
-			err = tx.Delete(&ac).Error
-			if err != nil {
-				return err
-			}
-		} else {
-			// Fetch contract we renew from.
-			oldContract, err := contract(tx, fileContractID(renewedFrom))
-			if err != nil {
-				return err
-			}
+	if err := s.retryTransaction(func(tx *gorm.DB) error {
+		// Fetch contract we renew from.
+		oldContract, err := contract(tx, fileContractID(renewedFrom))
+		if err != nil {
+			return err
+		}
 
-			// Create copy in archive.
-			err = tx.Create(&dbArchivedContract{
-				Host:      publicKey(oldContract.Host.PublicKey),
-				Reason:    api.ContractArchivalReasonRenewed,
-				RenewedTo: fileContractID(c.ID()),
-				ContractCommon: oldContract.ContractCommon,
-			}).Error
-			if err != nil {
-				return err
-			}
+		// Create copy in archive.
+		err = tx.Create(&dbArchivedContract{
+			Host:      publicKey(oldContract.Host.PublicKey),
+			Reason:    api.ContractArchivalReasonRenewed,
+			RenewedTo: fileContractID(c.ID()),
+
+			ContractCommon: oldContract.ContractCommon,
+		}).Error
+		if err != nil {
+			return err
 		}
 
 		// Add the new contract.
@@ -458,8 +445,33 @@ func (s *SQLStore) AddRenewedContract(ctx context.Context, c rhpv2.ContractRevis
 		if err != nil {
 			return err
 		}
-
 		s.knownContracts[c.ID()] = struct{}{}
+
+		// Update the old contract in the contract set to the new one.
+		err = tx.Table("contract_set_contracts").
+			Where("db_contract_id = ?", oldContract.ID).
+			Update("db_contract_id", renewed.ID).Error
+		if err != nil {
+			return err
+		}
+
+		// Update the contract_sectors table from the old contract to the new
+		// one.
+		err = tx.Table("contract_sectors").
+			Where("db_contract_id = ?", oldContract.ID).
+			Update("db_contract_id", renewed.ID).Error
+		if err != nil {
+			return err
+		}
+
+		// Finally delete the old contract.
+		res := tx.Delete(&oldContract)
+		if err := res.Error; err != nil {
+			return err
+		}
+		if res.RowsAffected != 1 {
+			return fmt.Errorf("expected to delete 1 row, deleted %d", res.RowsAffected)
+		}
 
 		return nil
 	}); err != nil {
@@ -513,9 +525,6 @@ func (s *SQLStore) ArchiveContracts(ctx context.Context, toArchive map[types.Fil
 }
 
 func (s *SQLStore) ArchiveAllContracts(ctx context.Context, reason string) error {
-	// inform satellite
-	satellite.StaticSatellite.DeleteContracts()
-
 	// fetch contract ids
 	var fcids []fileContractID
 	if err := s.db.
@@ -1113,18 +1122,6 @@ func contractsForHost(tx *gorm.DB, host dbHost) (contracts []dbContract, err err
 // addContract adds a contract to the store.
 func addContract(tx *gorm.DB, c rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, renewedFrom types.FileContractID) (dbContract, error) {
 	fcid := c.ID()
-
-	// If the contract is in the archive, remove it from there.
-	var ac dbArchivedContract
-	if err := tx.
-		Where(&dbArchivedContract{ContractCommon: ContractCommon{FCID: fileContractID(fcid)}}).
-		Take(&ac).
-		Error; err == nil {
-		err = tx.Delete(&ac).Error
-		if err != nil {
-			return dbContract{}, err
-		}
-	}
 
 	// Find host.
 	var host dbHost
