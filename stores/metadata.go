@@ -117,7 +117,6 @@ type (
 		Root       []byte    `gorm:"index;unique;NOT NULL;size:32"`
 
 		Contracts []dbContract `gorm:"many2many:contract_sectors;constraint:OnDelete:CASCADE"`
-		Hosts     []dbHost     `gorm:"many2many:host_sectors;constraint:OnDelete:CASCADE"`
 	}
 
 	// dbContractSector is a join table between dbContract and dbSector.
@@ -355,15 +354,19 @@ func (s *SQLStore) ObjectsStats(ctx context.Context) (api.ObjectsStats, error) {
 		if err != nil {
 			return err
 		}
+
 		// Size of objects.
-		err = tx.
-			Model(&dbSlice{}).
-			Select("SUM(length)").
-			Scan(&resp.TotalObjectsSize).
-			Error
-		if err != nil {
-			return err
+		if resp.NumObjects > 0 {
+			err = tx.
+				Model(&dbSlice{}).
+				Select("SUM(length)").
+				Scan(&resp.TotalObjectsSize).
+				Error
+			if err != nil {
+				return err
+			}
 		}
+
 		// Size of sectors
 		var sectorSizes struct {
 			SectorsSize  uint64
@@ -815,27 +818,9 @@ func (s *SQLStore) UpdateObject(ctx context.Context, key string, o object.Object
 					return err
 				}
 
-				// Look for the host referenced by the shard.
-				hostFound := true
-				var host dbHost
-				err = tx.Model(&dbHost{}).
-					Where(&dbHost{PublicKey: publicKey(shard.Host)}).
-					Take(&host).Error
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					hostFound = false
-				} else if err != nil {
-					return err
-				}
-
 				// Add contract and host to join tables.
 				if contractFound {
 					err = tx.Model(&sector).Association("Contracts").Append(&contract)
-					if err != nil {
-						return err
-					}
-				}
-				if hostFound {
-					err = tx.Model(&sector).Association("Hosts").Append(&host)
 					if err != nil {
 						return err
 					}
@@ -959,14 +944,6 @@ func (ss *SQLStore) UpdateSlab(ctx context.Context, s object.Slab, usedContracts
 					Model(&sector).
 					Association("Contracts").
 					Append(contract); err != nil {
-					return err
-				}
-			}
-			if host := hosts[publicKey(shard.Host)]; host != nil {
-				if err := tx.
-					Model(&sector).
-					Association("Hosts").
-					Append(host); err != nil {
 					return err
 				}
 			}
