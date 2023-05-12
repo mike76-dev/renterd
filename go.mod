@@ -7,7 +7,7 @@ require (
 	github.com/gotd/contrib v0.15.0
 	github.com/klauspost/reedsolomon v1.11.7
 	github.com/mike76-dev/renterd-satellite v0.1.3
-	github.com/mike76-dev/sia-web/renterd v0.1.1-0.20230506213424-2c03a17499ac
+	github.com/mike76-dev/sia-web/renterd v0.1.2
 	gitlab.com/NebulousLabs/encoding v0.0.0-20200604091946-456c3dc907fe
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.40.0
 	go.opentelemetry.io/otel v1.14.0
@@ -48,6 +48,7 @@ require (
 	github.com/klauspost/compress v1.16.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.4 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
+	github.com/mike76-dev/sia-web v0.1.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	gitlab.com/NebulousLabs/bolt v1.4.4 // indirect
 	gitlab.com/NebulousLabs/demotemutex v0.0.0-20151003192217-235395f71c40 // indirect
