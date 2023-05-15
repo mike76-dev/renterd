@@ -612,12 +612,21 @@ func readSectorCost(pt rhpv3.HostPriceTable) (types.Currency, error) {
 // uploadSectorCost returns an overestimate for the cost of uploading a sector
 // to a host
 func uploadSectorCost(pt rhpv3.HostPriceTable, endHeight uint64) (cost, collateral, storage types.Currency, _ error) {
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		return types.ZeroCurrency, types.ZeroCurrency, types.ZeroCurrency, err
+	}
 	rc := pt.BaseCost()
 	rc = rc.Add(pt.AppendSectorCost(endHeight - pt.HostBlockHeight))
 	cost, collateral = rc.Total()
 
 	// overestimate the cost by 5%
-	cost, overflow := cost.Mul64WithOverflow(21)
+	// if a Satellite is used, increase by 20% instead to prevent low budget errors
+	factor := uint64(21)
+	if cfg.Enabled {
+		factor = 24
+	}
+	cost, overflow := cost.Mul64WithOverflow(factor)
 	if overflow {
 		return types.ZeroCurrency, types.ZeroCurrency, types.ZeroCurrency, errors.New("overflow occurred while adding leeway to read sector cost")
 	}
