@@ -7,7 +7,7 @@ require (
 	github.com/gotd/contrib v0.15.0
 	github.com/klauspost/reedsolomon v1.11.7
 	github.com/mike76-dev/renterd-satellite v0.1.3
-	github.com/mike76-dev/sia-web/renterd v0.1.3
+	github.com/mike76-dev/sia-web/renterd v0.1.4
 	gitlab.com/NebulousLabs/encoding v0.0.0-20200604091946-456c3dc907fe
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.40.0
 	go.opentelemetry.io/otel v1.14.0
