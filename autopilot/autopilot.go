@@ -20,6 +20,9 @@ import (
 	"go.sia.tech/renterd/wallet"
 	"go.uber.org/zap"
 	"lukechampine.com/frand"
+
+	// Satellite
+	"github.com/mike76-dev/renterd-satellite"
 )
 
 type Store interface {
@@ -192,6 +195,19 @@ func (ap *Autopilot) Run() error {
 	if !ap.blockUntilSynced() {
 		ap.logger.Error("autopilot stopped before consensus was synced")
 		return nil
+	}
+
+	// fetch satellite config
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		ap.logger.Error("failed to fetch satellite config")
+	}
+	
+	// request any missing contracts from the satellite
+	if cfg.Enabled {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		satellite.StaticSatellite.RequestContracts(ctx)
+		cancel()
 	}
 
 	var forceScan bool

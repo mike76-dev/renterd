@@ -124,6 +124,23 @@ func (c *contractor) performContractMaintenance(ctx context.Context, w Worker) (
 		return nil
 	}
 
+	// request any new contracts from the satellite
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		c.ap.logger.Error("failed to fetch satellite config")
+	}
+	if cfg.Enabled {
+		sctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		rs, err := satellite.StaticSatellite.GetSettings(sctx)
+		if err != nil {
+			c.ap.logger.Error("failed to fetch renter settings")
+		}
+		if rs.AutoRenewContracts {
+			satellite.StaticSatellite.RequestContracts(sctx)
+		}
+	}
+
 	// fetch our wallet address
 	address, err := c.ap.bus.WalletAddress(ctx)
 	if err != nil {
