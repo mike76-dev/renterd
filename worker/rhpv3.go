@@ -620,10 +620,10 @@ func uploadSectorCost(pt rhpv3.HostPriceTable, endHeight uint64) (cost, collater
 	cost, collateral = rc.Total()
 
 	// overestimate the cost by 5%
-	// if a Satellite is used, increase by 20% instead to prevent low budget errors
+	// if a Satellite is used, increase by 25% instead to prevent low budget errors
 	factor := uint64(21)
 	if cfg.Enabled {
-		factor = 24
+		factor = 25
 	}
 	cost, overflow := cost.Mul64WithOverflow(factor)
 	if overflow {
