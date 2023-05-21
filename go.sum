@@ -251,6 +251,8 @@ github.com/mike76-dev/renterd-satellite v0.1.4-0.20230519141148-dc3864722963 h1:
 github.com/mike76-dev/renterd-satellite v0.1.4-0.20230519141148-dc3864722963/go.mod h1:SWZOizj//w0McHuqxZhKQZQ3WfE4k64YYeuwGyF6il0=
 github.com/mike76-dev/renterd-satellite v0.1.4 h1:tBQTN8MBxpd+5BTw54LOt7l75pCjtItmeWsP+AXlIx0=
 github.com/mike76-dev/renterd-satellite v0.1.4/go.mod h1:SWZOizj//w0McHuqxZhKQZQ3WfE4k64YYeuwGyF6il0=
+github.com/mike76-dev/renterd-satellite v0.1.5 h1:dyikozp029B2Wsi2B7WubCyMMh1KY/hzE9lU3DOpW9k=
+github.com/mike76-dev/renterd-satellite v0.1.5/go.mod h1:SWZOizj//w0McHuqxZhKQZQ3WfE4k64YYeuwGyF6il0=
 github.com/mike76-dev/sia-web v0.1.2 h1:4xwGz5KTNleklsrP46zZH8V00FeEZU38c2VVLOqEp2E=
 github.com/mike76-dev/sia-web v0.1.2/go.mod h1:c1XWHRk6Dj2+IqvRslmN0Z3d0J6HxVEcrpYUCFmFaws=
 github.com/mike76-dev/sia-web/renterd v0.1.1-0.20230506213424-2c03a17499ac h1:CSeqMqCZXUO0FcJcc5dJSZtem0Ik80DvF0EmvYPaI98=

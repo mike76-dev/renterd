@@ -47,7 +47,7 @@ require (
 	github.com/klauspost/compress v1.16.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.4 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
-	github.com/mike76-dev/renterd-satellite v0.1.4 // indirect
+	github.com/mike76-dev/renterd-satellite v0.1.5 // indirect
 	github.com/mike76-dev/sia-web v0.1.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	gitlab.com/NebulousLabs/bolt v1.4.4 // indirect
