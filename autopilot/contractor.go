@@ -610,6 +610,17 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, budget *
 	if err != nil {
 		return nil, err
 	}
+	if cfg.Enabled {
+		sctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		rs, err := satellite.StaticSatellite.GetSettings(sctx)
+		if err != nil {
+			c.ap.logger.Error("failed to fetch renter settings")
+		}
+		if rs.AutoRenewContracts {
+			return nil, nil // renewals are handled by satellite
+		}
+	}
 	ctx, span := tracing.Tracer.Start(ctx, "runContractRenewals")
 	defer span.End()
 
