@@ -282,15 +282,6 @@ func main() {
 	}
 	bc := bus.NewClient(busAddr, busPassword)
 
-	// Satellite.
-	satAddr := *apiAddr + "/api/satellite"
-	satPassword := getAPIPassword()
-	satellite, err := satellite.NewSatellite(bc, *dir, getSeed(), logger, satAddr, satPassword)
-	if err != nil {
-		log.Fatal("failed to create satellite, err: ", err)
-	}
-	mux.sub["/api/satellite"] = treeMux{h: auth(satellite)}
-
 	var workers []autopilot.Worker
 	workerAddrs, workerPassword := workerCfg.remoteAddrs, workerCfg.apiPassword
 	if workerAddrs == "" {
@@ -339,6 +330,17 @@ func main() {
 		go func() { autopilotErr <- runFn() }()
 		mux.sub["/api/autopilot"] = treeMux{h: auth(ap)}
 	}
+
+	// Satellite.
+	satAddr := *apiAddr + "/api/satellite"
+	satPassword := getAPIPassword()
+	autopilotAddr := *apiAddr + "/api/autopilot"
+	ac := autopilot.NewClient(autopilotAddr, satPassword)
+	satellite, err := satellite.NewSatellite(ac, bc, *dir, getSeed(), logger, satAddr, satPassword)
+	if err != nil {
+		log.Fatal("failed to create satellite, err: ", err)
+	}
+	mux.sub["/api/satellite"] = treeMux{h: auth(satellite)}
 
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(l)
