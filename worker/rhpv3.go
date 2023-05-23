@@ -312,7 +312,7 @@ func (h *host) FundAccount(ctx context.Context, balance types.Currency, revision
 			}
 			// send the new revision to the satellite
 			satellite.StaticSatellite.UpdateRevision(ctx, rhpv2.ContractRevision{Revision: *revision,}, api.ContractSpending{FundAccount: cost})
-			h.contractSpendingRecorder.Record(revision.ParentID, api.ContractSpending{FundAccount: cost})
+			h.contractSpendingRecorder.Record(revision.ParentID, revision.RevisionNumber, api.ContractSpending{FundAccount: cost})
 			return nil
 		})
 	})
