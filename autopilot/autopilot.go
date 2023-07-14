@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	rhpv3 "go.sia.tech/core/rhp/v3"
 	"go.sia.tech/core/types"
 	"go.sia.tech/jape"
+	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
@@ -25,15 +27,14 @@ import (
 	"github.com/mike76-dev/renterd-satellite"
 )
 
-type Store interface {
-	Config() api.AutopilotConfig
-	SetConfig(c api.AutopilotConfig) error
-}
-
 type Bus interface {
 	// Accounts
 	Account(ctx context.Context, id rhpv3.Account, host types.PublicKey) (account api.Account, err error)
 	Accounts(ctx context.Context) (accounts []api.Account, err error)
+
+	// Autopilots
+	Autopilot(ctx context.Context, id string) (autopilot api.Autopilot, err error)
+	UpdateAutopilot(ctx context.Context, autopilot api.Autopilot) error
 
 	// wallet
 	WalletAddress(ctx context.Context) (types.Address, error)
@@ -70,7 +71,8 @@ type Bus interface {
 	ConsensusState(ctx context.Context) (api.ConsensusState, error)
 
 	// objects
-	SlabsForMigration(ctx context.Context, healthCutoff float64, set string, limit int) ([]object.Slab, error)
+	Slab(ctx context.Context, key object.EncryptionKey) (object.Slab, error)
+	SlabsForMigration(ctx context.Context, healthCutoff float64, set string, limit int) ([]api.UnhealthySlab, error)
 
 	// settings
 	UpdateSetting(ctx context.Context, key string, value interface{}) error
@@ -82,47 +84,52 @@ type Worker interface {
 	Account(ctx context.Context, hostKey types.PublicKey) (rhpv3.Account, error)
 	Contracts(ctx context.Context, hostTimeout time.Duration) (api.ContractsResponse, error)
 	ID(ctx context.Context) (string, error)
-	MigrateSlab(ctx context.Context, s object.Slab) error
+	MigrateSlab(ctx context.Context, s object.Slab, set string) error
 	RHPForm(ctx context.Context, endHeight uint64, hk types.PublicKey, hostIP string, renterAddress types.Address, renterFunds types.Currency, hostCollateral types.Currency) (rhpv2.ContractRevision, []types.Transaction, error)
 	RHPFund(ctx context.Context, contractID types.FileContractID, hostKey types.PublicKey, hostIP, siamuxAddr string, balance types.Currency) (err error)
-	RHPPriceTable(ctx context.Context, hostKey types.PublicKey, siamuxAddr string) (hostdb.HostPriceTable, error)
+	RHPPriceTable(ctx context.Context, hostKey types.PublicKey, siamuxAddr string, timeout time.Duration) (hostdb.HostPriceTable, error)
 	RHPRenew(ctx context.Context, fcid types.FileContractID, endHeight uint64, hk types.PublicKey, hostIP string, hostAddress, renterAddress types.Address, renterFunds, newCollateral types.Currency, windowSize uint64) (rhpv2.ContractRevision, []types.Transaction, error)
 	RHPScan(ctx context.Context, hostKey types.PublicKey, hostIP string, timeout time.Duration) (api.RHPScanResponse, error)
 	RHPSync(ctx context.Context, contractID types.FileContractID, hostKey types.PublicKey, hostIP, siamuxAddr string) (err error)
 }
 
 type Autopilot struct {
+	id string
+
 	bus     Bus
 	logger  *zap.SugaredLogger
-	state   loopState
-	store   Store
 	workers *workerPool
 
-	a *accounts
-	c *contractor
-	m *migrator
-	s *scanner
+	mu         sync.Mutex
+	configured bool
+	synced     bool
+	state      state
+
+	alerts *alerts.Manager
+	a      *accounts
+	c      *contractor
+	m      *migrator
+	s      *scanner
 
 	tickerDuration time.Duration
 	wg             sync.WaitGroup
 
-	startStopMu sync.Mutex
-	running     bool
-	ticker      *time.Ticker
-	triggerChan chan bool
-	stopChan    chan struct{}
+	startStopMu  sync.Mutex
+	runningSince time.Time
+	stopChan     chan struct{}
+	ticker       *time.Ticker
+	triggerChan  chan bool
 }
 
-// loopState holds a bunch of state variables that are used by the autopilot and
-// updated in every iteration. The state is not protected by a mutex because the
-// autopilot's loop is single threaded and the state should never be accessed
-// from multiple goroutines.
-type loopState struct {
-	cfg api.AutopilotConfig
-	cs  api.ConsensusState
-	rs  api.RedundancySettings
+// state holds a bunch of variables that are used by the autopilot and updated
+type state struct {
 	gs  api.GougingSettings
-	fee types.Currency
+	rs  api.RedundancySettings
+	cfg api.AutopilotConfig
+
+	address types.Address
+	fee     types.Currency
+	period  uint64
 }
 
 // workerPool contains all workers known to the autopilot.  Users can call
@@ -151,31 +158,33 @@ func (wp *workerPool) withWorker(workerFunc func(Worker)) {
 	workerFunc(wp.workers[frand.Intn(len(wp.workers))])
 }
 
-// Actions returns the autopilot actions that have occurred since the given time.
-func (ap *Autopilot) Actions(since time.Time, max int) []api.Action {
-	panic("unimplemented")
+func (wp *workerPool) withWorkers(workerFunc func([]Worker)) {
+	wp.mu.RLock()
+	defer wp.mu.RUnlock()
+	workerFunc(wp.workers)
 }
 
-// Config returns the autopilot's current configuration.
-func (ap *Autopilot) Config() api.AutopilotConfig {
-	return ap.store.Config()
-}
-
-// SetConfig updates the autopilot's configuration.
-func (ap *Autopilot) SetConfig(c api.AutopilotConfig) error {
-	if err := c.Validate(); err != nil {
-		return err
-	}
-	return ap.store.SetConfig(c)
+// Handler returns an HTTP handler that serves the autopilot api.
+func (ap *Autopilot) Handler() http.Handler {
+	return jape.Mux(tracing.TracedRoutes(api.DefaultAutopilotID, map[string]jape.Handler{
+		"GET    /alerts":         ap.handleGETAlerts,
+		"POST   /alerts/dismiss": ap.handlePOSTAlertsDismiss,
+		"GET    /config":         ap.configHandlerGET,
+		"PUT    /config":         ap.configHandlerPUT,
+		"POST   /debug/trigger":  ap.triggerHandlerPOST,
+		"POST   /hosts":          ap.hostsHandlerPOST,
+		"GET    /host/:hostKey":  ap.hostHandlerGET,
+		"GET    /status":         ap.statusHandlerGET,
+	}))
 }
 
 func (ap *Autopilot) Run() error {
 	ap.startStopMu.Lock()
-	if ap.running {
+	if ap.isRunning() {
 		ap.startStopMu.Unlock()
 		return errors.New("already running")
 	}
-	ap.running = true
+	ap.runningSince = time.Now()
 	ap.stopChan = make(chan struct{})
 	ap.triggerChan = make(chan bool)
 	ap.ticker = time.NewTicker(ap.tickerDuration)
@@ -184,11 +193,10 @@ func (ap *Autopilot) Run() error {
 	defer ap.wg.Done()
 	ap.startStopMu.Unlock()
 
-	// update the contract set setting
-	setting := api.ContractSetSettings{Set: ap.store.Config().Contracts.Set}
-	err := ap.bus.UpdateSetting(context.Background(), api.SettingContractSet, setting)
-	if err != nil {
-		ap.logger.Errorf("failed to update contract set setting, err: %v", err)
+	// block until the autopilot is configured
+	if !ap.blockUntilConfigured() {
+		ap.logger.Error("autopilot stopped before it was able to confirm it was configured in the bus")
+		return nil
 	}
 
 	// block until consensus is synced
@@ -234,17 +242,10 @@ func (ap *Autopilot) Run() error {
 			// iteration of the loop, keeping a state object ensures we use the
 			// same state throughout the entire iteration and we don't needless
 			// fetch the same information twice
-			err = ap.updateLoopState(ctx)
+			err = ap.updateState(ctx)
 			if err != nil {
-				ap.logger.Errorf("failed to update loop state, err: %v", err)
+				ap.logger.Errorf("failed to update state, err: %v", err)
 				return
-			}
-
-			// update the contract set setting
-			setting = api.ContractSetSettings{Set: ap.store.Config().Contracts.Set}
-			err = ap.bus.UpdateSetting(context.Background(), api.SettingContractSet, setting)
-			if err != nil {
-				ap.logger.Errorf("failed to update contract set setting, err: %v", err)
 			}
 
 			// initiate a host scan
@@ -257,9 +258,6 @@ func (ap *Autopilot) Run() error {
 				return
 			}
 
-			// update current period
-			ap.c.updateCurrentPeriod()
-
 			// perform wallet maintenance
 			err = ap.c.performWalletMaintenance(ctx)
 			if err != nil {
@@ -267,15 +265,20 @@ func (ap *Autopilot) Run() error {
 			}
 
 			// perform maintenance
-			err = ap.c.performContractMaintenance(ctx, w)
+			setChanged, err := ap.c.performContractMaintenance(ctx, w)
 			if err != nil {
 				ap.logger.Errorf("contract maintenance failed, err: %v", err)
 			}
 			maintenanceSuccess := err == nil
 
+			// upon success, notify the migrator. The health of slabs might have
+			// changed.
+			if maintenanceSuccess && setChanged {
+				ap.m.SignalMaintenanceFinished()
+			}
+
 			// launch account refills after successful contract maintenance.
 			if maintenanceSuccess {
-				ap.a.UpdateContracts(ctx, ap.state.cfg)
 				launchAccountRefillsOnce.Do(func() {
 					ap.logger.Debug("account refills loop launched")
 					go ap.a.refillWorkersAccountsLoop(ap.stopChan)
@@ -285,7 +288,7 @@ func (ap *Autopilot) Run() error {
 			}
 
 			// migration
-			ap.m.tryPerformMigrations(ctx, w)
+			ap.m.tryPerformMigrations(ctx, ap.workers)
 		})
 
 		select {
@@ -305,14 +308,20 @@ func (ap *Autopilot) Shutdown(_ context.Context) error {
 	ap.startStopMu.Lock()
 	defer ap.startStopMu.Unlock()
 
-	if ap.running {
+	if ap.isRunning() {
 		ap.ticker.Stop()
 		close(ap.stopChan)
 		close(ap.triggerChan)
 		ap.wg.Wait()
-		ap.running = false
+		ap.runningSince = time.Time{}
 	}
 	return nil
+}
+
+func (ap *Autopilot) State() state {
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	return ap.state
 }
 
 func (ap *Autopilot) Trigger(forceScan bool) bool {
@@ -327,6 +336,49 @@ func (ap *Autopilot) Trigger(forceScan bool) bool {
 	}
 }
 
+func (ap *Autopilot) Uptime() (dur time.Duration) {
+	ap.startStopMu.Lock()
+	defer ap.startStopMu.Unlock()
+	if ap.isRunning() {
+		dur = time.Since(ap.runningSince)
+	}
+	return
+}
+
+func (ap *Autopilot) blockUntilConfigured() bool {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	var once sync.Once
+
+	for {
+		select {
+		case <-ap.stopChan:
+			return false
+		case <-ticker.C:
+		}
+
+		// try and fetch the config
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, err := ap.bus.Autopilot(ctx, api.DefaultAutopilotID)
+		cancel()
+
+		// if the config was not found, or we were unable to fetch it, keep blocking
+		if err != nil && strings.Contains(err.Error(), api.ErrAutopilotNotFound.Error()) {
+			once.Do(func() { ap.logger.Info("autopilot is waiting to be configured...") })
+			continue
+		} else if err != nil {
+			ap.logger.Errorf("autopilot is unable to fetch its configuration from the bus, err: %v", err)
+			continue
+		}
+
+		ap.mu.Lock()
+		ap.configured = true
+		ap.mu.Unlock()
+		return true
+	}
+}
+
 func (ap *Autopilot) blockUntilSynced() bool {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -336,26 +388,50 @@ func (ap *Autopilot) blockUntilSynced() bool {
 		case <-ap.stopChan:
 			return false
 		case <-ticker.C:
-			if synced := func() bool {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-
-				cs, err := ap.bus.ConsensusState(ctx)
-				if err != nil {
-					ap.logger.Errorf("failed to get consensus state, err: %v", err)
-				}
-
-				return cs.Synced
-			}(); synced {
-				return true
-			}
 		}
+
+		// try and fetch consensus
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cs, err := ap.bus.ConsensusState(ctx)
+		cancel()
+
+		// if an error occurred, or if we're not synced, we continue
+		if err != nil {
+			ap.logger.Errorf("failed to get consensus state, err: %v", err)
+			continue
+		} else if !cs.Synced {
+			continue
+		}
+
+		ap.mu.Lock()
+		ap.synced = true
+		ap.mu.Unlock()
+		return true
 	}
 }
 
-func (ap *Autopilot) updateLoopState(ctx context.Context) error {
-	// fetch the current config
-	cfg := ap.store.Config()
+func (ap *Autopilot) isConfigured() bool {
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	return ap.configured
+}
+
+func (ap *Autopilot) isSynced() bool {
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	return ap.synced
+}
+
+func (ap *Autopilot) isRunning() bool {
+	return !ap.runningSince.IsZero()
+}
+
+func (ap *Autopilot) updateState(ctx context.Context) error {
+	// fetch the autopilot from the bus
+	autopilot, err := ap.bus.Autopilot(ctx, ap.id)
+	if err != nil {
+		return err
+	}
 
 	// fetch consensus state
 	cs, err := ap.bus.ConsensusState(ctx)
@@ -381,19 +457,45 @@ func (ap *Autopilot) updateLoopState(ctx context.Context) error {
 		return fmt.Errorf("could not fetch fee, err: %v", err)
 	}
 
-	// update the loop state
-	ap.state = loopState{
-		cfg: cfg,
-		cs:  cs,
-		rs:  rs,
-		gs:  gs,
-		fee: fee,
+	// fetch our wallet address
+	address, err := ap.bus.WalletAddress(ctx)
+	if err != nil {
+		return fmt.Errorf("could not fetch wallet address, err: %v", err)
 	}
-	return nil
-}
 
-func (ap *Autopilot) isSynced() bool {
-	return ap.state.cs.Synced
+	// update current period if necessary
+	if cs.Synced {
+		if autopilot.CurrentPeriod == 0 {
+			autopilot.CurrentPeriod = cs.BlockHeight
+			err := ap.bus.UpdateAutopilot(ctx, autopilot)
+			if err != nil {
+				return err
+			}
+			ap.logger.Infof("initialised current period to %d", autopilot.CurrentPeriod)
+		} else if nextPeriod := autopilot.CurrentPeriod + autopilot.Config.Contracts.Period; cs.BlockHeight >= nextPeriod {
+			prevPeriod := autopilot.CurrentPeriod
+			autopilot.CurrentPeriod = nextPeriod
+			err := ap.bus.UpdateAutopilot(ctx, autopilot)
+			if err != nil {
+				return err
+			}
+			ap.logger.Infof("updated current period from %d to %d", prevPeriod, nextPeriod)
+		}
+	}
+
+	// update the state
+	ap.mu.Lock()
+	ap.state = state{
+		gs:  gs,
+		rs:  rs,
+		cfg: autopilot.Config,
+
+		address: address,
+		fee:     fee,
+		period:  autopilot.CurrentPeriod,
+	}
+	ap.mu.Unlock()
+	return nil
 }
 
 func (ap *Autopilot) isStopped() bool {
@@ -405,34 +507,58 @@ func (ap *Autopilot) isStopped() bool {
 	}
 }
 
-func (ap *Autopilot) actionsHandler(jc jape.Context) {
-	var since time.Time
-	max := -1
-	if jc.DecodeForm("since", (*api.ParamTime)(&since)) != nil || jc.DecodeForm("max", &max) != nil {
+func (ap *Autopilot) handleGETAlerts(c jape.Context) {
+	c.Encode(ap.alerts.Active())
+}
+
+func (ap *Autopilot) handlePOSTAlertsDismiss(c jape.Context) {
+	var ids []types.Hash256
+	if c.Decode(&ids) != nil {
+		return
+	} else if len(ids) == 0 {
+		c.Error(errors.New("no alerts to dismiss"), http.StatusBadRequest)
 		return
 	}
-	jc.Encode(ap.Actions(since, max))
+	ap.alerts.Dismiss(ids...)
 }
 
 func (ap *Autopilot) configHandlerGET(jc jape.Context) {
-	jc.Encode(ap.Config())
+	autopilot, err := ap.bus.Autopilot(jc.Request.Context(), ap.id)
+	if err != nil && strings.Contains(err.Error(), api.ErrAutopilotNotFound.Error()) {
+		jc.Error(errors.New("autopilot is not configured yet"), http.StatusNotFound)
+		return
+	}
+
+	if jc.Check("failed to get autopilot config", err) == nil {
+		jc.Encode(autopilot.Config)
+	}
 }
 
 func (ap *Autopilot) configHandlerPUT(jc jape.Context) {
-	var c api.AutopilotConfig
-	if jc.Decode(&c) != nil {
+	// decode and validate the config
+	var cfg api.AutopilotConfig
+	if jc.Decode(&cfg) != nil {
+		return
+	} else if err := cfg.Validate(); jc.Check("invalid autopilot config", err) != nil {
 		return
 	}
-	if jc.Check("failed to set config", ap.SetConfig(c)) != nil {
-		return
-	}
-	ap.Trigger(false) // trigger the autopilot loop
-}
 
-func (ap *Autopilot) statusHandlerGET(jc jape.Context) {
-	jc.Encode(api.AutopilotStatusResponseGET{
-		CurrentPeriod: ap.c.currentPeriod(),
-	})
+	// fetch the autopilot and update its config
+	var contractSetChanged bool
+	autopilot, err := ap.bus.Autopilot(jc.Request.Context(), ap.id)
+	if err != nil && strings.Contains(err.Error(), api.ErrAutopilotNotFound.Error()) {
+		autopilot = api.Autopilot{ID: ap.id, Config: cfg}
+	} else {
+		if autopilot.Config.Contracts.Set != cfg.Contracts.Set {
+			contractSetChanged = true
+		}
+		autopilot.Config = cfg
+	}
+
+	// update the autopilot and interrupt migrations if necessary
+	if err := jc.Check("failed to update autopilot config", ap.bus.UpdateAutopilot(jc.Request.Context(), autopilot)); err == nil && contractSetChanged {
+		ap.m.SignalMaintenanceFinished()
+	}
 }
 
 func (ap *Autopilot) triggerHandlerPOST(jc jape.Context) {
@@ -446,11 +572,12 @@ func (ap *Autopilot) triggerHandlerPOST(jc jape.Context) {
 }
 
 // New initializes an Autopilot.
-func New(store Store, bus Bus, workers []Worker, logger *zap.Logger, heartbeat time.Duration, scannerScanInterval time.Duration, scannerBatchSize, scannerMinRecentFailures, scannerNumThreads uint64, migrationHealthCutoff float64, accountsRefillInterval time.Duration) (*Autopilot, error) {
+func New(id string, bus Bus, workers []Worker, logger *zap.Logger, heartbeat time.Duration, scannerScanInterval time.Duration, scannerBatchSize, scannerMinRecentFailures, scannerNumThreads uint64, migrationHealthCutoff float64, accountsRefillInterval time.Duration, revisionSubmissionBuffer, migratorParallelSlabsPerWorker uint64) (*Autopilot, error) {
 	ap := &Autopilot{
+		alerts:  alerts.NewManager(),
+		id:      id,
 		bus:     bus,
-		logger:  logger.Sugar().Named("autopilot"),
-		store:   store,
+		logger:  logger.Sugar().Named(api.DefaultAutopilotID),
 		workers: newWorkerPool(workers),
 
 		tickerDuration: heartbeat,
@@ -468,10 +595,10 @@ func New(store Store, bus Bus, workers []Worker, logger *zap.Logger, heartbeat t
 		return nil, err
 	}
 
-	ap.a = newAccounts(ap.logger, ap.bus, ap.workers, accountsRefillInterval)
 	ap.s = scanner
-	ap.c = newContractor(ap)
-	ap.m = newMigrator(ap, migrationHealthCutoff)
+	ap.c = newContractor(ap, revisionSubmissionBuffer)
+	ap.m = newMigrator(ap, migrationHealthCutoff, migratorParallelSlabsPerWorker)
+	ap.a = newAccounts(ap, ap.bus, ap.bus, ap.workers, ap.logger, accountsRefillInterval)
 
 	return ap, nil
 }
@@ -489,29 +616,28 @@ func (ap *Autopilot) hostHandlerGET(jc jape.Context) {
 	jc.Encode(host)
 }
 
+func (ap *Autopilot) statusHandlerGET(jc jape.Context) {
+	migrating, mLastStart := ap.m.Status()
+	scanning, sLastStart := ap.s.Status()
+	jc.Encode(api.AutopilotStatusResponse{
+		Configured:         ap.isConfigured(),
+		Migrating:          migrating,
+		MigratingLastStart: api.ParamTime(mLastStart),
+		Scanning:           scanning,
+		ScanningLastStart:  api.ParamTime(sLastStart),
+		Synced:             ap.isSynced(),
+		UptimeMS:           api.ParamDuration(ap.Uptime()),
+	})
+}
+
 func (ap *Autopilot) hostsHandlerPOST(jc jape.Context) {
 	var req api.SearchHostsRequest
 	if jc.Decode(&req) != nil {
 		return
 	}
-	hosts, err := ap.c.HostInfos(jc.Request.Context(), req.FilterMode, req.AddressContains, req.KeyIn, req.Offset, req.Limit)
+	hosts, err := ap.c.HostInfos(jc.Request.Context(), req.FilterMode, req.UsabilityMode, req.AddressContains, req.KeyIn, req.Offset, req.Limit)
 	if jc.Check("failed to get host info", err) != nil {
 		return
 	}
 	jc.Encode(hosts)
-}
-
-// Handler returns an HTTP handler that serves the autopilot api.
-func (ap *Autopilot) Handler() http.Handler {
-	return jape.Mux(tracing.TracedRoutes("autopilot", map[string]jape.Handler{
-		"GET    /actions": ap.actionsHandler,
-		"GET    /config":  ap.configHandlerGET,
-		"PUT    /config":  ap.configHandlerPUT,
-		"GET    /status":  ap.statusHandlerGET,
-
-		"GET    /host/:hostKey": ap.hostHandlerGET,
-		"POST    /hosts":        ap.hostsHandlerPOST,
-
-		"POST    /debug/trigger": ap.triggerHandlerPOST,
-	}))
 }

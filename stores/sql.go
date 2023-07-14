@@ -16,6 +16,13 @@ import (
 	glogger "gorm.io/gorm/logger"
 )
 
+const (
+	// maxSQLVars is the maximum number of variables in an sql query. This
+	// number matches the sqlite default of 32766 rounded down to the nearest
+	// 1000. This is also lower than the mysql default of 65535.
+	maxSQLVars = 32000
+)
+
 type (
 	// Model defines the common fields of every table. Same as Model
 	// but excludes soft deletion since it breaks cascading deletes.
@@ -58,11 +65,16 @@ type (
 		closed       bool
 
 		knownContracts map[types.FileContractID]struct{}
+
+		spendingMu     sync.Mutex
+		interactionsMu sync.Mutex
+		objectsMu      sync.Mutex
 	}
 
 	revisionUpdate struct {
 		height uint64
 		number uint64
+		size   uint64
 	}
 )
 
@@ -109,8 +121,7 @@ func DBConfigFromEnv() (uri, user, password, dbName string) {
 // same Dialector multiple times.
 func NewSQLStore(conn gorm.Dialector, migrate bool, persistInterval time.Duration, walletAddress types.Address, logger glogger.Interface) (*SQLStore, modules.ConsensusChangeID, error) {
 	db, err := gorm.Open(conn, &gorm.Config{
-		DisableNestedTransaction: true,   // disable nesting transactions
-		Logger:                   logger, // custom logger
+		Logger: logger, // custom logger
 	})
 	if err != nil {
 		return nil, modules.ConsensusChangeID{}, err
@@ -118,25 +129,16 @@ func NewSQLStore(conn gorm.Dialector, migrate bool, persistInterval time.Duratio
 
 	// Perform migrations.
 	if migrate {
-		if err := performMigrations(db); err != nil {
-			return nil, modules.ConsensusChangeID{}, err
+		if err := performMigrations(db, logger); err != nil {
+			return nil, modules.ConsensusChangeID{}, fmt.Errorf("failed to perform migrations: %v", err)
 		}
 	}
 
 	// Get latest consensus change ID or init db.
-	var ci dbConsensusInfo
-	if err := db.
-		Where(&dbConsensusInfo{Model: Model{ID: consensusInfoID}}).
-		Attrs(dbConsensusInfo{
-			Model: Model{ID: consensusInfoID},
-			CCID:  modules.ConsensusChangeBeginning[:],
-		}).
-		FirstOrCreate(&ci).
-		Error; err != nil {
+	ci, ccid, err := initConsensusInfo(db)
+	if err != nil {
 		return nil, modules.ConsensusChangeID{}, err
 	}
-	var ccid modules.ConsensusChangeID
-	copy(ccid[:], ci.CCID)
 
 	// Check allowlist and blocklist counts
 	allowlistCnt, err := tableCount(db, &dbAllowlistEntry{})
@@ -341,7 +343,7 @@ func (ss *SQLStore) applyUpdates(force bool) (err error) {
 			}
 		}
 		for fcid, rev := range ss.unappliedRevisions {
-			if err := updateRevisionNumberAndHeight(tx, types.FileContractID(fcid), rev.height, rev.number); err != nil {
+			if err := applyRevisionUpdate(tx, types.FileContractID(fcid), rev); err != nil {
 				return fmt.Errorf("%w; failed to update revision number and height", err)
 			}
 		}
@@ -385,13 +387,57 @@ func (ss *SQLStore) applyUpdates(force bool) (err error) {
 
 func (s *SQLStore) retryTransaction(fc func(tx *gorm.DB) error, opts ...*sql.TxOptions) error {
 	var err error
-	for i := 0; i < 5; i++ {
+	timeoutIntervals := []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, time.Second, 3 * time.Second, 10 * time.Second, 10 * time.Second}
+	for i := 0; i < len(timeoutIntervals); i++ {
 		err = s.db.Transaction(fc, opts...)
 		if err == nil {
 			return nil
 		}
-		s.logger.Warn(context.Background(), fmt.Sprintf("transaction attempt %d/%d failed, err: %v", i+1, 5, err))
-		time.Sleep(200 * time.Millisecond)
+		s.logger.Warn(context.Background(), fmt.Sprintf("transaction attempt %d/%d failed, retry in %v,  err: %v", i+1, 5, timeoutIntervals[i], err))
+		time.Sleep(timeoutIntervals[i])
 	}
 	return fmt.Errorf("retryTransaction failed: %w", err)
+}
+
+func initConsensusInfo(db *gorm.DB) (dbConsensusInfo, modules.ConsensusChangeID, error) {
+	var ci dbConsensusInfo
+	if err := db.
+		Where(&dbConsensusInfo{Model: Model{ID: consensusInfoID}}).
+		Attrs(dbConsensusInfo{
+			Model: Model{ID: consensusInfoID},
+			CCID:  modules.ConsensusChangeBeginning[:],
+		}).
+		FirstOrCreate(&ci).
+		Error; err != nil {
+		return dbConsensusInfo{}, modules.ConsensusChangeID{}, err
+	}
+	var ccid modules.ConsensusChangeID
+	copy(ccid[:], ci.CCID)
+	return ci, ccid, nil
+}
+
+func (s *SQLStore) ResetConsensusSubscription() error {
+	// drop tables
+	err := s.db.Migrator().DropTable(&dbConsensusInfo{}, &dbSiacoinElement{}, &dbTransaction{})
+	if err != nil {
+		return err
+	}
+	// recreate the tables.
+	err = s.db.Migrator().AutoMigrate(&dbConsensusInfo{}, &dbSiacoinElement{}, &dbTransaction{})
+	if err != nil {
+		return err
+	}
+	// initialise the consenus_info table.
+	ci, _, err := initConsensusInfo(s.db)
+	if err != nil {
+		return err
+	}
+	// reset in-memory state.
+	s.persistMu.Lock()
+	s.chainIndex = types.ChainIndex{
+		Height: ci.Height,
+		ID:     types.BlockID(ci.BlockID),
+	}
+	s.persistMu.Unlock()
+	return nil
 }

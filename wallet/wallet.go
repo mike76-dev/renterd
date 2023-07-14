@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"sync"
@@ -95,12 +96,12 @@ type SiacoinElement struct {
 // A Transaction is an on-chain transaction relevant to a particular wallet,
 // paired with useful metadata.
 type Transaction struct {
-	Raw       types.Transaction
-	Index     types.ChainIndex
-	ID        types.TransactionID
-	Inflow    types.Currency
-	Outflow   types.Currency
-	Timestamp time.Time
+	Raw       types.Transaction   `json:"raw,omitempty"`
+	Index     types.ChainIndex    `json:"index"`
+	ID        types.TransactionID `json:"id"`
+	Inflow    types.Currency      `json:"inflow"`
+	Outflow   types.Currency      `json:"outflow"`
+	Timestamp time.Time           `json:"timestamp"`
 }
 
 // A SingleAddressStore stores the state of a single-address wallet.
@@ -108,7 +109,7 @@ type Transaction struct {
 type SingleAddressStore interface {
 	Balance() (types.Currency, error)
 	UnspentSiacoinElements() ([]SiacoinElement, error)
-	Transactions(since time.Time, max int) ([]Transaction, error)
+	Transactions(before, since time.Time, offset, limit int) ([]Transaction, error)
 }
 
 // A TransactionPool contains transactions that have not yet been included in a
@@ -120,13 +121,14 @@ type TransactionPool interface {
 // A SingleAddressWallet is a hot wallet that manages the outputs controlled by
 // a single address.
 type SingleAddressWallet struct {
-	priv  types.PrivateKey
-	addr  types.Address
-	store SingleAddressStore
+	priv           types.PrivateKey
+	addr           types.Address
+	store          SingleAddressStore
+	usedUTXOExpiry time.Duration
 
 	// for building transactions
-	mu   sync.Mutex
-	used map[types.Hash256]bool
+	mu       sync.Mutex
+	lastUsed map[types.Hash256]time.Time
 }
 
 // PrivateKey returns the private key of the wallet.
@@ -152,8 +154,8 @@ func (w *SingleAddressWallet) UnspentOutputs() ([]SiacoinElement, error) {
 
 // Transactions returns up to max transactions relevant to the wallet that have
 // a timestamp later than since.
-func (w *SingleAddressWallet) Transactions(since time.Time, max int) ([]Transaction, error) {
-	return w.store.Transactions(since, max)
+func (w *SingleAddressWallet) Transactions(before, since time.Time, offset, limit int) ([]Transaction, error) {
+	return w.store.Transactions(before, since, offset, limit)
 }
 
 // FundTransaction adds siacoin inputs worth at least the requested amount to
@@ -185,7 +187,7 @@ func (w *SingleAddressWallet) FundTransaction(cs consensus.State, txn *types.Tra
 	var outputSum types.Currency
 	var fundingElements []SiacoinElement
 	for _, sce := range utxos {
-		if w.used[sce.ID] || inPool[sce.ID] || cs.Index.Height < sce.MaturityHeight {
+		if w.isOutputUsed(sce.ID) || inPool[sce.ID] || cs.Index.Height < sce.MaturityHeight {
 			continue
 		}
 		fundingElements = append(fundingElements, sce)
@@ -195,7 +197,7 @@ func (w *SingleAddressWallet) FundTransaction(cs consensus.State, txn *types.Tra
 		}
 	}
 	if outputSum.Cmp(amount) < 0 {
-		return nil, ErrInsufficientBalance
+		return nil, fmt.Errorf("%w: outputSum: %v, amount: %v", ErrInsufficientBalance, outputSum.String(), amount.String())
 	} else if outputSum.Cmp(amount) > 0 {
 		txn.SiacoinOutputs = append(txn.SiacoinOutputs, types.SiacoinOutput{
 			Value:   outputSum.Sub(amount),
@@ -210,7 +212,7 @@ func (w *SingleAddressWallet) FundTransaction(cs consensus.State, txn *types.Tra
 			UnlockConditions: StandardUnlockConditions(w.priv.PublicKey()),
 		})
 		toSign[i] = sce.ID
-		w.used[sce.ID] = true
+		w.lastUsed[sce.ID] = time.Now()
 	}
 
 	return toSign, nil
@@ -221,7 +223,7 @@ func (w *SingleAddressWallet) FundTransaction(cs consensus.State, txn *types.Tra
 // or will never be broadcast.
 func (w *SingleAddressWallet) ReleaseInputs(txn types.Transaction) {
 	for _, in := range txn.SiacoinInputs {
-		delete(w.used, types.Hash256(in.ParentID))
+		delete(w.lastUsed, types.Hash256(in.ParentID))
 	}
 }
 
@@ -301,11 +303,19 @@ func (w *SingleAddressWallet) Redistribute(cs consensus.State, outputs int, amou
 	// collect outputs that cover the total amount
 	var inputs []SiacoinElement
 	want := amount.Mul64(uint64(outputs))
+	var amtInUse, amtSameValue, amtNotMatured types.Currency
 	for _, sce := range utxos {
-		inUse := w.used[sce.ID] || inPool[sce.ID]
+		inUse := w.isOutputUsed(sce.ID) || inPool[sce.ID]
 		matured := cs.Index.Height >= sce.MaturityHeight
 		sameValue := sce.Value.Equals(amount)
-		if inUse || sameValue || !matured {
+		if inUse {
+			amtInUse = amtInUse.Add(sce.Value)
+			continue
+		} else if sameValue {
+			amtSameValue = amtSameValue.Add(sce.Value)
+			continue
+		} else if !matured {
+			amtNotMatured = amtNotMatured.Add(sce.Value)
 			continue
 		}
 
@@ -318,8 +328,9 @@ func (w *SingleAddressWallet) Redistribute(cs consensus.State, outputs int, amou
 
 	// not enough outputs found
 	fee := feePerInput.Mul64(uint64(len(inputs))).Add(outputFees)
-	if SumOutputs(inputs).Cmp(want.Add(fee)) < 0 {
-		return types.Transaction{}, nil, ErrInsufficientBalance
+	if sumOut := SumOutputs(inputs); sumOut.Cmp(want.Add(fee)) < 0 {
+		return types.Transaction{}, nil, fmt.Errorf("%w: inputs %v < needed %v + txnFee %v (usable: %v, inUse: %v, sameValue: %v, notMatured: %v)",
+			ErrInsufficientBalance, sumOut.String(), want.String(), fee.String(), sumOut.String(), amtInUse.String(), amtSameValue.String(), amtNotMatured.String())
 	}
 
 	// set the miner fee
@@ -342,10 +353,18 @@ func (w *SingleAddressWallet) Redistribute(cs consensus.State, outputs int, amou
 			UnlockConditions: StandardUnlockConditions(w.priv.PublicKey()),
 		})
 		toSign[i] = sce.ID
-		w.used[sce.ID] = true
+		w.lastUsed[sce.ID] = time.Now()
 	}
 
 	return txn, toSign, nil
+}
+
+func (w *SingleAddressWallet) isOutputUsed(id types.Hash256) bool {
+	lastUsed := w.lastUsed[id]
+	if w.usedUTXOExpiry == 0 {
+		return !lastUsed.IsZero()
+	}
+	return time.Since(lastUsed) <= w.usedUTXOExpiry
 }
 
 // SumOutputs returns the total value of the supplied outputs.
@@ -357,11 +376,12 @@ func SumOutputs(outputs []SiacoinElement) (sum types.Currency) {
 }
 
 // NewSingleAddressWallet returns a new SingleAddressWallet using the provided private key and store.
-func NewSingleAddressWallet(priv types.PrivateKey, store SingleAddressStore) *SingleAddressWallet {
+func NewSingleAddressWallet(priv types.PrivateKey, store SingleAddressStore, usedUTXOExpiry time.Duration) *SingleAddressWallet {
 	return &SingleAddressWallet{
-		priv:  priv,
-		addr:  StandardAddress(priv.PublicKey()),
-		store: store,
-		used:  make(map[types.Hash256]bool),
+		priv:           priv,
+		addr:           StandardAddress(priv.PublicKey()),
+		store:          store,
+		lastUsed:       make(map[types.Hash256]time.Time),
+		usedUTXOExpiry: usedUTXOExpiry,
 	}
 }

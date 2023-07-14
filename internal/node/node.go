@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ import (
 	mconsensus "go.sia.tech/siad/modules/consensus"
 	"go.sia.tech/siad/modules/gateway"
 	"go.sia.tech/siad/modules/transactionpool"
+	"go.sia.tech/siad/sync"
 	stypes "go.sia.tech/siad/types"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -31,16 +33,14 @@ import (
 )
 
 type WorkerConfig struct {
-	ID                      string
-	BusFlushInterval        time.Duration
-	ContractLockTimeout     time.Duration
-	SessionLockTimeout      time.Duration
-	SessionReconnectTimeout time.Duration
-	SessionTTL              time.Duration
-	DownloadSectorTimeout   time.Duration
-	UploadSectorTimeout     time.Duration
-	DownloadMaxOverdrive    uint64
-	UploadMaxOverdrive      uint64
+	ID                       string
+	AllowPrivateIPs          bool
+	BusFlushInterval         time.Duration
+	ContractLockTimeout      time.Duration
+	DownloadOverdriveTimeout time.Duration
+	UploadOverdriveTimeout   time.Duration
+	DownloadMaxOverdrive     uint64
+	UploadMaxOverdrive       uint64
 }
 
 type BusConfig struct {
@@ -49,18 +49,23 @@ type BusConfig struct {
 	Network         *consensus.Network
 	Miner           *Miner
 	PersistInterval time.Duration
+	UsedUTXOExpiry  time.Duration
 
-	DBDialector gorm.Dialector
+	DBLoggerConfig stores.LoggerConfig
+	DBDialector    gorm.Dialector
 }
 
 type AutopilotConfig struct {
-	AccountsRefillInterval   time.Duration
-	Heartbeat                time.Duration
-	MigrationHealthCutoff    float64
-	ScannerInterval          time.Duration
-	ScannerBatchSize         uint64
-	ScannerMinRecentFailures uint64
-	ScannerNumThreads        uint64
+	ID                             string
+	AccountsRefillInterval         time.Duration
+	Heartbeat                      time.Duration
+	MigrationHealthCutoff          float64
+	RevisionSubmissionBuffer       uint64
+	ScannerInterval                time.Duration
+	ScannerBatchSize               uint64
+	ScannerMinRecentFailures       uint64
+	ScannerNumThreads              uint64
+	MigratorParallelSlabsPerWorker uint64
 }
 
 type ShutdownFn = func(context.Context) error
@@ -94,6 +99,10 @@ func (cm chainManager) AcceptBlock(ctx context.Context, b types.Block) error {
 	var sb stypes.Block
 	convertToSiad(b, &sb)
 	return cm.cs.AcceptBlock(sb)
+}
+
+func (cm chainManager) LastBlockTime() time.Time {
+	return time.Unix(int64(cm.cs.CurrentBlock().Timestamp), 0)
 }
 
 func (cm chainManager) Synced(ctx context.Context) bool {
@@ -237,16 +246,32 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 		dbConn = stores.NewSQLiteConnection(filepath.Join(dbDir, "db.sqlite"))
 	}
 
-	sqlLogger := stores.NewSQLLogger(l.Named("db"), nil)
+	sqlLogger := stores.NewSQLLogger(l.Named("db"), cfg.DBLoggerConfig)
 	walletAddr := wallet.StandardAddress(seed.PublicKey())
 	sqlStore, ccid, err := stores.NewSQLStore(dbConn, true, cfg.PersistInterval, walletAddr, sqlLogger)
 	if err != nil {
 		return nil, nil, err
-	} else if err := cs.ConsensusSetSubscribe(sqlStore, ccid, nil); err != nil {
-		return nil, nil, err
 	}
 
-	w := wallet.NewSingleAddressWallet(seed, sqlStore)
+	cancelSubscribe := make(chan struct{})
+	go func() {
+		subscribeErr := cs.ConsensusSetSubscribe(sqlStore, ccid, cancelSubscribe)
+		if errors.Is(subscribeErr, modules.ErrInvalidConsensusChangeID) {
+			l.Warn("Invalid consensus change ID detected - resyncing consensus")
+			// Reset the consensus state within the database and rescan.
+			if err := sqlStore.ResetConsensusSubscription(); err != nil {
+				l.Fatal(fmt.Sprintf("Failed to reset consensus subscription of SQLStore: %v", err))
+				return
+			}
+			// Subscribe from the beginning.
+			subscribeErr = cs.ConsensusSetSubscribe(sqlStore, modules.ConsensusChangeBeginning, cancelSubscribe)
+		}
+		if subscribeErr != nil && !errors.Is(subscribeErr, sync.ErrStopped) {
+			l.Fatal(fmt.Sprintf("ConsensusSetSubscribe returned an error: %v", err))
+		}
+	}()
+
+	w := wallet.NewSingleAddressWallet(seed, sqlStore, cfg.UsedUTXOExpiry)
 
 	if m := cfg.Miner; m != nil {
 		if err := cs.ConsensusSetSubscribe(m, ccid, nil); err != nil {
@@ -255,13 +280,17 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 		tp.TransactionPoolSubscribe(m)
 	}
 
-	b, err := bus.New(syncer{g, tp}, chainManager{cs: cs, network: cfg.Network}, txpool{tp}, w, sqlStore, sqlStore, sqlStore, sqlStore, l)
+	b, err := bus.New(syncer{g, tp}, chainManager{cs: cs, network: cfg.Network}, txpool{tp}, w, sqlStore, sqlStore, sqlStore, sqlStore, sqlStore, l)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	shutdownFn := func(ctx context.Context) error {
 		return joinErrors([]error{
+			func() error {
+				close(cancelSubscribe)
+				return nil
+			}(),
 			g.Close(),
 			cs.Close(),
 			tp.Close(),
@@ -274,7 +303,7 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 
 func NewWorker(cfg WorkerConfig, b worker.Bus, seed types.PrivateKey, l *zap.Logger) (http.Handler, ShutdownFn, error) {
 	workerKey := blake2b.Sum256(append([]byte("worker"), seed...))
-	w, err := worker.New(workerKey, cfg.ID, b, cfg.ContractLockTimeout, cfg.SessionLockTimeout, cfg.SessionReconnectTimeout, cfg.SessionTTL, cfg.BusFlushInterval, cfg.DownloadSectorTimeout, cfg.UploadSectorTimeout, cfg.DownloadMaxOverdrive, cfg.UploadMaxOverdrive, l)
+	w, err := worker.New(workerKey, cfg.ID, b, cfg.ContractLockTimeout, cfg.BusFlushInterval, cfg.DownloadOverdriveTimeout, cfg.UploadOverdriveTimeout, cfg.DownloadMaxOverdrive, cfg.UploadMaxOverdrive, cfg.AllowPrivateIPs, l)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -282,8 +311,8 @@ func NewWorker(cfg WorkerConfig, b worker.Bus, seed types.PrivateKey, l *zap.Log
 	return w.Handler(), w.Shutdown, nil
 }
 
-func NewAutopilot(cfg AutopilotConfig, s autopilot.Store, b autopilot.Bus, workers []autopilot.Worker, l *zap.Logger) (http.Handler, func() error, ShutdownFn, error) {
-	ap, err := autopilot.New(s, b, workers, l, cfg.Heartbeat, cfg.ScannerInterval, cfg.ScannerBatchSize, cfg.ScannerMinRecentFailures, cfg.ScannerNumThreads, cfg.MigrationHealthCutoff, cfg.AccountsRefillInterval)
+func NewAutopilot(cfg AutopilotConfig, b autopilot.Bus, workers []autopilot.Worker, l *zap.Logger) (http.Handler, func() error, ShutdownFn, error) {
+	ap, err := autopilot.New(cfg.ID, b, workers, l, cfg.Heartbeat, cfg.ScannerInterval, cfg.ScannerBatchSize, cfg.ScannerMinRecentFailures, cfg.ScannerNumThreads, cfg.MigrationHealthCutoff, cfg.AccountsRefillInterval, cfg.RevisionSubmissionBuffer, cfg.MigratorParallelSlabsPerWorker)
 	if err != nil {
 		return nil, nil, nil, err
 	}

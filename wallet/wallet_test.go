@@ -19,7 +19,7 @@ type mockStore struct {
 
 func (s *mockStore) Balance() (types.Currency, error)                         { return types.ZeroCurrency, nil }
 func (s *mockStore) UnspentSiacoinElements() ([]wallet.SiacoinElement, error) { return s.utxos, nil }
-func (s *mockStore) Transactions(since time.Time, max int) ([]wallet.Transaction, error) {
+func (s *mockStore) Transactions(before, since time.Time, offset, limit int) ([]wallet.Transaction, error) {
 	return nil, nil
 }
 
@@ -47,7 +47,7 @@ func TestWalletRedistribute(t *testing.T) {
 		0,
 	}
 	s := &mockStore{utxos: []wallet.SiacoinElement{utxo}}
-	w := wallet.NewSingleAddressWallet(priv, s)
+	w := wallet.NewSingleAddressWallet(priv, s, 0)
 
 	numOutputsWithValue := func(v types.Currency) (c uint64) {
 		utxos, _ := w.UnspentOutputs()

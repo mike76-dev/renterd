@@ -34,6 +34,10 @@ const (
 	// database per batch. Empirically tested to verify that this is a value
 	// that performs reasonably well.
 	hostRetrievalBatchSize = 10000
+
+	// interactionInsertionBatchSize is the number of interactions we insert at
+	// once.
+	interactionInsertionBatchSize = 100
 )
 
 var (
@@ -405,12 +409,18 @@ func (e *dbBlocklistEntry) BeforeCreate(tx *gorm.DB) (err error) {
 }
 
 func (e *dbBlocklistEntry) blocks(h dbHost) bool {
+	values := []string{h.NetAddress}
 	host, _, err := net.SplitHostPort(h.NetAddress)
-	if err != nil {
-		return false // do nothing
+	if err == nil {
+		values = append(values, host)
 	}
 
-	return host == e.Entry || strings.HasSuffix(host, "."+e.Entry)
+	for _, value := range values {
+		if value == e.Entry || strings.HasSuffix(value, "."+e.Entry) {
+			return true
+		}
+	}
+	return false
 }
 
 // Host returns information about a host.
@@ -692,6 +702,10 @@ func (ss *SQLStore) RecordInteractions(ctx context.Context, interactions []hostd
 		return nil // nothing to do
 	}
 
+	// Only allow for applying one batch of interactions at a time.
+	ss.interactionsMu.Lock()
+	defer ss.interactionsMu.Unlock()
+
 	// Get keys from input.
 	keyMap := make(map[publicKey]struct{})
 	var hks []publicKey
@@ -707,17 +721,25 @@ func (ss *SQLStore) RecordInteractions(ctx context.Context, interactions []hostd
 	// transaction since we don't need it to be perfectly
 	// consistent.
 	var hosts []dbHost
-	if err := ss.db.Where("public_key IN ?", hks).
-		Find(&hosts).Error; err != nil {
-		return err
+	for i := 0; i < len(hks); i += maxSQLVars {
+		end := i + maxSQLVars
+		if end > len(hks) {
+			end = len(hks)
+		}
+		var batchHosts []dbHost
+		if err := ss.db.Where("public_key IN (?)", hks[i:end]).
+			Find(&batchHosts).Error; err != nil {
+			return err
+		}
+		hosts = append(hosts, batchHosts...)
 	}
 	hostMap := make(map[publicKey]dbHost)
 	for _, h := range hosts {
 		hostMap[h.PublicKey] = h
 	}
 
-	// Write the interactions and update to the hosts atmomically within a
-	// single transaction.
+	// Write the interactions and update to the hosts atomically within a single
+	// transaction.
 	return ss.retryTransaction(func(tx *gorm.DB) error {
 		// Apply all the interactions to the hosts.
 		dbInteractions := make([]dbInteraction, 0, len(interactions))
@@ -736,11 +758,11 @@ func (ss *SQLStore) RecordInteractions(ctx context.Context, interactions []hostd
 				Timestamp: interaction.Timestamp.UTC(),
 				Type:      interaction.Type,
 			})
-			interactionTime := interaction.Timestamp.UnixNano()
+			lastScan := time.Unix(0, host.LastScan)
 			if interaction.Success {
 				host.SuccessfulInteractions++
-				if isScan && host.LastScan > 0 && host.LastScan < interactionTime {
-					host.Uptime += time.Duration(interactionTime - host.LastScan)
+				if isScan && host.LastScan > 0 && lastScan.Before(interaction.Timestamp) {
+					host.Uptime += interaction.Timestamp.Sub(lastScan)
 				}
 				host.RecentDowntime = 0
 				host.RecentScanFailures = 0
@@ -748,9 +770,9 @@ func (ss *SQLStore) RecordInteractions(ctx context.Context, interactions []hostd
 				host.FailedInteractions++
 				if isScan {
 					host.RecentScanFailures++
-					if host.LastScan > 0 && host.LastScan < interactionTime {
-						host.Downtime += time.Duration(interactionTime - host.LastScan)
-						host.RecentDowntime += time.Duration(interactionTime - host.LastScan)
+					if host.LastScan > 0 && lastScan.Before(interaction.Timestamp) {
+						host.Downtime += interaction.Timestamp.Sub(lastScan)
+						host.RecentDowntime += interaction.Timestamp.Sub(lastScan)
 					}
 				}
 			}
@@ -807,7 +829,7 @@ func (ss *SQLStore) RecordInteractions(ctx context.Context, interactions []hostd
 		}
 
 		// Save everything to the db.
-		if err := tx.CreateInBatches(&dbInteractions, 100).Error; err != nil {
+		if err := tx.CreateInBatches(&dbInteractions, interactionInsertionBatchSize).Error; err != nil {
 			return err
 		}
 		for _, h := range hostMap {
@@ -858,16 +880,17 @@ func (ss *SQLStore) processConsensusChangeHostDB(cc modules.ConsensusChange) {
 		// Update RevisionHeight and RevisionNumber for our contracts.
 		for _, txn := range sb.Transactions {
 			for _, rev := range txn.FileContractRevisions {
-				if _, isOurs := ss.knownContracts[types.FileContractID(rev.ParentID)]; isOurs {
+				if ss.isKnownContract(types.FileContractID(rev.ParentID)) {
 					ss.unappliedRevisions[types.FileContractID(rev.ParentID)] = revisionUpdate{
 						height: height,
 						number: rev.NewRevisionNumber,
+						size:   rev.NewFileSize,
 					}
 				}
 			}
 			// Get ProofHeight for our contracts.
 			for _, sp := range txn.StorageProofs {
-				if _, isOurs := ss.knownContracts[types.FileContractID(sp.ParentID)]; isOurs {
+				if ss.isKnownContract(types.FileContractID(sp.ParentID)) {
 					ss.unappliedProofs[types.FileContractID(sp.ParentID)] = height
 				}
 			}
@@ -960,10 +983,11 @@ func insertAnnouncements(tx *gorm.DB, as []announcement) error {
 	return tx.Create(&hosts).Error
 }
 
-func updateRevisionNumberAndHeight(db *gorm.DB, fcid types.FileContractID, revisionHeight, revisionNumber uint64) error {
+func applyRevisionUpdate(db *gorm.DB, fcid types.FileContractID, rev revisionUpdate) error {
 	return updateActiveAndArchivedContract(db, fcid, map[string]interface{}{
-		"revision_height": revisionHeight,
-		"revision_number": fmt.Sprint(revisionNumber),
+		"revision_height": rev.height,
+		"revision_number": fmt.Sprint(rev.number),
+		"size":            rev.size,
 	})
 }
 

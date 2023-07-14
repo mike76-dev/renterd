@@ -2,9 +2,12 @@ package bus
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -13,6 +16,7 @@ import (
 	rhpv3 "go.sia.tech/core/rhp/v3"
 	"go.sia.tech/core/types"
 	"go.sia.tech/jape"
+	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
@@ -22,6 +26,35 @@ import (
 // A Client provides methods for interacting with a renterd API server.
 type Client struct {
 	c jape.Client
+}
+
+// Alerts fetches the active alerts from the bus.
+func (c *Client) Alerts() (alerts []alerts.Alert, err error) {
+	err = c.c.GET("/alerts", &alerts)
+	return
+}
+
+// DismissAlerts dimisses the alerts with the given IDs.
+func (c *Client) DismissAlerts(ids ...types.Hash256) error {
+	return c.c.POST("/alerts/dismiss", ids, nil)
+}
+
+// Autopilots returns all autopilots in the autopilots store.
+func (c *Client) Autopilots(ctx context.Context) (autopilots []api.Autopilot, err error) {
+	err = c.c.WithContext(ctx).GET("/autopilots", &autopilots)
+	return
+}
+
+// Autopilot returns the autopilot with the given ID.
+func (c *Client) Autopilot(ctx context.Context, id string) (autopilot api.Autopilot, err error) {
+	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/autopilots/%s", id), &autopilot)
+	return
+}
+
+// UpdateAutopilot updates the given autopilot in the store.
+func (c *Client) UpdateAutopilot(ctx context.Context, autopilot api.Autopilot) (err error) {
+	err = c.c.WithContext(ctx).PUT(fmt.Sprintf("/autopilots/%s", autopilot.ID), autopilot)
+	return
 }
 
 // AcceptBlock submits a block to the consensus manager.
@@ -129,8 +162,23 @@ func (c *Client) SendSiacoins(ctx context.Context, scos []types.SiacoinOutput) (
 }
 
 // WalletTransactions returns all transactions relevant to the wallet.
-func (c *Client) WalletTransactions(ctx context.Context, since time.Time, max int) (resp []wallet.Transaction, err error) {
-	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/wallet/transactions?since=%s&max=%d", api.ParamTime(since), max), &resp)
+func (c *Client) WalletTransactions(ctx context.Context, opts ...api.WalletTransactionsOption) (resp []wallet.Transaction, err error) {
+	c.c.Custom("GET", "/wallet/transactions", nil, &resp)
+
+	values := url.Values{}
+	for _, opt := range opts {
+		opt(values)
+	}
+	u, err := url.Parse(fmt.Sprintf("%v/wallet/transactions", c.c.BaseURL))
+	if err != nil {
+		panic(err)
+	}
+	u.RawQuery = values.Encode()
+	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	if err != nil {
+		panic(err)
+	}
+	err = c.do(req, &resp)
 	return
 }
 
@@ -179,7 +227,7 @@ func (c *Client) WalletDiscard(ctx context.Context, txn types.Transaction) error
 }
 
 // WalletPrepareForm funds and signs a contract transaction.
-func (c *Client) WalletPrepareForm(ctx context.Context, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, hostCollateral types.Currency, hostKey types.PublicKey, hostSettings rhpv2.HostSettings, endHeight uint64) (txns []types.Transaction, err error) {
+func (c *Client) WalletPrepareForm(ctx context.Context, renterAddress types.Address, renterKey types.PublicKey, renterFunds, hostCollateral types.Currency, hostKey types.PublicKey, hostSettings rhpv2.HostSettings, endHeight uint64) (txns []types.Transaction, err error) {
 	req := api.WalletPrepareFormRequest{
 		EndHeight:      endHeight,
 		HostCollateral: hostCollateral,
@@ -357,6 +405,12 @@ func (c *Client) AncestorContracts(ctx context.Context, fcid types.FileContractI
 	return
 }
 
+// RenewedContract returns the renewed contract for the given ID.
+func (c *Client) RenewedContract(ctx context.Context, renewedFrom types.FileContractID) (contract api.ContractMetadata, err error) {
+	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/contracts/renewed/%s", renewedFrom), &contract)
+	return
+}
+
 // SetContractSet adds the given contracts to the given set.
 func (c *Client) SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) (err error) {
 	err = c.c.WithContext(ctx).PUT(fmt.Sprintf("/contracts/set/%s", set), contracts)
@@ -445,8 +499,8 @@ func (c *Client) DeleteSetting(ctx context.Context, key string) error {
 }
 
 // ContractSetSettings returns the contract set settings.
-func (c *Client) ContractSetSettings(ctx context.Context) (css api.ContractSetSettings, err error) {
-	err = c.Setting(ctx, api.SettingContractSet, &css)
+func (c *Client) ContractSetSettings(ctx context.Context) (gs api.ContractSetSetting, err error) {
+	err = c.Setting(ctx, api.SettingContractSet, &gs)
 	return
 }
 
@@ -487,13 +541,14 @@ func (c *Client) SearchObjects(ctx context.Context, key string, offset, limit in
 // Object returns the object at the given path with the given prefix, or, if
 // path ends in '/', the entries under that path.
 func (c *Client) Object(ctx context.Context, path, prefix string, offset, limit int) (o object.Object, entries []api.ObjectMetadata, err error) {
+	path = strings.TrimPrefix(path, "/")
 	values := url.Values{}
-	values.Set("prefix", prefix)
+	values.Set("prefix", url.QueryEscape(prefix))
 	values.Set("offset", fmt.Sprint(offset))
 	values.Set("limit", fmt.Sprint(limit))
-	path = strings.TrimLeft(path, "/")
+	path += "?" + values.Encode()
 	var or api.ObjectsResponse
-	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/objects/%s?"+values.Encode(), path), &or)
+	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/objects/%s", path), &or)
 	if or.Object != nil {
 		o = *or.Object
 	} else {
@@ -503,34 +558,51 @@ func (c *Client) Object(ctx context.Context, path, prefix string, offset, limit 
 }
 
 // AddObject stores the provided object under the given path.
-func (c *Client) AddObject(ctx context.Context, path string, o object.Object, usedContract map[types.PublicKey]types.FileContractID) (err error) {
+func (c *Client) AddObject(ctx context.Context, path, contractSet string, o object.Object, usedContract map[types.PublicKey]types.FileContractID) (err error) {
+	path = strings.TrimPrefix(path, "/")
 	err = c.c.WithContext(ctx).PUT(fmt.Sprintf("/objects/%s", path), api.AddObjectRequest{
+		ContractSet:   contractSet,
 		Object:        o,
 		UsedContracts: usedContract,
 	})
 	return
 }
 
-// DeleteObject deletes the object at the given path.
-func (c *Client) DeleteObject(ctx context.Context, path string) (err error) {
-	err = c.c.WithContext(ctx).DELETE(fmt.Sprintf("/objects/%s", path))
+// DeleteObject either deletes the object at the given path or if batch=true
+// deletes all objects that start with the given path.
+func (c *Client) DeleteObject(ctx context.Context, path string, batch bool) (err error) {
+	path = strings.TrimPrefix(path, "/")
+	values := url.Values{}
+	values.Set("batch", fmt.Sprint(batch))
+	err = c.c.WithContext(ctx).DELETE(fmt.Sprintf("/objects/%s?"+values.Encode(), path))
 	return
 }
 
 // SlabsForMigration returns up to 'limit' slabs which require migration. A slab
 // needs to be migrated if it has sectors on contracts that are not part of the
 // given 'set'.
-func (c *Client) SlabsForMigration(ctx context.Context, healthCutoff float64, set string, limit int) (slabs []object.Slab, err error) {
-	err = c.c.WithContext(ctx).POST("/slabs/migration", api.MigrationSlabsRequest{ContractSet: set, HealthCutoff: healthCutoff, Limit: limit}, &slabs)
-	return
+func (c *Client) SlabsForMigration(ctx context.Context, healthCutoff float64, set string, limit int) (slabs []api.UnhealthySlab, err error) {
+	var usr api.UnhealthySlabsResponse
+	err = c.c.WithContext(ctx).POST("/slabs/migration", api.MigrationSlabsRequest{ContractSet: set, HealthCutoff: healthCutoff, Limit: limit}, &usr)
+	if err != nil {
+		return
+	}
+	return usr.Slabs, nil
 }
 
 // UpdateSlab updates the given slab in the database.
-func (c *Client) UpdateSlab(ctx context.Context, slab object.Slab, usedContracts map[types.PublicKey]types.FileContractID) (err error) {
+func (c *Client) UpdateSlab(ctx context.Context, slab object.Slab, contractSet string, usedContracts map[types.PublicKey]types.FileContractID) (err error) {
 	err = c.c.WithContext(ctx).PUT("/slab", api.UpdateSlabRequest{
+		ContractSet:   contractSet,
 		Slab:          slab,
 		UsedContracts: usedContracts,
 	})
+	return
+}
+
+// Slab returns the slab with the given key from the bus.
+func (c *Client) Slab(ctx context.Context, key object.EncryptionKey) (slab object.Slab, err error) {
+	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/slab/%s", key), &slab)
 	return
 }
 
@@ -622,6 +694,25 @@ func (c *Client) ObjectsStats() (osr api.ObjectsStats, err error) {
 	return
 }
 
+// RenameObject renames a single object.
+func (c *Client) RenameObject(ctx context.Context, from, to string) (err error) {
+	return c.renameObjects(ctx, from, to, api.ObjectsRenameModeSingle)
+}
+
+// RenameObjects renames all objects with the prefix 'from' to the prefix 'to'.
+func (c *Client) RenameObjects(ctx context.Context, from, to string) (err error) {
+	return c.renameObjects(ctx, from, to, api.ObjectsRenameModeMulti)
+}
+
+func (c *Client) renameObjects(ctx context.Context, from, to, mode string) (err error) {
+	err = c.c.POST("/objects/rename", api.ObjectsRenameRequest{
+		From: from,
+		To:   to,
+		Mode: mode,
+	}, nil)
+	return
+}
+
 // NewClient returns a client that communicates with a renterd store server
 // listening on the specified address.
 func NewClient(addr, password string) *Client {
@@ -629,4 +720,25 @@ func NewClient(addr, password string) *Client {
 		BaseURL:  addr,
 		Password: password,
 	}}
+}
+
+func (c *Client) do(req *http.Request, resp interface{}) error {
+	req.Header.Set("Content-Type", "application/json")
+	if c.c.Password != "" {
+		req.SetBasicAuth("", c.c.Password)
+	}
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer io.Copy(io.Discard, r.Body)
+	defer r.Body.Close()
+	if !(200 <= r.StatusCode && r.StatusCode < 300) {
+		err, _ := io.ReadAll(r.Body)
+		return errors.New(string(err))
+	}
+	if resp == nil {
+		return nil
+	}
+	return json.NewDecoder(r.Body).Decode(resp)
 }

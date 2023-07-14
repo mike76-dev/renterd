@@ -1,12 +1,14 @@
 package stores
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	rhpv2 "go.sia.tech/core/rhp/v2"
@@ -89,7 +91,7 @@ func TestObjectBasic(t *testing.T) {
 	}
 
 	// add the object
-	if err := db.UpdateObject(context.Background(), t.Name(), want, map[types.PublicKey]types.FileContractID{
+	if err := db.UpdateObject(context.Background(), t.Name(), testContractSet, want, nil, map[types.PublicKey]types.FileContractID{
 		hk1: fcid1,
 		hk2: fcid2,
 	}); err != nil {
@@ -103,6 +105,42 @@ func TestObjectBasic(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatal("object mismatch", cmp.Diff(got, want))
+	}
+
+	// delete a sector
+	var sectors []dbSector
+	if err := db.db.Find(&sectors).Error; err != nil {
+		t.Fatal(err)
+	} else if len(sectors) != 2 {
+		t.Fatal("unexpected number of sectors")
+	} else if tx := db.db.Delete(sectors[0]); tx.Error != nil || tx.RowsAffected != 1 {
+		t.Fatal("unexpected number of sectors deleted", tx.Error, tx.RowsAffected)
+	}
+
+	// fetch the object again and assert we receive an indication it was corrupted
+	_, err = db.Object(context.Background(), t.Name())
+	if !errors.Is(err, api.ErrObjectCorrupted) {
+		t.Fatal("unexpected err", err)
+	}
+
+	// create an object without slabs
+	want2 := object.Object{
+		Key:   object.GenerateEncryptionKey(),
+		Slabs: []object.SlabSlice{},
+	}
+
+	// add the object
+	if err := db.UpdateObject(context.Background(), t.Name(), testContractSet, want2, nil, make(map[types.PublicKey]types.FileContractID)); err != nil {
+		t.Fatal(err)
+	}
+
+	// fetch the object
+	got2, err := db.Object(context.Background(), t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got2, want2) {
+		t.Fatal("object mismatch", cmp.Diff(got2, want2))
 	}
 }
 
@@ -258,10 +296,10 @@ func TestSQLContractStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sets) != 2 {
+	if len(sets) != 3 { // 2 sets + default set
 		t.Fatal("wrong number of sets")
 	}
-	if sets[0] != "foo" || sets[1] != "foo2" {
+	if sets[0] != "foo" || sets[1] != "foo2" || sets[2] != testContractSet {
 		t.Fatal("wrong sets returned", sets)
 	}
 
@@ -449,7 +487,7 @@ func TestRenewedContract(t *testing.T) {
 	}
 
 	// add the object.
-	if err := cs.UpdateObject(context.Background(), "foo", obj, map[types.PublicKey]types.FileContractID{
+	if err := cs.UpdateObject(context.Background(), "foo", testContractSet, obj, nil, map[types.PublicKey]types.FileContractID{
 		hk:  fcid1,
 		hk2: fcid2,
 	}); err != nil {
@@ -465,9 +503,15 @@ func TestRenewedContract(t *testing.T) {
 		t.Fatal("shouldn't return any slabs", len(slabs))
 	}
 
+	// Assert we can't fetch the renewed contract.
+	_, err = cs.RenewedContract(context.Background(), fcid1)
+	if !errors.Is(err, ErrContractNotFound) {
+		t.Fatal("unexpected")
+	}
+
 	// Renew it.
 	fcid1Renewed := types.FileContractID{2, 2, 2, 2, 2}
-	renewed := rhpv2.ContractRevision{
+	rev := rhpv2.ContractRevision{
 		Revision: types.FileContractRevision{
 			ParentID:         fcid1Renewed,
 			UnlockConditions: uc,
@@ -479,8 +523,17 @@ func TestRenewedContract(t *testing.T) {
 	}
 	newContractTotal := types.NewCurrency64(222)
 	newContractStartHeight := uint64(200)
-	if _, err := cs.AddRenewedContract(ctx, renewed, newContractTotal, newContractStartHeight, fcid1); err != nil {
+	if _, err := cs.AddRenewedContract(ctx, rev, newContractTotal, newContractStartHeight, fcid1); err != nil {
 		t.Fatal(err)
+	}
+
+	// Assert we can fetch the renewed contract.
+	renewed, err := cs.RenewedContract(context.Background(), fcid1)
+	if err != nil {
+		t.Fatal("unexpected", err)
+	}
+	if renewed.ID != fcid1Renewed {
+		t.Fatal("unexpected")
 	}
 
 	// make sure the contract set was updated.
@@ -567,7 +620,7 @@ func TestRenewedContract(t *testing.T) {
 
 	// Renew it once more.
 	fcid3 := types.FileContractID{3, 3, 3, 3, 3}
-	renewed = rhpv2.ContractRevision{
+	rev = rhpv2.ContractRevision{
 		Revision: types.FileContractRevision{
 			ParentID:         fcid3,
 			UnlockConditions: uc,
@@ -581,7 +634,7 @@ func TestRenewedContract(t *testing.T) {
 	newContractStartHeight = uint64(300)
 
 	// Assert the renewed contract is returned
-	renewedContract, err := cs.AddRenewedContract(ctx, renewed, newContractTotal, newContractStartHeight, fcid1Renewed)
+	renewedContract, err := cs.AddRenewedContract(ctx, rev, newContractTotal, newContractStartHeight, fcid1Renewed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -846,17 +899,17 @@ func TestSQLMetadataStore(t *testing.T) {
 	// Store it.
 	ctx := context.Background()
 	objID := "key1"
-	if err := db.UpdateObject(ctx, objID, obj1, usedHosts); err != nil {
+	if err := db.UpdateObject(ctx, objID, testContractSet, obj1, nil, usedHosts); err != nil {
 		t.Fatal(err)
 	}
 
 	// Try to store it again. Should work.
-	if err := db.UpdateObject(ctx, objID, obj1, usedHosts); err != nil {
+	if err := db.UpdateObject(ctx, objID, testContractSet, obj1, nil, usedHosts); err != nil {
 		t.Fatal(err)
 	}
 
 	// Fetch it using get and verify every field.
-	obj, err := db.dbObject(ctx, objID)
+	obj, err := db.dbObject(objID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -880,11 +933,6 @@ func TestSQLMetadataStore(t *testing.T) {
 	obj.Model = Model{}
 	for i := range obj.Slabs {
 		obj.Slabs[i].Model = Model{}
-		obj.Slabs[i].Slab.Model = Model{}
-		obj.Slabs[i].Slab.Shards[0].ID = 0
-		obj.Slabs[i].Slab.Shards[0].DBSector.Model = Model{}
-		obj.Slabs[i].Slab.Shards[0].DBSector.Contracts[0].Model = Model{}
-		obj.Slabs[i].Slab.Shards[0].DBSector.Contracts[0].Host.Model = Model{}
 	}
 
 	expectedObj := dbObject{
@@ -894,88 +942,15 @@ func TestSQLMetadataStore(t *testing.T) {
 		Slabs: []dbSlice{
 			{
 				DBObjectID: 1,
-				Slab: dbSlab{
-					DBSliceID:   1,
-					Key:         obj1Slab0Key,
-					MinShards:   1,
-					TotalShards: 1,
-					Shards: []dbShard{
-						{
-							DBSlabID:   1,
-							DBSectorID: 1,
-							DBSector: dbSector{
-								Root:       obj1.Slabs[0].Shards[0].Root[:],
-								LatestHost: publicKey(obj1.Slabs[0].Shards[0].Host),
-								Contracts: []dbContract{
-									{
-										HostID: 1,
-										Host: dbHost{
-											PublicKey: publicKey(hk1),
-										},
-
-										ContractCommon: ContractCommon{
-											FCID: fileContractID(fcid1),
-
-											TotalCost:      currency(totalCost1),
-											RevisionNumber: "0",
-											StartHeight:    startHeight1,
-											WindowStart:    400,
-											WindowEnd:      500,
-
-											UploadSpending:      zeroCurrency,
-											DownloadSpending:    zeroCurrency,
-											FundAccountSpending: zeroCurrency,
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-				Offset: 10,
-				Length: 100,
+				DBSlabID:   1,
+				Offset:     10,
+				Length:     100,
 			},
 			{
 				DBObjectID: 1,
-				Slab: dbSlab{
-					DBSliceID:   2,
-					Key:         obj1Slab1Key,
-					MinShards:   2,
-					TotalShards: 1,
-					Shards: []dbShard{
-						{
-							DBSlabID:   2,
-							DBSectorID: 2,
-							DBSector: dbSector{
-								Root:       obj1.Slabs[1].Shards[0].Root[:],
-								LatestHost: publicKey(obj1.Slabs[1].Shards[0].Host),
-								Contracts: []dbContract{
-									{
-										HostID: 2,
-										Host: dbHost{
-											PublicKey: publicKey(hk2),
-										},
-										ContractCommon: ContractCommon{
-											FCID: fileContractID(fcid2),
-
-											TotalCost:      currency(totalCost2),
-											RevisionNumber: "0",
-											StartHeight:    startHeight2,
-											WindowStart:    400,
-											WindowEnd:      500,
-
-											UploadSpending:      zeroCurrency,
-											DownloadSpending:    zeroCurrency,
-											FundAccountSpending: zeroCurrency,
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-				Offset: 20,
-				Length: 200,
+				DBSlabID:   2,
+				Offset:     20,
+				Length:     200,
 			},
 		},
 	}
@@ -992,11 +967,103 @@ func TestSQLMetadataStore(t *testing.T) {
 		t.Fatal("object mismatch")
 	}
 
-	// Remove the first slab of the object and change the min shards of the
-	// second one.
+	expectedObjSlab1 := dbSlab{
+		DBContractSetID: 1,
+		Key:             obj1Slab0Key,
+		MinShards:       1,
+		TotalShards:     1,
+		Shards: []dbSector{
+			{
+				DBSlabID:   1,
+				Root:       obj1.Slabs[0].Shards[0].Root[:],
+				LatestHost: publicKey(obj1.Slabs[0].Shards[0].Host),
+				Contracts: []dbContract{
+					{
+						HostID: 1,
+						Host: dbHost{
+							PublicKey: publicKey(hk1),
+						},
+
+						ContractCommon: ContractCommon{
+							FCID: fileContractID(fcid1),
+
+							TotalCost:      currency(totalCost1),
+							RevisionNumber: "0",
+							StartHeight:    startHeight1,
+							WindowStart:    400,
+							WindowEnd:      500,
+
+							UploadSpending:      zeroCurrency,
+							DownloadSpending:    zeroCurrency,
+							FundAccountSpending: zeroCurrency,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	expectedObjSlab2 := dbSlab{
+		DBContractSetID: 1,
+		Key:             obj1Slab1Key,
+		MinShards:       2,
+		TotalShards:     1,
+		Shards: []dbSector{
+			{
+				DBSlabID:   2,
+				Root:       obj1.Slabs[1].Shards[0].Root[:],
+				LatestHost: publicKey(obj1.Slabs[1].Shards[0].Host),
+				Contracts: []dbContract{
+					{
+						HostID: 2,
+						Host: dbHost{
+							PublicKey: publicKey(hk2),
+						},
+						ContractCommon: ContractCommon{
+							FCID: fileContractID(fcid2),
+
+							TotalCost:      currency(totalCost2),
+							RevisionNumber: "0",
+							StartHeight:    startHeight2,
+							WindowStart:    400,
+							WindowEnd:      500,
+
+							UploadSpending:      zeroCurrency,
+							DownloadSpending:    zeroCurrency,
+							FundAccountSpending: zeroCurrency,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Compare slabs.
+	slab1, err := db.dbSlab(obj1Slab0Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slab2, err := db.dbSlab(obj1Slab1Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slabs := []*dbSlab{&slab1, &slab2}
+	for i := range slabs {
+		slabs[i].Model = Model{}
+		slabs[i].Shards[0].Model = Model{}
+		slabs[i].Shards[0].Contracts[0].Model = Model{}
+		slabs[i].Shards[0].Contracts[0].Host.Model = Model{}
+	}
+	if !reflect.DeepEqual(slab1, expectedObjSlab1) {
+		t.Fatal("mismatch", cmp.Diff(slab1, expectedObjSlab1))
+	}
+	if !reflect.DeepEqual(slab2, expectedObjSlab2) {
+		t.Fatal("mismatch", cmp.Diff(slab2, expectedObjSlab2))
+	}
+
+	// Remove the first slab of the object.
 	obj1.Slabs = obj1.Slabs[1:]
-	obj1.Slabs[0].Slab.MinShards = 123
-	if err := db.UpdateObject(ctx, objID, obj1, usedHosts); err != nil {
+	if err := db.UpdateObject(ctx, objID, testContractSet, obj1, nil, usedHosts); err != nil {
 		t.Fatal(err)
 	}
 	fullObj, err = db.Object(ctx, objID)
@@ -1011,9 +1078,8 @@ func TestSQLMetadataStore(t *testing.T) {
 	// - 1 element in the object table since we only stored and overwrote a single object
 	// - 1 element in the slabs table since we updated the object to only have 1 slab
 	// - 1 element in the slices table for the same reason
-	// - 2 elements in the sectors table because we don't delete sectors from the sectors table
-	// - 1 element in the sector_slabs table since we got 1 slab linked to a sector
-	countCheck := func(objCount, sliceCount, slabCount, shardCount, sectorCount, sectorSlabCount int64) error {
+	// - 1 element in the sectors table for the same reason
+	countCheck := func(objCount, sliceCount, slabCount, sectorCount int64) error {
 		tableCountCheck := func(table interface{}, tblCount int64) error {
 			var count int64
 			if err := db.db.Model(table).Count(&count).Error; err != nil {
@@ -1037,14 +1103,10 @@ func TestSQLMetadataStore(t *testing.T) {
 		if err := tableCountCheck(&dbSector{}, sectorCount); err != nil {
 			return err
 		}
-		var ssc int64
-		if err := db.db.Table("shards").Count(&ssc).Error; err != nil {
-			return err
-		}
 		return nil
 	}
-	if err := countCheck(1, 1, 1, 1, 2, 1); err != nil {
-		t.Error(err)
+	if err := countCheck(1, 1, 1, 1); err != nil {
+		t.Fatal(err)
 	}
 
 	// Delete the object. Due to the cascade this should delete everything
@@ -1052,7 +1114,7 @@ func TestSQLMetadataStore(t *testing.T) {
 	if err := db.RemoveObject(ctx, objID); err != nil {
 		t.Fatal(err)
 	}
-	if err := countCheck(0, 0, 0, 0, 2, 0); err != nil {
+	if err := countCheck(0, 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1079,7 +1141,7 @@ func TestObjectEntries(t *testing.T) {
 		obj, ucs := newTestObject(frand.Intn(9) + 1)
 		obj.Slabs = obj.Slabs[:1]
 		obj.Slabs[0].Length = uint32(o.size)
-		os.UpdateObject(ctx, o.path, obj, ucs)
+		os.UpdateObject(ctx, o.path, testContractSet, obj, nil, ucs)
 	}
 	tests := []struct {
 		path   string
@@ -1138,7 +1200,7 @@ func TestSearchObjects(t *testing.T) {
 		obj, ucs := newTestObject(frand.Intn(9) + 1)
 		obj.Slabs = obj.Slabs[:1]
 		obj.Slabs[0].Length = uint32(o.size)
-		os.UpdateObject(ctx, o.path, obj, ucs)
+		os.UpdateObject(ctx, o.path, testContractSet, obj, nil, ucs)
 	}
 	tests := []struct {
 		path string
@@ -1171,6 +1233,7 @@ func TestSearchObjects(t *testing.T) {
 
 // TestUnhealthySlabs tests the functionality of UnhealthySlabs.
 func TestUnhealthySlabs(t *testing.T) {
+	// create db
 	db, _, _, err := newTestSQLStore()
 	if err != nil {
 		t.Fatal(err)
@@ -1192,7 +1255,7 @@ func TestUnhealthySlabs(t *testing.T) {
 
 	// select the first three contracts as good contracts
 	goodContracts := []types.FileContractID{fcid1, fcid2, fcid3}
-	if err := db.SetContractSet(context.Background(), "autopilot", goodContracts); err != nil {
+	if err := db.SetContractSet(context.Background(), testContractSet, goodContracts); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1330,7 +1393,7 @@ func TestUnhealthySlabs(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := db.UpdateObject(ctx, "foo", obj, map[types.PublicKey]types.FileContractID{
+	if err := db.UpdateObject(ctx, "foo", testContractSet, obj, nil, map[types.PublicKey]types.FileContractID{
 		hk1: fcid1,
 		hk2: fcid2,
 		hk3: fcid3,
@@ -1340,7 +1403,7 @@ func TestUnhealthySlabs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	slabs, err := db.UnhealthySlabs(ctx, 0.99, "autopilot", -1)
+	slabs, err := db.UnhealthySlabs(ctx, 0.99, testContractSet, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1348,17 +1411,17 @@ func TestUnhealthySlabs(t *testing.T) {
 		t.Fatalf("unexpected amount of slabs to migrate, %v!=4", len(slabs))
 	}
 
-	expected := []object.SlabSlice{
-		obj.Slabs[4],
-		obj.Slabs[2],
-		obj.Slabs[1],
-		obj.Slabs[3],
+	expected := []api.UnhealthySlab{
+		{Key: obj.Slabs[2].Key, Health: 0},
+		{Key: obj.Slabs[4].Key, Health: 0},
+		{Key: obj.Slabs[1].Key, Health: 0.5},
+		{Key: obj.Slabs[3].Key, Health: 0.5},
 	}
-	if reflect.DeepEqual(slabs, expected) {
+	if !reflect.DeepEqual(slabs, expected) {
 		t.Fatal("slabs are not returned in the correct order")
 	}
 
-	slabs, err = db.UnhealthySlabs(ctx, 0.49, "autopilot", -1)
+	slabs, err = db.UnhealthySlabs(ctx, 0.49, testContractSet, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1366,12 +1429,161 @@ func TestUnhealthySlabs(t *testing.T) {
 		t.Fatalf("unexpected amount of slabs to migrate, %v!=2", len(slabs))
 	}
 
-	expected = []object.SlabSlice{
-		obj.Slabs[4],
-		obj.Slabs[2],
+	expected = []api.UnhealthySlab{
+		{Key: obj.Slabs[2].Key, Health: 0},
+		{Key: obj.Slabs[4].Key, Health: 0},
 	}
-	if reflect.DeepEqual(slabs, expected) {
-		t.Fatal("slabs are not returned in the correct order")
+	if !reflect.DeepEqual(slabs, expected) {
+		t.Fatal("slabs are not returned in the correct order", slabs, expected)
+	}
+
+	// Fetch unhealthy slabs again but for different contract set.
+	slabs, err = db.UnhealthySlabs(ctx, 0.49, "foo", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(slabs) != 0 {
+		t.Fatal("expected no slabs to migrate", len(slabs))
+	}
+}
+
+func TestUnhealthySlabsNegHealth(t *testing.T) {
+	// create db
+	db, _, _, err := newTestSQLStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// add a host
+	hks, err := db.addTestHosts(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hk1 := hks[0]
+
+	// add a contract
+	fcids, _, err := db.addTestContracts(hks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fcid1 := fcids[0]
+
+	// add it to the contract set
+	if err := db.SetContractSet(context.Background(), testContractSet, fcids); err != nil {
+		t.Fatal(err)
+	}
+
+	// create an object
+	obj := object.Object{
+		Key: object.GenerateEncryptionKey(),
+		Slabs: []object.SlabSlice{
+			{
+				Slab: object.Slab{
+					Key:       object.GenerateEncryptionKey(),
+					MinShards: 2,
+					Shards: []object.Sector{
+						{
+							Host: hk1,
+							Root: types.Hash256{1},
+						},
+						{
+							Host: hk1,
+							Root: types.Hash256{2},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// add the object
+	ctx := context.Background()
+	if err := db.UpdateObject(ctx, "foo", testContractSet, obj, nil, map[types.PublicKey]types.FileContractID{hk1: fcid1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// assert it's unhealthy
+	slabs, err := db.UnhealthySlabs(ctx, 0.99, testContractSet, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(slabs) != 1 {
+		t.Fatalf("unexpected amount of slabs to migrate, %v!=1", len(slabs))
+	}
+}
+
+func TestUnhealthySlabsNoContracts(t *testing.T) {
+	// create db
+	db, _, _, err := newTestSQLStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// add a host
+	hks, err := db.addTestHosts(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hk1 := hks[0]
+
+	// add a contract
+	fcids, _, err := db.addTestContracts(hks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fcid1 := fcids[0]
+
+	// add it to the contract set
+	if err := db.SetContractSet(context.Background(), testContractSet, fcids); err != nil {
+		t.Fatal(err)
+	}
+
+	// create an object
+	obj := object.Object{
+		Key: object.GenerateEncryptionKey(),
+		Slabs: []object.SlabSlice{
+			{
+				Slab: object.Slab{
+					Key:       object.GenerateEncryptionKey(),
+					MinShards: 1,
+					Shards: []object.Sector{
+						{
+							Host: hk1,
+							Root: types.Hash256{1},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// add the object
+	ctx := context.Background()
+	if err := db.UpdateObject(ctx, "foo", testContractSet, obj, nil, map[types.PublicKey]types.FileContractID{hk1: fcid1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// assert it's healthy
+	slabs, err := db.UnhealthySlabs(ctx, 0.99, testContractSet, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(slabs) != 0 {
+		t.Fatalf("unexpected amount of slabs to migrate, %v!=0", len(slabs))
+	}
+
+	// delete the sector
+	if err := db.db.Table("contract_sectors").Where("TRUE").Delete(&dbContractSector{}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// assert it's unhealthy
+	slabs, err = db.UnhealthySlabs(ctx, 0.99, testContractSet, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(slabs) != 1 {
+		t.Fatalf("unexpected amount of slabs to migrate, %v!=1", len(slabs))
 	}
 }
 
@@ -1399,7 +1611,7 @@ func TestUnhealthySlabsNoRedundancy(t *testing.T) {
 
 	// select the first two contracts as good contracts
 	goodContracts := []types.FileContractID{fcid1, fcid2}
-	if err := db.SetContractSet(context.Background(), "autopilot", goodContracts); err != nil {
+	if err := db.SetContractSet(context.Background(), testContractSet, goodContracts); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1441,7 +1653,7 @@ func TestUnhealthySlabsNoRedundancy(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := db.UpdateObject(ctx, "foo", obj, map[types.PublicKey]types.FileContractID{
+	if err := db.UpdateObject(ctx, "foo", testContractSet, obj, nil, map[types.PublicKey]types.FileContractID{
 		hk1: fcid1,
 		hk2: fcid2,
 		hk3: fcid3,
@@ -1449,18 +1661,18 @@ func TestUnhealthySlabsNoRedundancy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	slabs, err := db.UnhealthySlabs(ctx, 0.99, "autopilot", -1)
+	slabs, err := db.UnhealthySlabs(ctx, 0.99, testContractSet, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(slabs) != 0 {
-		t.Fatalf("unexpected amount of slabs to migrate, %v!=0", len(slabs))
+	if len(slabs) != 1 {
+		t.Fatalf("unexpected amount of slabs to migrate, %v!=1", len(slabs))
 	}
 
-	expected := []object.SlabSlice{
-		obj.Slabs[0],
+	expected := []api.UnhealthySlab{
+		{Key: obj.Slabs[1].Slab.Key, Health: -1},
 	}
-	if reflect.DeepEqual(slabs, expected) {
+	if !reflect.DeepEqual(slabs, expected) {
 		t.Fatal("slabs are not returned in the correct order")
 	}
 }
@@ -1511,7 +1723,7 @@ func TestContractSectors(t *testing.T) {
 		},
 	}
 	ctx := context.Background()
-	if err := db.UpdateObject(ctx, "foo", obj, usedContracts); err != nil {
+	if err := db.UpdateObject(ctx, "foo", testContractSet, obj, nil, usedContracts); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1537,7 +1749,7 @@ func TestContractSectors(t *testing.T) {
 	}
 
 	// Add the object again.
-	if err := db.UpdateObject(ctx, "foo", obj, usedContracts); err != nil {
+	if err := db.UpdateObject(ctx, "foo", testContractSet, obj, nil, usedContracts); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1602,7 +1814,7 @@ func TestPutSlab(t *testing.T) {
 		},
 	}
 	ctx := context.Background()
-	if err := db.UpdateObject(ctx, "foo", obj, map[types.PublicKey]types.FileContractID{
+	if err := db.UpdateObject(ctx, "foo", testContractSet, obj, nil, map[types.PublicKey]types.FileContractID{
 		hk1: fcid1,
 		hk2: fcid2,
 	}); err != nil {
@@ -1620,8 +1832,7 @@ func TestPutSlab(t *testing.T) {
 		t.Helper()
 		if err = db.db.
 			Where(&dbSlab{Key: key}).
-			Preload("Shards.DBSector").
-			Preload("Shards.DBSector.Contracts").
+			Preload("Shards.Contracts").
 			Take(&slab).
 			Error; err != nil {
 			t.Fatal(err)
@@ -1642,21 +1853,21 @@ func TestPutSlab(t *testing.T) {
 
 	// assert both sectors were upload to one contract/host
 	for i := 0; i < 2; i++ {
-		if cids := contractIds(inserted.Shards[i].DBSector.Contracts); len(cids) != 1 {
+		if cids := contractIds(inserted.Shards[i].Contracts); len(cids) != 1 {
 			t.Fatalf("sector %d was uploaded to unexpected amount of contracts, %v!=1", i+1, len(cids))
-		} else if inserted.Shards[i].DBSector.LatestHost != publicKey(hks[i]) {
+		} else if inserted.Shards[i].LatestHost != publicKey(hks[i]) {
 			t.Fatalf("sector %d was uploaded to unexpected amount of hosts, %v!=1", i+1, len(hks))
 		}
 	}
 
 	// select contracts h1 and h3 as good contracts (h2 is bad)
 	goodContracts := []types.FileContractID{fcid1, fcid3}
-	if err := db.SetContractSet(ctx, "autopilot", goodContracts); err != nil {
+	if err := db.SetContractSet(ctx, testContractSet, goodContracts); err != nil {
 		t.Fatal(err)
 	}
 
 	// fetch slabs for migration and assert there is only one
-	toMigrate, err := db.UnhealthySlabs(ctx, 0.99, "autopilot", -1)
+	toMigrate, err := db.UnhealthySlabs(ctx, 0.99, testContractSet, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1665,14 +1876,14 @@ func TestPutSlab(t *testing.T) {
 	}
 
 	// migrate the sector from h2 to h3
-	slab := toMigrate[0]
+	slab := obj.Slabs[0].Slab
 	slab.Shards[1] = object.Sector{
 		Host: hk3,
 		Root: types.Hash256{2},
 	}
 
 	// update the slab to reflect the migration
-	err = db.UpdateSlab(ctx, slab, map[types.PublicKey]types.FileContractID{
+	err = db.UpdateSlab(ctx, slab, testContractSet, map[types.PublicKey]types.FileContractID{
 		hk1: fcid1,
 		hk3: fcid3,
 	})
@@ -1684,23 +1895,23 @@ func TestPutSlab(t *testing.T) {
 	updated := fetchSlab()
 
 	// assert the first sector is still only on one host, also assert it's h1
-	if cids := contractIds(updated.Shards[0].DBSector.Contracts); len(cids) != 1 {
+	if cids := contractIds(updated.Shards[0].Contracts); len(cids) != 1 {
 		t.Fatalf("sector 1 was uploaded to unexpected amount of contracts, %v!=1", len(cids))
 	} else if types.FileContractID(cids[0]) != fcid1 {
 		t.Fatal("sector 1 was uploaded to unexpected contract", cids[0])
-	} else if updated.Shards[0].DBSector.LatestHost != publicKey(hks[0]) {
-		t.Fatal("host key was invalid", updated.Shards[0].DBSector.LatestHost, publicKey(hks[0]))
+	} else if updated.Shards[0].LatestHost != publicKey(hks[0]) {
+		t.Fatal("host key was invalid", updated.Shards[0].LatestHost, publicKey(hks[0]))
 	} else if hks[0] != hk1 {
 		t.Fatal("sector 1 was uploaded to unexpected host", hks[0])
 	}
 
 	// assert the second sector however is uploaded to two hosts, assert it's h2 and h3
-	if cids := contractIds(updated.Shards[1].DBSector.Contracts); len(cids) != 2 {
+	if cids := contractIds(updated.Shards[1].Contracts); len(cids) != 2 {
 		t.Fatalf("sector 1 was uploaded to unexpected amount of contracts, %v!=2", len(cids))
 	} else if types.FileContractID(cids[0]) != fcid2 || types.FileContractID(cids[1]) != fcid3 {
 		t.Fatal("sector 1 was uploaded to unexpected contracts", cids[0], cids[1])
-	} else if updated.Shards[0].DBSector.LatestHost != publicKey(hks[0]) {
-		t.Fatal("host key was invalid", updated.Shards[0].DBSector.LatestHost, publicKey(hks[0]))
+	} else if updated.Shards[0].LatestHost != publicKey(hks[0]) {
+		t.Fatal("host key was invalid", updated.Shards[0].LatestHost, publicKey(hks[0]))
 	}
 
 	// assert there's still only one entry in the dbslab table
@@ -1712,7 +1923,7 @@ func TestPutSlab(t *testing.T) {
 	}
 
 	// fetch slabs for migration and assert there are none left
-	toMigrate, err = db.UnhealthySlabs(ctx, 0.99, "autopilot", -1)
+	toMigrate, err = db.UnhealthySlabs(ctx, 0.99, testContractSet, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1720,7 +1931,7 @@ func TestPutSlab(t *testing.T) {
 		t.Fatal("unexpected number of slabs to migrate", len(toMigrate))
 	}
 
-	if obj, err := db.dbObject(ctx, "foo"); err != nil {
+	if obj, err := db.dbObject("foo"); err != nil {
 		t.Fatal(err)
 	} else if len(obj.Slabs) != 1 {
 		t.Fatalf("unexpected number of slabs, %v != 1", len(obj.Slabs))
@@ -1836,6 +2047,87 @@ func TestRecordContractSpending(t *testing.T) {
 	}
 }
 
+// TestRenameObjects is a unit test for RenameObject and RenameObjects.
+func TestRenameObjects(t *testing.T) {
+	cs, _, _, err := newTestSQLStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a few objects.
+	objects := []string{
+		"/fileś/1a",
+		"/fileś/2a",
+		"/fileś/3a",
+		"/fileś/dir/1b",
+		"/fileś/dir/2b",
+		"/fileś/dir/3b",
+		"/foo",
+		"/bar",
+		"/baz",
+	}
+	ctx := context.Background()
+	for _, path := range objects {
+		obj, ucs := newTestObject(1)
+		cs.UpdateObject(ctx, path, testContractSet, obj, nil, ucs)
+	}
+
+	// Try renaming objects that don't exist.
+	if err := cs.RenameObject(ctx, "/fileś", "/fileś2"); !errors.Is(err, api.ErrObjectNotFound) {
+		t.Fatal(err)
+	}
+	if err := cs.RenameObjects(ctx, "/fileś1", "/fileś2"); !errors.Is(err, api.ErrObjectNotFound) {
+		t.Fatal(err)
+	}
+
+	// Perform some renames.
+	if err := cs.RenameObjects(ctx, "/fileś/dir/", "/fileś/"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.RenameObject(ctx, "/foo", "/fileś/foo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.RenameObject(ctx, "/bar", "/fileś/bar"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.RenameObject(ctx, "/baz", "/fileś/baz"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Paths after.
+	objectsAfter := []string{
+		"/fileś/1a",
+		"/fileś/2a",
+		"/fileś/3a",
+		"/fileś/1b",
+		"/fileś/2b",
+		"/fileś/3b",
+		"/fileś/foo",
+		"/fileś/bar",
+		"/fileś/baz",
+	}
+	objectsAfterMap := make(map[string]struct{})
+	for _, path := range objectsAfter {
+		objectsAfterMap[path] = struct{}{}
+	}
+
+	// Assert that number of objects matches.
+	objs, err := cs.SearchObjects(ctx, "/", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objs) != len(objectsAfter) {
+		t.Fatal("unexpected number of objects", len(objs), len(objectsAfter))
+	}
+
+	// Assert paths are correct.
+	for _, obj := range objs {
+		if _, exists := objectsAfterMap[obj.Name]; !exists {
+			t.Fatal("unexpected path", obj.Name)
+		}
+	}
+}
+
 // TestObjectsStats is a unit test for ObjectsStats.
 func TestObjectsStats(t *testing.T) {
 	cs, _, _, err := newTestSQLStore()
@@ -1873,7 +2165,7 @@ func TestObjectsStats(t *testing.T) {
 		}
 
 		key := hex.EncodeToString(frand.Bytes(32))
-		err := cs.UpdateObject(context.Background(), key, obj, contracts)
+		err := cs.UpdateObject(context.Background(), key, testContractSet, obj, nil, contracts)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1923,14 +2215,288 @@ func TestObjectsStats(t *testing.T) {
 	}
 }
 
+func TestPartialSlab(t *testing.T) {
+	db, _, _, err := newTestSQLStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// create 2 hosts
+	hks, err := db.addTestHosts(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hk1, hk2 := hks[0], hks[1]
+
+	// create 2 contracts
+	fcids, _, err := db.addTestContracts(hks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fcid1, fcid2 := fcids[0], fcids[1]
+	usedContracts := map[types.PublicKey]types.FileContractID{
+		hk1: fcid1,
+		hk2: fcid2,
+	}
+
+	// create an object. It has 1 slab with 2 sectors and a partial slab.
+	obj := object.Object{
+		Key: object.GenerateEncryptionKey(),
+		Slabs: []object.SlabSlice{
+			{
+				Slab: object.Slab{
+					Key:       object.GenerateEncryptionKey(),
+					MinShards: 1,
+					Shards: []object.Sector{
+						{
+							Host: hk1,
+							Root: types.Hash256{1},
+						},
+						{
+							Host: hk2,
+							Root: types.Hash256{2},
+						},
+					},
+				},
+				Offset: 0,
+				Length: rhpv2.SectorSize,
+			},
+		},
+	}
+	partialSlab := object.PartialSlab{
+		MinShards:   1,
+		TotalShards: 2,
+		Data:        []byte{1, 2, 3, 4},
+	}
+	err = db.UpdateObject(context.Background(), "key", testContractSet, obj, &partialSlab, usedContracts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// check that the object was created
+	storedObject, err := db.dbObject("key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(storedObject.Slabs) != 2 {
+		t.Fatal("expected 2 slabs to be created", len(storedObject.Slabs))
+	}
+	// check the slice
+	storedSlice := storedObject.Slabs[1]
+	if storedSlice.Offset != 0 || storedSlice.Length != uint32(len(partialSlab.Data)) {
+		t.Fatalf("wrong offset/length: %v/%v", storedSlice.Offset, storedSlice.Length)
+	}
+	// check the slab
+	var storedSlab dbSlab
+	if err := db.db.Take(&storedSlab, "id = ?", storedSlice.DBSlabID).Error; err != nil {
+		t.Fatal(err)
+	}
+	// check the buffer
+	var buffer dbSlabBuffer
+	if err := db.db.Take(&buffer, "db_slab_id = ?", storedSlab.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	buffer.Model = Model{}
+	expectedBuffer := dbSlabBuffer{
+		DBSlabID:    storedSlab.ID,
+		Complete:    false,
+		Data:        partialSlab.Data,
+		LockedUntil: 0,
+		MinShards:   partialSlab.MinShards,
+		TotalShards: partialSlab.TotalShards,
+	}
+	if !reflect.DeepEqual(buffer, expectedBuffer) {
+		t.Fatal("invalid buffer", cmp.Diff(buffer, expectedBuffer))
+	}
+
+	// add another object with a partial slab. This should append to the buffer.
+	fullSlabSize := slabSize(1, 2)
+	obj2 := object.Object{Key: object.GenerateEncryptionKey()}
+	partialSlab2 := object.PartialSlab{
+		MinShards:   1,
+		TotalShards: 2,
+		Data:        frand.Bytes(int(fullSlabSize) - len(partialSlab.Data) - 1), // leave 1 byte
+	}
+	err = db.UpdateObject(context.Background(), "key2", testContractSet, obj2, &partialSlab2, usedContracts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedObject2, err := db.dbObject("key2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(storedObject2.Slabs) != 1 {
+		t.Fatal("expected 1 slab to be created", len(storedObject2.Slabs))
+	}
+	// check the slice
+	storedSlice2 := storedObject2.Slabs[0]
+	if storedSlice2.Offset != storedSlice.Length || storedSlice2.Length != uint32(len(partialSlab2.Data)) {
+		t.Fatalf("wrong offset/length: %v/%v", storedSlice2.Offset, storedSlice2.Length)
+	}
+	// check the slab
+	var storedSlab2 dbSlab
+	if err := db.db.Take(&storedSlab2, "id = ?", storedSlice2.DBSlabID).Error; err != nil {
+		t.Fatal(err)
+	}
+	// check the buffer
+	if err := db.db.Take(&buffer, "db_slab_id = ?", storedSlab.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	buffer.Model = Model{}
+	expectedBuffer.Data = append(expectedBuffer.Data, partialSlab2.Data...)
+	if !reflect.DeepEqual(buffer, expectedBuffer) {
+		t.Fatal("invalid buffer", cmp.Diff(buffer, expectedBuffer))
+	}
+
+	// add one last object. This should fill the buffer and create a new slab.
+	obj3 := object.Object{Key: object.GenerateEncryptionKey()}
+	partialSlab3 := object.PartialSlab{
+		MinShards:   1,
+		TotalShards: 2,
+		Data:        []byte{5, 6}, // 1 byte more than fits in the slab
+	}
+	err = db.UpdateObject(context.Background(), "key3", testContractSet, obj3, &partialSlab3, usedContracts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedObject3, err := db.dbObject("key3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(storedObject3.Slabs) != 2 {
+		t.Fatal("expected 2 slabs to be created", len(storedObject2.Slabs))
+	}
+	// check the slice
+	storedSlice3, storedSlice4 := storedObject3.Slabs[0], storedObject3.Slabs[1]
+	if storedSlice3.Offset != storedSlice.Length+storedSlice2.Length || storedSlice3.Length != 1 {
+		t.Fatalf("wrong offset/length: %v/%v", storedSlice3.Offset, storedSlice3.Length)
+	}
+	if storedSlice4.Offset != 0 || storedSlice4.Length != 1 {
+		t.Fatalf("wrong offset/length: %v/%v", storedSlice4.Offset, storedSlice4.Length)
+	}
+	// check the slab for slab3
+	var storedSlab3 dbSlab
+	if err := db.db.Take(&storedSlab3, "id = ?", storedSlice3.DBSlabID).Error; err != nil {
+		t.Fatal(err)
+	}
+	// check the buffer
+	if err := db.db.Take(&buffer, "db_slab_id = ?", storedSlab.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	buffer.Model = Model{}
+	expectedBuffer.Complete = true // full now
+	expectedBuffer.Data = append(expectedBuffer.Data, partialSlab3.Data[0])
+	if !reflect.DeepEqual(buffer, expectedBuffer) {
+		t.Fatal("invalid buffer", cmp.Diff(buffer, expectedBuffer))
+	}
+
+	// check the new buffer
+	var buffer2 dbSlabBuffer
+	if err := db.db.Take(&buffer2, "db_slab_id = ?", storedSlab.ID+1).Error; err != nil {
+		t.Fatal(err)
+	}
+	buffer2.Model = Model{}
+	expectedBuffer2 := dbSlabBuffer{
+		DBSlabID:    storedSlab.ID + 1,
+		Complete:    false,
+		Data:        partialSlab3.Data[1:],
+		LockedUntil: 0,
+		MinShards:   partialSlab.MinShards,
+		TotalShards: partialSlab.TotalShards,
+	}
+	if !reflect.DeepEqual(buffer2, expectedBuffer2) {
+		t.Fatal("invalid buffer", cmp.Diff(buffer2, expectedBuffer2))
+	}
+
+	// fetch the buffer for uploading
+	now := time.Now().Unix()
+	buffers, err := db.packedSlabsForUpload(time.Hour, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buffers) != 1 {
+		t.Fatal("expected 1 buffer to be returned", len(buffers))
+	}
+	completedBuffer := buffers[0]
+	completedBufferID := completedBuffer.ID
+	if completedBuffer.LockedUntil < now+int64(time.Hour.Seconds()) {
+		t.Fatal("buffer should be locked for at least an hour", completedBuffer.LockedUntil, now+int64(time.Hour.Seconds()))
+	}
+	completedBuffer.LockedUntil = 0
+	completedBuffer.Model = Model{}
+	if !reflect.DeepEqual(completedBuffer, buffer) {
+		t.Fatal("invalid buffer", cmp.Diff(completedBuffer, buffer))
+	}
+
+	// try fetching it again. Should still be locked.
+	buffers, err = db.packedSlabsForUpload(time.Hour, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buffers) != 0 {
+		t.Fatal("expected 0 buffers to be returned", len(buffers))
+	}
+
+	// mark the slab as uploaded
+	packedSlab := api.UploadedPackedSlab{
+		BufferID: completedBufferID,
+		Key:      object.GenerateEncryptionKey(),
+		Shards: []object.Sector{
+			{
+				Host: hk1,
+				Root: types.Hash256{3},
+			},
+			{
+				Host: hk2,
+				Root: types.Hash256{4},
+			},
+		},
+	}
+	err = db.MarkPackedSlabsUploaded([]api.UploadedPackedSlab{packedSlab}, usedContracts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// buffer should be gone now.
+	if err := db.db.Take(&buffer, "id = ?", completedBufferID).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatal("shouldn't be able to find buffer", err)
+	}
+	// check the sectors - there should be 4 now.
+	var sectors []dbSector
+	if err := db.db.Find(&sectors).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(sectors) != 4 {
+		t.Fatal("expected 4 sectors to be created", len(sectors))
+	}
+	if sectors[2].LatestHost != publicKey(packedSlab.Shards[0].Host) || sectors[2].DBSlabID != storedSlab.ID || !bytes.Equal(sectors[2].Root, packedSlab.Shards[0].Root[:]) {
+		t.Fatal("invalid sector", sectors[2])
+	}
+	if sectors[3].LatestHost != publicKey(packedSlab.Shards[1].Host) || sectors[3].DBSlabID != storedSlab.ID || !bytes.Equal(sectors[3].Root, packedSlab.Shards[1].Root[:]) {
+		t.Fatal("invalid sector", sectors[3])
+	}
+}
+
 // dbObject retrieves a dbObject from the store.
-func (s *SQLStore) dbObject(ctx context.Context, key string) (dbObject, error) {
+func (s *SQLStore) dbObject(key string) (dbObject, error) {
 	var obj dbObject
 	tx := s.db.Where(&dbObject{ObjectID: key}).
-		Preload("Slabs.Slab.Shards.DBSector.Contracts.Host").
+		Preload("Slabs").
 		Take(&obj)
 	if errors.Is(tx.Error, gorm.ErrRecordNotFound) {
 		return dbObject{}, api.ErrObjectNotFound
 	}
 	return obj, nil
+}
+
+// dbSlab retrieves a dbSlab from the store.
+func (s *SQLStore) dbSlab(key []byte) (dbSlab, error) {
+	var slab dbSlab
+	tx := s.db.Where(&dbSlab{Key: key}).
+		Preload("Shards.Contracts.Host").
+		Take(&slab)
+	if errors.Is(tx.Error, gorm.ErrRecordNotFound) {
+		return dbSlab{}, api.ErrObjectNotFound
+	}
+	return slab, nil
 }

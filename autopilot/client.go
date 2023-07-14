@@ -6,6 +6,7 @@ import (
 
 	"go.sia.tech/core/types"
 	"go.sia.tech/jape"
+	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
 )
 
@@ -23,13 +24,15 @@ func NewClient(addr, password string) *Client {
 	}}
 }
 
-func (c *Client) Actions() (actions []api.Action, err error) {
-	err = c.c.GET("/actions", &actions)
+// Alerts fetches the active alerts from the bus.
+func (c *Client) Alerts() (alerts []alerts.Alert, err error) {
+	err = c.c.GET("/alerts", &alerts)
 	return
 }
 
-func (c *Client) SetConfig(cfg api.AutopilotConfig) error {
-	return c.c.PUT("/config", cfg)
+// DismissAlerts dimisses the alerts with the given IDs.
+func (c *Client) DismissAlerts(ids ...types.Hash256) error {
+	return c.c.POST("/alerts/dismiss", ids, nil)
 }
 
 func (c *Client) Config() (cfg api.AutopilotConfig, err error) {
@@ -37,30 +40,34 @@ func (c *Client) Config() (cfg api.AutopilotConfig, err error) {
 	return
 }
 
-func (c *Client) Status() (uint64, error) {
-	var resp api.AutopilotStatusResponseGET
-	err := c.c.GET("/status", &resp)
-	return resp.CurrentPeriod, err
+func (c *Client) UpdateConfig(cfg api.AutopilotConfig) error {
+	return c.c.PUT("/config", cfg)
+}
+
+func (c *Client) HostInfo(hostKey types.PublicKey) (resp api.HostHandlerResponse, err error) {
+	err = c.c.GET(fmt.Sprintf("/host/%s", hostKey), &resp)
+	return
+}
+
+func (c *Client) HostInfos(ctx context.Context, filterMode, usabilityMode string, addressContains string, keyIn []types.PublicKey, offset, limit int) (resp []api.HostHandlerResponse, err error) {
+	err = c.c.POST("/hosts", api.SearchHostsRequest{
+		Offset:          offset,
+		Limit:           limit,
+		FilterMode:      filterMode,
+		UsabilityMode:   usabilityMode,
+		AddressContains: addressContains,
+		KeyIn:           keyIn,
+	}, &resp)
+	return
+}
+
+func (c *Client) Status() (resp api.AutopilotStatusResponse, err error) {
+	err = c.c.GET("/status", &resp)
+	return
 }
 
 func (c *Client) Trigger(forceScan bool) (_ bool, err error) {
 	var resp api.AutopilotTriggerResponse
 	err = c.c.POST("/debug/trigger", api.AutopilotTriggerRequest{ForceScan: forceScan}, &resp)
 	return resp.Triggered, err
-}
-
-func (c *Client) HostInfo(hostKey types.PublicKey) (resp api.HostHandlerGET, err error) {
-	err = c.c.GET(fmt.Sprintf("/host/%s", hostKey), &resp)
-	return
-}
-
-func (c *Client) HostInfos(ctx context.Context, filterMode string, addressContains string, keyIn []types.PublicKey, offset, limit int) (resp []api.HostHandlerGET, err error) {
-	err = c.c.POST("/hosts", api.SearchHostsRequest{
-		Offset:          offset,
-		Limit:           limit,
-		FilterMode:      filterMode,
-		AddressContains: addressContains,
-		KeyIn:           keyIn,
-	}, &resp)
-	return
 }

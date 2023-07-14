@@ -15,7 +15,9 @@ import (
 	rhpv3 "go.sia.tech/core/rhp/v3"
 	"go.sia.tech/core/types"
 	"go.sia.tech/jape"
+	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
+	"go.sia.tech/renterd/build"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
 	"go.sia.tech/renterd/tracing"
@@ -30,6 +32,7 @@ type (
 	// A ChainManager manages blockchain state.
 	ChainManager interface {
 		AcceptBlock(context.Context, types.Block) error
+		LastBlockTime() time.Time
 		Synced(ctx context.Context) bool
 		TipState(ctx context.Context) consensus.State
 	}
@@ -58,7 +61,7 @@ type (
 		Redistribute(cs consensus.State, outputs int, amount, feePerByte types.Currency, pool []types.Transaction) (types.Transaction, []types.Hash256, error)
 		ReleaseInputs(txn types.Transaction)
 		SignTransaction(cs consensus.State, txn *types.Transaction, toSign []types.Hash256, cf types.CoveredFields) error
-		Transactions(since time.Time, max int) ([]wallet.Transaction, error)
+		Transactions(before, since time.Time, offset, limit int) ([]wallet.Transaction, error)
 		UnspentOutputs() ([]wallet.SiacoinElement, error)
 	}
 
@@ -91,18 +94,30 @@ type (
 		ContractSets(ctx context.Context) ([]string, error)
 		RecordContractSpending(ctx context.Context, records []api.ContractSpendingRecord) error
 		RemoveContractSet(ctx context.Context, name string) error
+		RenewedContract(ctx context.Context, renewedFrom types.FileContractID) (api.ContractMetadata, error)
 		SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) error
 
 		Object(ctx context.Context, path string) (object.Object, error)
 		ObjectEntries(ctx context.Context, path, prefix string, offset, limit int) ([]api.ObjectMetadata, error)
 		SearchObjects(ctx context.Context, substring string, offset, limit int) ([]api.ObjectMetadata, error)
-		UpdateObject(ctx context.Context, path string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID) error
+		UpdateObject(ctx context.Context, path, contractSet string, o object.Object, ps *object.PartialSlab, usedContracts map[types.PublicKey]types.FileContractID) error
 		RemoveObject(ctx context.Context, path string) error
+		RemoveObjects(ctx context.Context, prefix string) error
+		RenameObject(ctx context.Context, from, to string) error
+		RenameObjects(ctx context.Context, from, to string) error
 
 		ObjectsStats(ctx context.Context) (api.ObjectsStats, error)
 
-		UnhealthySlabs(ctx context.Context, healthCutoff float64, set string, limit int) ([]object.Slab, error)
-		UpdateSlab(ctx context.Context, s object.Slab, usedContracts map[types.PublicKey]types.FileContractID) error
+		Slab(ctx context.Context, key object.EncryptionKey) (object.Slab, error)
+		UnhealthySlabs(ctx context.Context, healthCutoff float64, set string, limit int) ([]api.UnhealthySlab, error)
+		UpdateSlab(ctx context.Context, s object.Slab, contractSet string, usedContracts map[types.PublicKey]types.FileContractID) error
+	}
+
+	// An AutopilotStore stores autopilots.
+	AutopilotStore interface {
+		Autopilots(ctx context.Context) ([]api.Autopilot, error)
+		Autopilot(ctx context.Context, id string) (api.Autopilot, error)
+		UpdateAutopilot(ctx context.Context, ap api.Autopilot) error
 	}
 
 	// A SettingStore stores settings.
@@ -123,13 +138,15 @@ type (
 )
 
 type bus struct {
-	s   Syncer
-	cm  ChainManager
-	tp  TransactionPool
-	w   Wallet
-	hdb HostDB
-	ms  MetadataStore
-	ss  SettingStore
+	alerts *alerts.Manager
+	s      Syncer
+	cm     ChainManager
+	tp     TransactionPool
+	w      Wallet
+	hdb    HostDB
+	as     AutopilotStore
+	ms     MetadataStore
+	ss     SettingStore
 
 	eas EphemeralAccountStore
 
@@ -168,10 +185,7 @@ func (b *bus) syncerConnectHandler(jc jape.Context) {
 }
 
 func (b *bus) consensusStateHandler(jc jape.Context) {
-	jc.Encode(api.ConsensusState{
-		BlockHeight: b.cm.TipState(jc.Request.Context()).Index.Height,
-		Synced:      b.cm.Synced(jc.Request.Context()),
-	})
+	jc.Encode(b.consensusState(jc.Request.Context()))
 }
 
 func (b *bus) consensusNetworkHandler(jc jape.Context) {
@@ -209,12 +223,16 @@ func (b *bus) walletAddressHandler(jc jape.Context) {
 }
 
 func (b *bus) walletTransactionsHandler(jc jape.Context) {
-	var since time.Time
-	max := -1
-	if jc.DecodeForm("since", (*api.ParamTime)(&since)) != nil || jc.DecodeForm("max", &max) != nil {
+	var before, since time.Time
+	offset := 0
+	limit := -1
+	if jc.DecodeForm("before", (*api.ParamTime)(&before)) != nil ||
+		jc.DecodeForm("since", (*api.ParamTime)(&since)) != nil ||
+		jc.DecodeForm("offset", &offset) != nil ||
+		jc.DecodeForm("limit", &limit) != nil {
 		return
 	}
-	txns, err := b.w.Transactions(since, max)
+	txns, err := b.w.Transactions(before, since, offset, limit)
 	if jc.Check("couldn't load transactions", err) == nil {
 		jc.Encode(txns)
 	}
@@ -308,7 +326,7 @@ func (b *bus) walletPrepareFormHandler(jc jape.Context) {
 		jc.Error(errors.New("no host key provided"), http.StatusBadRequest)
 		return
 	}
-	if wpfr.RenterKey == nil {
+	if wpfr.RenterKey == (types.PublicKey{}) {
 		jc.Error(errors.New("no renter key provided"), http.StatusBadRequest)
 		return
 	}
@@ -361,7 +379,7 @@ func (b *bus) walletPrepareRenewHandler(jc jape.Context) {
 	finalRevision.RevisionNumber = math.MaxUint64
 
 	// Prepare the new contract.
-	fc, basePrice := rhpv3.PrepareContractRenewal(wprr.Revision, wprr.HostAddress, wprr.RenterAddress, wprr.RenterKey, wprr.RenterFunds, wprr.NewCollateral, wprr.HostKey, wprr.PriceTable, wprr.EndHeight)
+	fc, basePrice := rhpv3.PrepareContractRenewal(wprr.Revision, wprr.HostAddress, wprr.RenterAddress, wprr.RenterFunds, wprr.NewCollateral, wprr.HostKey, wprr.PriceTable, wprr.EndHeight)
 
 	// Create the transaction containing both the final revision and new
 	// contract.
@@ -550,6 +568,18 @@ func (b *bus) contractsHandlerGET(jc jape.Context) {
 	cs, err := b.ms.Contracts(jc.Request.Context())
 	if jc.Check("couldn't load contracts", err) == nil {
 		jc.Encode(cs)
+	}
+}
+
+func (b *bus) contractsRenewedIDHandlerGET(jc jape.Context) {
+	var id types.FileContractID
+	if jc.DecodeParam("id", &id) != nil {
+		return
+	}
+
+	md, err := b.ms.RenewedContract(jc.Request.Context(), id)
+	if jc.Check("faild to fetch renewed contract", err) == nil {
+		jc.Encode(md)
 	}
 }
 
@@ -771,12 +801,54 @@ func (b *bus) objectEntriesHandlerGET(jc jape.Context, path string) {
 func (b *bus) objectsHandlerPUT(jc jape.Context) {
 	var aor api.AddObjectRequest
 	if jc.Decode(&aor) == nil {
-		jc.Check("couldn't store object", b.ms.UpdateObject(jc.Request.Context(), jc.PathParam("path"), aor.Object, aor.UsedContracts))
+		jc.Check("couldn't store object", b.ms.UpdateObject(jc.Request.Context(), jc.PathParam("path"), aor.ContractSet, aor.Object, nil, aor.UsedContracts)) // TODO
+	}
+}
+
+func (b *bus) objectsRenameHandlerPOST(jc jape.Context) {
+	var orr api.ObjectsRenameRequest
+	if jc.Decode(&orr) != nil {
+		return
+	}
+	if orr.Mode == api.ObjectsRenameModeSingle {
+		// Single object rename.
+		if strings.HasSuffix(orr.From, "/") || strings.HasSuffix(orr.To, "/") {
+			jc.Error(fmt.Errorf("can't rename dirs with mode %v", orr.Mode), http.StatusBadRequest)
+			return
+		}
+		jc.Check("couldn't rename object", b.ms.RenameObject(jc.Request.Context(), orr.From, orr.To))
+		return
+	} else if orr.Mode == api.ObjectsRenameModeMulti {
+		// Multi object rename.
+		if !strings.HasSuffix(orr.From, "/") || !strings.HasSuffix(orr.To, "/") {
+			jc.Error(fmt.Errorf("can't rename file with mode %v", orr.Mode), http.StatusBadRequest)
+			return
+		}
+		jc.Check("couldn't rename objects", b.ms.RenameObjects(jc.Request.Context(), orr.From, orr.To))
+		return
+	} else {
+		// Invalid mode.
+		jc.Error(fmt.Errorf("invalid mode: %v", orr.Mode), http.StatusBadRequest)
+		return
 	}
 }
 
 func (b *bus) objectsHandlerDELETE(jc jape.Context) {
-	jc.Check("couldn't delete object", b.ms.RemoveObject(jc.Request.Context(), jc.PathParam("path")))
+	var batch bool
+	if jc.DecodeForm("batch", &batch) != nil {
+		return
+	}
+	var err error
+	if batch {
+		err = b.ms.RemoveObjects(jc.Request.Context(), jc.PathParam("path"))
+	} else {
+		err = b.ms.RemoveObject(jc.Request.Context(), jc.PathParam("path"))
+	}
+	if errors.Is(err, api.ErrObjectNotFound) {
+		jc.Error(err, http.StatusNotFound)
+		return
+	}
+	jc.Check("couldn't delete object", err)
 }
 
 func (b *bus) objectsStatshandlerGET(jc jape.Context) {
@@ -787,10 +859,26 @@ func (b *bus) objectsStatshandlerGET(jc jape.Context) {
 	jc.Encode(info)
 }
 
+func (b *bus) slabHandlerGET(jc jape.Context) {
+	var key object.EncryptionKey
+	if jc.DecodeParam("key", &key) != nil {
+		return
+	}
+	slab, err := b.ms.Slab(jc.Request.Context(), key)
+	if errors.Is(err, api.ErrObjectNotFound) {
+		jc.Error(err, http.StatusNotFound)
+		return
+	} else if err != nil {
+		jc.Error(err, http.StatusInternalServerError)
+		return
+	}
+	jc.Encode(slab)
+}
+
 func (b *bus) slabHandlerPUT(jc jape.Context) {
 	var usr api.UpdateSlabRequest
 	if jc.Decode(&usr) == nil {
-		jc.Check("couldn't update slab", b.ms.UpdateSlab(jc.Request.Context(), usr.Slab, usr.UsedContracts))
+		jc.Check("couldn't update slab", b.ms.UpdateSlab(jc.Request.Context(), usr.Slab, usr.ContractSet, usr.UsedContracts))
 	}
 }
 
@@ -798,7 +886,9 @@ func (b *bus) slabsMigrationHandlerPOST(jc jape.Context) {
 	var msr api.MigrationSlabsRequest
 	if jc.Decode(&msr) == nil {
 		if slabs, err := b.ms.UnhealthySlabs(jc.Request.Context(), msr.HealthCutoff, msr.ContractSet, msr.Limit); jc.Check("couldn't fetch slabs for migration", err) == nil {
-			jc.Encode(slabs)
+			jc.Encode(api.UnhealthySlabsResponse{
+				Slabs: slabs,
+			})
 		}
 	}
 }
@@ -909,19 +999,39 @@ func (b *bus) paramsHandlerUploadGET(jc jape.Context) {
 		return
 	}
 
-	var css api.ContractSetSettings
-	if csss, err := b.ss.Setting(jc.Request.Context(), api.SettingContractSet); err != nil {
-		jc.Error(fmt.Errorf("could not fetch contract set setting, err: %v", err), http.StatusInternalServerError)
+	val, err := b.ss.Setting(jc.Request.Context(), api.SettingContractSet)
+	if err != nil && errors.Is(err, api.ErrSettingNotFound) {
+		// return the upload params without a contract set, if the user is
+		// specifying a contract set through the query string that's fine
+		jc.Encode(api.UploadParams{
+			ContractSet:   "",
+			CurrentHeight: b.cm.TipState(jc.Request.Context()).Index.Height,
+			GougingParams: gp,
+		})
 		return
-	} else if err := json.Unmarshal([]byte(csss), &css); err != nil {
-		b.logger.Panicf("failed to unmarshal gouging settings '%s': %v", csss, err)
+	} else if err != nil {
+		jc.Error(fmt.Errorf("could not get contract set settings: %w", err), http.StatusInternalServerError)
+		return
+	}
+
+	var css api.ContractSetSetting
+	if err := json.Unmarshal([]byte(val), &css); err != nil {
+		b.logger.Panicf("failed to unmarshal contract set settings '%s': %v", val, err)
 	}
 
 	jc.Encode(api.UploadParams{
-		ContractSet:   css.Set,
+		ContractSet:   css.Default,
 		CurrentHeight: b.cm.TipState(jc.Request.Context()).Index.Height,
 		GougingParams: gp,
 	})
+}
+
+func (b *bus) consensusState(ctx context.Context) api.ConsensusState {
+	return api.ConsensusState{
+		BlockHeight:   b.cm.TipState(ctx).Index.Height,
+		LastBlockTime: b.cm.LastBlockTime(),
+		Synced:        b.cm.Synced(ctx),
+	}
 }
 
 func (b *bus) paramsHandlerGougingGET(jc jape.Context) {
@@ -947,10 +1057,7 @@ func (b *bus) gougingParams(ctx context.Context) (api.GougingParams, error) {
 		b.logger.Panicf("failed to unmarshal redundancy settings '%s': %v", rss, err)
 	}
 
-	cs := api.ConsensusState{
-		BlockHeight: b.cm.TipState(ctx).Index.Height,
-		Synced:      b.cm.Synced(ctx),
-	}
+	cs := b.consensusState(ctx)
 
 	return api.GougingParams{
 		ConsensusState:     cs,
@@ -958,6 +1065,21 @@ func (b *bus) gougingParams(ctx context.Context) (api.GougingParams, error) {
 		RedundancySettings: rs,
 		TransactionFee:     b.tp.RecommendedFee(),
 	}, nil
+}
+
+func (b *bus) handleGETAlerts(c jape.Context) {
+	c.Encode(b.alerts.Active())
+}
+
+func (b *bus) handlePOSTAlertsDismiss(c jape.Context) {
+	var ids []types.Hash256
+	if c.Decode(&ids) != nil {
+		return
+	} else if len(ids) == 0 {
+		c.Error(errors.New("no alerts to dismiss"), http.StatusBadRequest)
+		return
+	}
+	b.alerts.Dismiss(ids...)
 }
 
 func (b *bus) accountsHandlerGET(jc jape.Context) {
@@ -1095,6 +1217,48 @@ func (b *bus) accountsUnlockHandlerPOST(jc jape.Context) {
 	}
 }
 
+func (b *bus) autopilotsListHandlerGET(jc jape.Context) {
+	if autopilots, err := b.as.Autopilots(jc.Request.Context()); jc.Check("failed to fetch autopilots", err) == nil {
+		jc.Encode(autopilots)
+	}
+}
+
+func (b *bus) autopilotsHandlerGET(jc jape.Context) {
+	var id string
+	if jc.DecodeParam("id", &id) != nil {
+		return
+	}
+	ap, err := b.as.Autopilot(jc.Request.Context(), id)
+	if errors.Is(err, api.ErrAutopilotNotFound) {
+		jc.Error(err, http.StatusNotFound)
+		return
+	}
+	if jc.Check("couldn't load object", err) != nil {
+		return
+	}
+
+	jc.Encode(ap)
+}
+
+func (b *bus) autopilotsHandlerPUT(jc jape.Context) {
+	var id string
+	if jc.DecodeParam("id", &id) != nil {
+		return
+	}
+
+	var ap api.Autopilot
+	if jc.Decode(&ap) != nil {
+		return
+	}
+
+	if ap.ID != id {
+		jc.Error(errors.New("id in path and body don't match"), http.StatusBadRequest)
+		return
+	}
+
+	jc.Check("failed to update autopilot", b.as.UpdateAutopilot(jc.Request.Context(), ap))
+}
+
 func (b *bus) contractTaxHandlerGET(jc jape.Context) {
 	var payout types.Currency
 	if jc.DecodeParam("payout", (*api.ParamCurrency)(&payout)) != nil {
@@ -1105,13 +1269,15 @@ func (b *bus) contractTaxHandlerGET(jc jape.Context) {
 }
 
 // New returns a new Bus.
-func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms MetadataStore, ss SettingStore, eas EphemeralAccountStore, l *zap.Logger) (*bus, error) {
+func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, as AutopilotStore, ms MetadataStore, ss SettingStore, eas EphemeralAccountStore, l *zap.Logger) (*bus, error) {
 	b := &bus{
+		alerts:        alerts.NewManager(),
 		s:             s,
 		cm:            cm,
 		tp:            tp,
 		w:             w,
 		hdb:           hdb,
+		as:            as,
 		ms:            ms,
 		ss:            ss,
 		eas:           eas,
@@ -1123,8 +1289,8 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 
 	// Load default settings if the setting is not already set.
 	for key, value := range map[string]interface{}{
-		api.SettingGouging:    api.DefaultGougingSettings,
-		api.SettingRedundancy: api.DefaultRedundancySettings,
+		api.SettingGouging:    build.DefaultGougingSettings,
+		api.SettingRedundancy: build.DefaultRedundancySettings,
 	} {
 		if _, err := b.ss.Setting(ctx, key); errors.Is(err, api.ErrSettingNotFound) {
 			if bytes, err := json.Marshal(value); err != nil {
@@ -1143,7 +1309,7 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 		return nil, err
 	} else if err := rs.Validate(); err != nil {
 		l.Warn(fmt.Sprintf("invalid redundancy setting found '%v', overwriting the redundancy settings with the default settings", rss))
-		bytes, _ := json.Marshal(api.DefaultRedundancySettings)
+		bytes, _ := json.Marshal(build.DefaultRedundancySettings)
 		if err := b.ss.UpdateSetting(ctx, api.SettingRedundancy, string(bytes)); err != nil {
 			return nil, err
 		}
@@ -1157,9 +1323,9 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 		return nil, err
 	} else if err := gs.Validate(); err != nil {
 		// compat: apply default EA gouging settings
-		gs.MinMaxEphemeralAccountBalance = api.DefaultGougingSettings.MinMaxEphemeralAccountBalance
-		gs.MinPriceTableValidity = api.DefaultGougingSettings.MinPriceTableValidity
-		gs.MinAccountExpiry = api.DefaultGougingSettings.MinAccountExpiry
+		gs.MinMaxEphemeralAccountBalance = build.DefaultGougingSettings.MinMaxEphemeralAccountBalance
+		gs.MinPriceTableValidity = build.DefaultGougingSettings.MinPriceTableValidity
+		gs.MinAccountExpiry = build.DefaultGougingSettings.MinAccountExpiry
 		if err := gs.Validate(); err == nil {
 			l.Info(fmt.Sprintf("updating gouging settings with default EA settings: %+v", gs))
 			bytes, _ := json.Marshal(gs)
@@ -1168,7 +1334,7 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 			}
 		} else {
 			// compat: apply default host block leeway settings
-			gs.HostBlockHeightLeeway = api.DefaultGougingSettings.HostBlockHeightLeeway
+			gs.HostBlockHeightLeeway = build.DefaultGougingSettings.HostBlockHeightLeeway
 			if err := gs.Validate(); err == nil {
 				l.Info(fmt.Sprintf("updating gouging settings with default HostBlockHeightLeeway settings: %v", gs))
 				bytes, _ := json.Marshal(gs)
@@ -1177,7 +1343,7 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 				}
 			} else {
 				l.Warn(fmt.Sprintf("invalid gouging setting found '%v', overwriting the gouging settings with the default settings", gss))
-				bytes, _ := json.Marshal(api.DefaultGougingSettings)
+				bytes, _ := json.Marshal(build.DefaultGougingSettings)
 				if err := b.ss.UpdateSetting(ctx, api.SettingGouging, string(bytes)); err != nil {
 					return nil, err
 				}
@@ -1190,14 +1356,15 @@ func New(s Syncer, cm ChainManager, tp TransactionPool, w Wallet, hdb HostDB, ms
 	if err != nil {
 		return nil, err
 	}
-	b.accounts = newAccounts(accounts)
-
+	b.accounts = newAccounts(accounts, b.logger)
 	return b, nil
 }
 
 // Handler returns an HTTP handler that serves the bus API.
 func (b *bus) Handler() http.Handler {
 	return jape.Mux(tracing.TracedRoutes("bus", map[string]jape.Handler{
+		"GET    /alerts":                    b.handleGETAlerts,
+		"POST   /alerts/dismiss":            b.handlePOSTAlertsDismiss,
 		"GET    /accounts":                  b.accountsHandlerGET,
 		"POST   /accounts/:id":              b.accountHandlerGET,
 		"POST   /accounts/:id/lock":         b.accountsLockHandlerPOST,
@@ -1206,6 +1373,10 @@ func (b *bus) Handler() http.Handler {
 		"POST   /accounts/:id/update":       b.accountsUpdateHandlerPOST,
 		"POST   /accounts/:id/requiressync": b.accountsRequiresSyncHandlerPOST,
 		"POST   /accounts/:id/resetdrift":   b.accountsResetDriftHandlerPOST,
+
+		"GET    /autopilots":     b.autopilotsListHandlerGET,
+		"GET    /autopilots/:id": b.autopilotsHandlerGET,
+		"PUT    /autopilots/:id": b.autopilotsHandlerPUT,
 
 		"GET    /syncer/address": b.syncerAddrHandler,
 		"GET    /syncer/peers":   b.syncerPeersHandler,
@@ -1243,7 +1414,9 @@ func (b *bus) Handler() http.Handler {
 		"GET    /hosts/scanning":     b.hostsScanningHandlerGET,
 
 		"GET    /contracts":              b.contractsHandlerGET,
+		"DELETE /contracts/all":          b.contractsAllHandlerDELETE,
 		"POST   /contracts/archive":      b.contractsArchiveHandlerPOST,
+		"GET    /contracts/renewed/:id":  b.contractsRenewedIDHandlerGET,
 		"GET    /contracts/sets":         b.contractsSetsHandlerGET,
 		"GET    /contracts/set/:set":     b.contractsSetHandlerGET,
 		"PUT    /contracts/set/:set":     b.contractsSetHandlerPUT,
@@ -1257,18 +1430,19 @@ func (b *bus) Handler() http.Handler {
 		"POST   /contract/:id/keepalive": b.contractKeepaliveHandlerPOST,
 		"POST   /contract/:id/release":   b.contractReleaseHandlerPOST,
 		"DELETE /contract/:id":           b.contractIDHandlerDELETE,
-		"DELETE /contracts/all":          b.contractsAllHandlerDELETE,
 
 		"POST /search/hosts":   b.searchHostsHandlerPOST,
 		"GET  /search/objects": b.searchObjectsHandlerGET,
 
 		"GET    /stats/objects": b.objectsStatshandlerGET,
 
-		"GET    /objects/*path": b.objectsHandlerGET,
-		"PUT    /objects/*path": b.objectsHandlerPUT,
-		"DELETE /objects/*path": b.objectsHandlerDELETE,
+		"GET    /objects/*path":  b.objectsHandlerGET,
+		"PUT    /objects/*path":  b.objectsHandlerPUT,
+		"DELETE /objects/*path":  b.objectsHandlerDELETE,
+		"POST   /objects/rename": b.objectsRenameHandlerPOST,
 
 		"POST   /slabs/migration": b.slabsMigrationHandlerPOST,
+		"GET    /slab/:key":       b.slabHandlerGET,
 		"PUT    /slab":            b.slabHandlerPUT,
 
 		"GET    /settings":     b.settingsHandlerGET,

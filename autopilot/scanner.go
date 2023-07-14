@@ -147,12 +147,18 @@ func newScanner(ap *Autopilot, scanBatchSize, scanMinRecentFailures, scanThreads
 	}, nil
 }
 
-func (s *scanner) tryPerformHostScan(ctx context.Context, w scanWorker, force bool) bool {
+func (s *scanner) Status() (bool, time.Time) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.scanning, s.scanningLastStart
+}
+
+func (s *scanner) tryPerformHostScan(ctx context.Context, w scanWorker, force bool) bool {
 	if s.ap.isStopped() {
-		s.mu.Unlock()
 		return false
 	}
+
+	s.mu.Lock()
 	if !force && (s.scanning || !s.isScanRequired()) {
 		s.mu.Unlock()
 		return false
@@ -163,7 +169,9 @@ func (s *scanner) tryPerformHostScan(ctx context.Context, w scanWorker, force bo
 	s.scanning = true
 	s.mu.Unlock()
 
-	go func(cfg api.AutopilotConfig) {
+	maxDowntimeHours := s.ap.State().cfg.Hosts.MaxDowntimeHours
+
+	go func() {
 		for resp := range s.launchScanWorkers(ctx, w, s.launchHostScans()) {
 			if s.ap.isStopped() {
 				break
@@ -173,9 +181,9 @@ func (s *scanner) tryPerformHostScan(ctx context.Context, w scanWorker, force bo
 			}
 		}
 
-		if !s.ap.isStopped() && cfg.Hosts.MaxDowntimeHours > 0 {
-			s.logger.Debugf("removing hosts that have been offline for more than %v hours", cfg.Hosts.MaxDowntimeHours)
-			maxDowntime := time.Hour * time.Duration(cfg.Hosts.MaxDowntimeHours)
+		if !s.ap.isStopped() && maxDowntimeHours > 0 {
+			s.logger.Debugf("removing hosts that have been offline for more than %v hours", maxDowntimeHours)
+			maxDowntime := time.Hour * time.Duration(maxDowntimeHours)
 			removed, err := s.bus.RemoveOfflineHosts(ctx, s.scanMinRecentFailures, maxDowntime)
 			if removed > 0 {
 				s.logger.Infof("removed %v offline hosts", removed)
@@ -189,7 +197,7 @@ func (s *scanner) tryPerformHostScan(ctx context.Context, w scanWorker, force bo
 		s.scanning = false
 		s.logger.Debugf("host scan finished after %v", time.Since(s.scanningLastStart))
 		s.mu.Unlock()
-	}(s.ap.state.cfg)
+	}()
 	return true
 }
 
@@ -266,10 +274,13 @@ func (s *scanner) launchScanWorkers(ctx context.Context, w scanWorker, reqs chan
 		go func() {
 			for req := range reqs {
 				if s.ap.isStopped() {
-					break
+					break // shutdown
 				}
 
 				scan, err := w.RHPScan(ctx, req.hostKey, req.hostIP, s.currentTimeout())
+				if err != nil {
+					break // abort
+				}
 				respChan <- scanResp{req.hostKey, scan.Settings, err}
 				s.tracker.addDataPoint(time.Duration(scan.Ping))
 			}
@@ -281,12 +292,6 @@ func (s *scanner) launchScanWorkers(ctx context.Context, w scanWorker, reqs chan
 	}
 
 	return respChan
-}
-
-func (s *scanner) isScanning() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.scanning
 }
 
 func (s *scanner) isScanRequired() bool {

@@ -30,6 +30,7 @@ import (
 
 const (
 	testBusFlushInterval = 100 * time.Millisecond
+	testContractSet      = "testset"
 	testPersistInterval  = 2 * time.Second
 	latestHardforkHeight = 50 // foundation hardfork height in testing
 )
@@ -48,7 +49,7 @@ var (
 			Upload:   rhpv2.SectorSize * 500,
 			Storage:  rhpv2.SectorSize * 5e3,
 
-			Set: "autopilot",
+			Set: testContractSet,
 		},
 		Hosts: api.HostsConfig{
 			MaxDowntimeHours:  10,
@@ -56,9 +57,8 @@ var (
 		},
 	}
 
-	testRedundancySettings = api.RedundancySettings{
-		MinShards:   2,
-		TotalShards: 3,
+	testContractSetSettings = api.ContractSetSetting{
+		Default: testContractSet,
 	}
 
 	testGougingSettings = api.GougingSettings{
@@ -74,6 +74,11 @@ var (
 		MinPriceTableValidity:         10 * time.Second,  // minimum value for price table validity
 		MinAccountExpiry:              time.Hour,         // minimum value for account expiry
 		MinMaxEphemeralAccountBalance: types.Siacoins(1), // 1SC
+	}
+
+	testRedundancySettings = api.RedundancySettings{
+		MinShards:   2,
+		TotalShards: 3,
 	}
 )
 
@@ -91,6 +96,7 @@ type TestCluster struct {
 	autopilotShutdownFns []func(context.Context) error
 
 	miner  *node.Miner
+	apID   string
 	dbName string
 	dir    string
 	logger *zap.Logger
@@ -167,6 +173,23 @@ func (c *TestCluster) Reboot(ctx context.Context) (*TestCluster, error) {
 	return newCluster, nil
 }
 
+// AutopilotConfig returns the autopilot's config and current period.
+func (c *TestCluster) AutopilotConfig(ctx context.Context) (api.AutopilotConfig, uint64, error) {
+	ap, err := c.Bus.Autopilot(context.Background(), c.apID)
+	if err != nil {
+		return api.AutopilotConfig{}, 0, err
+	}
+	return ap.Config, ap.CurrentPeriod, nil
+}
+
+// UpdateAutopilotConfig updates the cluster's autopilot with given config.
+func (c *TestCluster) UpdateAutopilotConfig(ctx context.Context, cfg api.AutopilotConfig) error {
+	return c.Bus.UpdateAutopilot(context.Background(), api.Autopilot{
+		ID:     c.apID,
+		Config: cfg,
+	})
+}
+
 // newTestCluster creates a new cluster without hosts with a funded bus.
 func newTestCluster(dir string, logger *zap.Logger) (*TestCluster, error) {
 	wk := types.GeneratePrivateKey()
@@ -200,7 +223,6 @@ func newTestClusterCustom(dir, dbName string, funding bool, wk types.PrivateKey,
 
 	// Prepare individual dirs.
 	busDir := filepath.Join(dir, "bus")
-	autopilotDir := filepath.Join(dir, "autopilot")
 
 	// Generate API passwords.
 	busPassword := randomPassword()
@@ -259,20 +281,8 @@ func newTestClusterCustom(dir, dbName string, funding bool, wk types.PrivateKey,
 	workerShutdownFns = append(workerShutdownFns, workerServer.Shutdown)
 	workerShutdownFns = append(workerShutdownFns, wStopFn)
 
-	// Create autopilot store.
-	autopilotStore, err := stores.NewJSONAutopilotStore(autopilotDir)
-	if err != nil {
-		return nil, err
-	}
-
-	// Set autopilot config.
-	err = autopilotStore.SetConfig(testAutopilotConfig)
-	if err != nil {
-		return nil, err
-	}
-
 	// Create autopilot.
-	ap, aStartFn, aStopFn, err := node.NewAutopilot(apCfg, autopilotStore, busClient, []autopilot.Worker{workerClient}, logger)
+	ap, aStartFn, aStopFn, err := node.NewAutopilot(apCfg, busClient, []autopilot.Worker{workerClient}, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -286,6 +296,7 @@ func newTestClusterCustom(dir, dbName string, funding bool, wk types.PrivateKey,
 	autopilotShutdownFns = append(autopilotShutdownFns, aStopFn)
 
 	cluster := &TestCluster{
+		apID:   apCfg.ID,
 		dir:    dir,
 		dbName: dbName,
 		logger: logger,
@@ -323,6 +334,29 @@ func newTestClusterCustom(dir, dbName string, funding bool, wk types.PrivateKey,
 		cluster.wg.Done()
 	}()
 
+	// Update the autopilot to use test settings
+	err = busClient.UpdateAutopilot(context.Background(), api.Autopilot{
+		ID:     apCfg.ID,
+		Config: testAutopilotConfig,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Update the bus settings.
+	err = busClient.UpdateSetting(context.Background(), api.SettingGouging, testGougingSettings)
+	if err != nil {
+		return nil, err
+	}
+	err = busClient.UpdateSetting(context.Background(), api.SettingRedundancy, testRedundancySettings)
+	if err != nil {
+		return nil, err
+	}
+	err = busClient.UpdateSetting(context.Background(), api.SettingContractSet, testContractSetSettings)
+	if err != nil {
+		return nil, err
+	}
+
 	// Fund the bus.
 	if funding {
 		if err := cluster.MineBlocks(latestHardforkHeight); err != nil {
@@ -348,16 +382,6 @@ func newTestClusterCustom(dir, dbName string, funding bool, wk types.PrivateKey,
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	// Update the bus settings.
-	err = busClient.UpdateSetting(context.Background(), api.SettingGouging, testGougingSettings)
-	if err != nil {
-		return nil, err
-	}
-	err = busClient.UpdateSetting(context.Background(), api.SettingRedundancy, testRedundancySettings)
-	if err != nil {
-		return nil, err
 	}
 
 	return cluster, nil
@@ -402,17 +426,13 @@ func (c *TestCluster) MineToRenewWindow() error {
 	if err != nil {
 		return err
 	}
-	cfg, err := c.Autopilot.Config()
+	ap, err := c.Bus.Autopilot(context.Background(), c.apID)
 	if err != nil {
 		return err
 	}
-	currentPeriod, err := c.Autopilot.Status()
-	if err != nil {
-		return err
-	}
-	renewWindowStart := currentPeriod + cfg.Contracts.Period
+	renewWindowStart := ap.CurrentPeriod + ap.Config.Contracts.Period
 	if cs.BlockHeight >= renewWindowStart {
-		return fmt.Errorf("already in renew window: bh: %v, currentPeriod: %v, periodLength: %v, renewWindow: %v", cs.BlockHeight, currentPeriod, cfg.Contracts.Period, renewWindowStart)
+		return fmt.Errorf("already in renew window: bh: %v, currentPeriod: %v, periodLength: %v, renewWindow: %v", cs.BlockHeight, ap.CurrentPeriod, ap.Config.Contracts.Period, renewWindowStart)
 	}
 	err = c.MineBlocks(int(renewWindowStart - cs.BlockHeight))
 	if err != nil {
@@ -537,61 +557,60 @@ func (c *TestCluster) RemoveHost(host *Host) error {
 	return nil
 }
 
-// AddHosts adds n hosts to the cluster. These hosts will be funded and announce
-// themselves on the network, ready to form contracts.
-func (c *TestCluster) AddHosts(n int) ([]*Host, error) {
-	// Create hosts.
-	var newHosts []*Host
-	for i := 0; i < n; i++ {
-		hostDir := filepath.Join(c.dir, "hosts", fmt.Sprint(len(c.hosts)+1))
-		h, err := NewHost(types.GeneratePrivateKey(), hostDir, false)
-		if err != nil {
-			return nil, err
-		}
-		c.hosts = append(c.hosts, h)
-		newHosts = append(newHosts, h)
-
-		// Connect gateways.
-		if err := c.Bus.SyncerConnect(context.Background(), h.GatewayAddr()); err != nil {
-			return nil, err
-		}
+func (c *TestCluster) NewHost() (*Host, error) {
+	// Create host.
+	hostDir := filepath.Join(c.dir, "hosts", fmt.Sprint(len(c.hosts)+1))
+	h, err := NewHost(types.GeneratePrivateKey(), hostDir, false)
+	if err != nil {
+		return nil, err
 	}
+
+	// Connect gateways.
+	if err := c.Bus.SyncerConnect(context.Background(), h.GatewayAddr()); err != nil {
+		return nil, err
+	}
+
+	return h, nil
+}
+
+func (c *TestCluster) AddHost(h *Host) error {
+	// Add the host
+	c.hosts = append(c.hosts, h)
 
 	// Fund host from bus.
 	balance, err := c.Bus.WalletBalance(context.Background())
 	if err != nil {
-		return nil, err
+		return err
 	}
-	fundAmt := balance.Div64(2).Div64(uint64(len(newHosts))) // 50% of bus balance
+	fundAmt := balance.Div64(2).Div64(uint64(len(c.hosts))) // 50% of bus balance
 	var scos []types.SiacoinOutput
-	for _, h := range newHosts {
-		for i := 0; i < 10; i++ {
-			scos = append(scos, types.SiacoinOutput{
-				Value:   fundAmt.Div64(10),
-				Address: h.WalletAddress(),
-			})
-		}
+	for i := 0; i < 10; i++ {
+		scos = append(scos, types.SiacoinOutput{
+			Value:   fundAmt.Div64(10),
+			Address: h.WalletAddress(),
+		})
 	}
 	if err := c.Bus.SendSiacoins(context.Background(), scos); err != nil {
-		return nil, err
+		return err
 	}
 
 	// Mine transaction.
 	if err := c.MineBlocks(1); err != nil {
-		return nil, err
+		return err
 	}
 
 	// Wait for hosts to sync up with consensus.
-	if err := c.sync(newHosts); err != nil {
-		return nil, err
+	hosts := []*Host{h}
+	if err := c.sync(hosts); err != nil {
+		return err
 	}
 
 	// Announce hosts.
-	if err := addStorageFolderToHost(newHosts); err != nil {
-		return nil, err
+	if err := addStorageFolderToHost(hosts); err != nil {
+		return err
 	}
-	if err := announceHosts(newHosts); err != nil {
-		return nil, err
+	if err := announceHosts(hosts); err != nil {
+		return err
 	}
 
 	// Mine a few blocks. The host should show up eventually.
@@ -600,21 +619,39 @@ func (c *TestCluster) AddHosts(n int) ([]*Host, error) {
 			return err
 		}
 
-		for _, h := range newHosts {
-			_, err = c.Bus.Host(context.Background(), h.PublicKey())
-			if err != nil {
-				return err
-			}
+		_, err = c.Bus.Host(context.Background(), h.PublicKey())
+		if err != nil {
+			return err
 		}
+
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	// Wait for all hosts to be synced.
+	// Wait for host to be synced.
 	if err := c.Sync(); err != nil {
-		return nil, err
+		return err
+	}
+
+	return nil
+}
+
+// AddHosts adds n hosts to the cluster. These hosts will be funded and announce
+// themselves on the network, ready to form contracts.
+func (c *TestCluster) AddHosts(n int) ([]*Host, error) {
+	var newHosts []*Host
+	for i := 0; i < n; i++ {
+		h, err := c.NewHost()
+		if err != nil {
+			return nil, err
+		}
+		err = c.AddHost(h)
+		if err != nil {
+			return nil, err
+		}
+		newHosts = append(newHosts, h)
 	}
 	return newHosts, nil
 }
@@ -690,6 +727,22 @@ func (c *TestCluster) waitForHostAccounts(hosts map[types.PublicKey]struct{}) er
 	})
 }
 
+func (c *TestCluster) WaitForContractSet(set string, n int) error {
+	return Retry(30, time.Second, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		contracts, err := c.Bus.ContractSetContracts(ctx, set)
+		if err != nil {
+			return err
+		}
+		if len(contracts) != n {
+			return fmt.Errorf("contract set not ready yet, %v!=%v", len(contracts), n)
+		}
+		return nil
+	})
+}
+
 // waitForHostContracts will fetch the contracts from the bus and wait until we
 // have a contract with every host in the given hosts map
 func (c *TestCluster) waitForHostContracts(hosts map[types.PublicKey]struct{}) error {
@@ -751,31 +804,33 @@ func testBusCfg() node.BusConfig {
 		GatewayAddr:     "127.0.0.1:0",
 		Network:         testNetwork(),
 		PersistInterval: testPersistInterval,
+		UsedUTXOExpiry:  time.Minute,
 	}
 }
 
 func testWorkerCfg() node.WorkerConfig {
 	return node.WorkerConfig{
-		ContractLockTimeout:     5 * time.Second,
-		ID:                      "worker",
-		BusFlushInterval:        testBusFlushInterval,
-		SessionLockTimeout:      30 * time.Second,
-		SessionReconnectTimeout: 10 * time.Second,
-		SessionTTL:              2 * time.Minute,
-		DownloadSectorTimeout:   500 * time.Millisecond,
-		UploadSectorTimeout:     500 * time.Millisecond,
-		UploadMaxOverdrive:      5,
+		AllowPrivateIPs:          true,
+		ContractLockTimeout:      5 * time.Second,
+		ID:                       "worker",
+		BusFlushInterval:         testBusFlushInterval,
+		DownloadOverdriveTimeout: 500 * time.Millisecond,
+		UploadOverdriveTimeout:   500 * time.Millisecond,
+		UploadMaxOverdrive:       5,
 	}
 }
 
 func testApCfg() node.AutopilotConfig {
 	return node.AutopilotConfig{
-		AccountsRefillInterval:   time.Second,
-		Heartbeat:                time.Second,
-		MigrationHealthCutoff:    0.99,
-		ScannerInterval:          time.Second,
-		ScannerBatchSize:         10,
-		ScannerNumThreads:        1,
-		ScannerMinRecentFailures: 5,
+		ID:                             api.DefaultAutopilotID,
+		AccountsRefillInterval:         time.Second,
+		Heartbeat:                      time.Second,
+		MigrationHealthCutoff:          0.99,
+		MigratorParallelSlabsPerWorker: 1,
+		RevisionSubmissionBuffer:       0,
+		ScannerInterval:                time.Second,
+		ScannerBatchSize:               10,
+		ScannerNumThreads:              1,
+		ScannerMinRecentFailures:       5,
 	}
 }

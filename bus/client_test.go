@@ -12,6 +12,7 @@ import (
 	"go.sia.tech/core/types"
 	"go.sia.tech/jape"
 	"go.sia.tech/renterd/api"
+	"go.sia.tech/renterd/build"
 	"go.sia.tech/renterd/bus"
 	"go.sia.tech/renterd/internal/node"
 	"go.uber.org/zap"
@@ -54,7 +55,7 @@ func TestClient(t *testing.T) {
 	// fetch redundancy settings and assert they're configured to the default values
 	if rs, err := c.RedundancySettings(ctx); err != nil {
 		t.Fatal(err)
-	} else if rs.MinShards != api.DefaultRedundancySettings.MinShards || rs.TotalShards != api.DefaultRedundancySettings.TotalShards {
+	} else if rs.MinShards != build.DefaultRedundancySettings.MinShards || rs.TotalShards != build.DefaultRedundancySettings.TotalShards {
 		t.Fatal("unexpected redundancy settings", rs)
 	}
 }
@@ -69,9 +70,10 @@ func newTestClient(dir string) (*bus.Client, func() error, func(context.Context)
 	// create client
 	client := bus.NewClient("http://"+l.Addr().String(), "test")
 	b, cleanup, err := node.NewBus(node.BusConfig{
-		Bootstrap:   false,
-		GatewayAddr: "127.0.0.1:0",
-		Miner:       node.NewMiner(client),
+		Bootstrap:      false,
+		GatewayAddr:    "127.0.0.1:0",
+		Miner:          node.NewMiner(client),
+		UsedUTXOExpiry: time.Minute,
 	}, filepath.Join(dir, "bus"), types.GeneratePrivateKey(), zap.New(zapcore.NewNopCore()))
 	if err != nil {
 		return nil, nil, nil, err

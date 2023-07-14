@@ -82,13 +82,12 @@ In order for the contracts to get formed, your node has to be synced with the bl
 
 ## Config
 
-To have a working autopilot, it must be configured with a sane config. The
-autopilot's configuration is configurable through the following endpoints:
+The configuration can be updated through the UI or by using the following endpoints:
 
 - `GET /api/autopilot/config`
 - `PUT /api/autopilot/config`
 
-Especially the `contracts` section is important, make sure the `amount` is set to the amount of hosts with which you want to form a contract. The `allowance` is the amount of money the autopilot can spend per period, make sure it is not set to zero or contracts won't get formed.
+The autopilot will not perform any tasks until it is configured. An example configuration can be found below. Especially the `contracts` section is important, make sure the `amount` is set to the amount of hosts with which you want to form a contract. The `allowance` is the amount of money the autopilot can spend per period, make sure it is not set to zero or contracts won't get formed.
 
 ```json
 {
@@ -112,9 +111,33 @@ Especially the `contracts` section is important, make sure the `amount` is set t
 }
 ```
 
+## Contract Set
+
+The contract set settings on the bus allow specifying a default contract set.
+This contract set will be returned by the `bus` through the upload parameters,
+and decides what contracts data is upload or migrated to by default. This
+setting does not have a default value, it can be updated using the settings API:
+
+- `GET /api/bus/setting/contractset`
+- `PUT /api/bus/setting/contractset`
+
+```json
+{
+        "default": "autopilot"
+}
+```
+
+In most cases the default set should match the set from your autopilot
+configuration in order for migrations to work properly. The contract set can be
+overriden by passing it as a query string parameter to the worker's upload and
+migrate endpoints.
+
+- `PUT /api/worker/objects/foo?contractset=foo`
+
 ## Redundancy
 
-The default redundancy is 30-10. The redunancy can be updated using the settings API:
+The default redundancy on mainnet is 30-10, on testnet it is 6-2. The redunancy
+can be updated using the settings API:
 
 - `GET /api/bus/setting/redundancy`
 - `PUT /api/bus/setting/redundancy`
@@ -130,6 +153,21 @@ The default gouging settings are listed below. The gouging settings can be updat
 
 - `GET /api/bus/setting/gouging`
 - `PUT /api/bus/setting/gouging`
+
+```json
+{
+	"hostBlockHeightLeeway": 6,                                   // 6 blocks
+	"maxContractPrice": "15000000000000000000000000",             // 15 SC per contract
+	"maxDownloadPrice": "3000000000000000000000000000",           // 3000 SC per 1 TiB
+	"maxRPCPrice": "1000000000000000000000",                      // 1mS per RPC
+	"maxStoragePrice": "631593542824",                            // 3000 SC per TiB per month
+	"maxUploadPrice": "3000000000000000000000000000",             // 3000 SC per 1 TiB
+	"minAccountExpiry": 86400000000000,                           // 1 day
+	"minMaxCollateral": "10000000000000000000000000",             // at least up to 10 SC per contract
+	"minMaxEphemeralAccountBalance": "1000000000000000000000000", // 1 SC
+	"minPriceTableValidity": 300000000000                         // 5 minutes
+}
+```
 
 ## Blocklist
 
