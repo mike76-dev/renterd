@@ -795,7 +795,7 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 		var formedContract api.ContractMetadata
 		var proceed bool
 		if cfg.Enabled {
-			formedContract, err = satellite.StaticSatellite.FormContract(ctx, host.PublicKey, endHeight(state.cfg, c.currentPeriod()), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
+			formedContract, err = satellite.StaticSatellite.FormContract(ctx, host.PublicKey, endHeight(state.cfg, state.period), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
 			proceed = true
 		} else {
 			formedContract, proceed, err = c.formContract(ctx, w, host, minInitialContractFunds, maxInitialContractFunds, budget)
@@ -821,7 +821,7 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, toRenew 
 	// fetch satellite config
 	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
-		return nil, err
+		return nil, nil
 	}
 	if cfg.Enabled {
 		sctx, cancel := context.WithTimeout(ctx, time.Minute)
@@ -867,7 +867,7 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, toRenew 
 		var renewed api.ContractMetadata
 		var proceed bool
 		if cfg.Enabled {
-			renewed, err = satellite.StaticSatellite.RenewContract(ctx, ci.contract.ID, endHeight(state.cfg, c.currentPeriod()), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
+			renewed, err = satellite.StaticSatellite.RenewContract(ctx, ci.contract.ID, endHeight(state.cfg, state.period), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
 			proceed = true
 		} else {
 			renewed, proceed, err = c.renewContract(ctx, w, ci, budget)
