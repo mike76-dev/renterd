@@ -704,7 +704,7 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 	var formed []types.FileContractID
 
 	// fetch satellite config
-	cfg, err := satellite.StaticSatellite.Config()
+	_, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
 	}
@@ -794,7 +794,7 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 
 		var formedContract api.ContractMetadata
 		var proceed bool
-		if cfg.Enabled {
+		if false {//cfg.Enabled { TODO
 			formedContract, err = satellite.StaticSatellite.FormContract(ctx, host.PublicKey, endHeight(state.cfg, state.period), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
 			proceed = true
 		} else {
@@ -866,7 +866,7 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, toRenew 
 		state := c.ap.state
 		var renewed api.ContractMetadata
 		var proceed bool
-		if cfg.Enabled {
+		if false {//cfg.Enabled { TODO
 			renewed, err = satellite.StaticSatellite.RenewContract(ctx, ci.contract.ID, endHeight(state.cfg, state.period), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
 			proceed = true
 		} else {
@@ -892,7 +892,7 @@ func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, toRefre
 	defer span.End()
 
 	// fetch satellite config
-	cfg, err := satellite.StaticSatellite.Config()
+	_, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
 	}
@@ -921,7 +921,7 @@ func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, toRefre
 		state := c.ap.state
 		var renewed api.ContractMetadata
 		var proceed bool
-		if cfg.Enabled {
+		if false {//cfg.Enabled { TODO
 			renewed, err = satellite.StaticSatellite.RenewContract(ctx, ci.contract.ID, ci.contract.EndHeight(), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
 			proceed = true
 		} else {
