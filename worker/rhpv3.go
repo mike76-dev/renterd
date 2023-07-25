@@ -27,7 +27,7 @@ import (
 	"lukechampine.com/frand"
 
 	// Satellite
-	"github.com/mike76-dev/renterd-satellite"
+	satellite "github.com/mike76-dev/renterd-satellite"
 )
 
 const (
@@ -664,6 +664,9 @@ func (h *host) UploadSector(ctx context.Context, sector *[rhpv2.SectorSize]byte,
 	if err != nil {
 		return types.Hash256{}, err
 	}
+
+	// send the new revision to the satellite
+	satellite.StaticSatellite.UpdateRevision(ctx, rhpv2.ContractRevision{Revision: rev}, api.ContractSpending{Uploads: cost})
 
 	// record spending
 	h.contractSpendingRecorder.Record(rev.ParentID, rev.RevisionNumber, rev.Filesize, api.ContractSpending{Uploads: cost})
