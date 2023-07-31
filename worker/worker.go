@@ -32,6 +32,9 @@ import (
 	"go.sia.tech/siad/modules"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/blake2b"
+
+	// Satellite.
+	satellite "github.com/mike76-dev/renterd-satellite"
 )
 
 const (
@@ -954,6 +957,32 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 	// persist the object
 	if jc.Check("couldn't add object", w.bus.AddObject(ctx, jc.PathParam("path"), up.ContractSet, object, used)) != nil {
 		return
+	}
+
+	// backup the object metadata if the user has opted in
+	cfg, err := satellite.StaticSatellite.Config()
+	if jc.Check("failed to fetch satellite config", err) != nil {
+		return
+	}
+	if cfg.Enabled {
+		rs, err := satellite.StaticSatellite.GetSettings(ctx)
+		if jc.Check("failed to fetch renter settings", err) != nil {
+			return
+		}
+		if rs.BackupFileMetadata {
+			object, _, err := w.bus.Object(ctx, jc.PathParam("path"), "", 0, 0)
+			if jc.Check("failed to get object", err) != nil {
+				return
+			}
+			err = satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
+				Key:   object.Key,
+				Path:  jc.PathParam("path"),
+				Slabs: object.Slabs,
+			})
+			if jc.Check("failed to save object metadata", err) != nil {
+				return
+			}
+		}
 	}
 }
 

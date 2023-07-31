@@ -26,11 +26,12 @@ import (
 	"go.sia.tech/renterd/tracing"
 	"go.sia.tech/renterd/wallet"
 	"go.sia.tech/renterd/worker"
+
 	//"go.sia.tech/web/renterd"
 	"golang.org/x/term"
 
 	// Satellite
-	"github.com/mike76-dev/renterd-satellite"
+	satellite "github.com/mike76-dev/renterd-satellite"
 	"github.com/mike76-dev/sia-web/renterd"
 )
 

@@ -25,7 +25,7 @@ import (
 	"go.uber.org/zap"
 
 	// Satellite
-	"github.com/mike76-dev/renterd-satellite"
+	satellite "github.com/mike76-dev/renterd-satellite"
 )
 
 type (
@@ -737,7 +737,7 @@ func (b *bus) contractIDHandlerDELETE(jc jape.Context) {
 }
 
 func (b *bus) contractsAllHandlerDELETE(jc jape.Context) {
-	if jc.Check("couldn't remove contracts", b.ms.ArchiveAllContracts(jc.Request.Context(), api.ContractArchivalReasonRemoved)) != nil	{
+	if jc.Check("couldn't remove contracts", b.ms.ArchiveAllContracts(jc.Request.Context(), api.ContractArchivalReasonRemoved)) != nil {
 		return
 	}
 	jc.Check("couldn't delete contract IDs", satellite.StaticSatellite.DeleteContracts())

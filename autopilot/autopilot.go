@@ -24,7 +24,7 @@ import (
 	"lukechampine.com/frand"
 
 	// Satellite
-	"github.com/mike76-dev/renterd-satellite"
+	satellite "github.com/mike76-dev/renterd-satellite"
 )
 
 type Bus interface {
@@ -210,11 +210,17 @@ func (ap *Autopilot) Run() error {
 	if err != nil {
 		ap.logger.Error("failed to fetch satellite config")
 	}
-	
-	// request any missing contracts from the satellite
+
+	// request any missing contracts or file metadata from the satellite
 	if cfg.Enabled {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		satellite.StaticSatellite.RequestContracts(ctx)
+		err := ap.updateState(ctx)
+		if err != nil {
+			ap.logger.Errorf("failed to update state, err: %v", err)
+			return nil
+		}
+		satellite.StaticSatellite.RequestMetadata(ctx, ap.State().cfg.Contracts.Set)
 		cancel()
 	}
 

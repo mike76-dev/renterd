@@ -16,7 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	// Satellite
-	"github.com/mike76-dev/renterd-satellite"
+	satellite "github.com/mike76-dev/renterd-satellite"
 )
 
 var (
