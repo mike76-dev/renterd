@@ -740,6 +740,21 @@ func (w *worker) slabMigrateHandler(jc jape.Context) {
 	if jc.Check("couldn't update slab", w.bus.UpdateSlab(ctx, slab, up.ContractSet, usedContracts)) != nil {
 		return
 	}
+
+	// send the new slab to the satellite if the user has opted in
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		return
+	}
+	if cfg.Enabled {
+		rs, err := satellite.StaticSatellite.GetSettings(ctx)
+		if err != nil {
+			return
+		}
+		if rs.BackupFileMetadata {
+			satellite.StaticSatellite.UpdateSlab(ctx, slab)
+		}
+	}
 }
 
 func (w *worker) downloadsStatsHandlerGET(jc jape.Context) {
@@ -961,25 +976,24 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 
 	// backup the object metadata if the user has opted in
 	cfg, err := satellite.StaticSatellite.Config()
-	if jc.Check("failed to fetch satellite config", err) != nil {
+	if err != nil {
 		return
 	}
 	if cfg.Enabled {
 		rs, err := satellite.StaticSatellite.GetSettings(ctx)
-		if jc.Check("failed to fetch renter settings", err) != nil {
+		if err != nil {
 			return
 		}
 		if rs.BackupFileMetadata {
 			object, _, err := w.bus.Object(ctx, jc.PathParam("path"), "", 0, 0)
-			if jc.Check("failed to get object", err) != nil {
+			if err != nil {
 				return
 			}
-			err = satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
+			if err := satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
 				Key:   object.Key,
 				Path:  jc.PathParam("path"),
 				Slabs: object.Slabs,
-			})
-			if jc.Check("failed to save object metadata", err) != nil {
+			}); err != nil {
 				return
 			}
 		}
