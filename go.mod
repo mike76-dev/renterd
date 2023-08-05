@@ -7,8 +7,8 @@ require (
 	github.com/google/go-cmp v0.5.9
 	github.com/gotd/contrib v0.15.0
 	github.com/klauspost/reedsolomon v1.11.7
-	github.com/mike76-dev/renterd-satellite v0.1.9
-	github.com/mike76-dev/sia-web/renterd v0.1.9
+	github.com/mike76-dev/renterd-satellite v0.1.10
+	github.com/mike76-dev/sia-web/renterd v0.1.11
 	github.com/montanaflynn/stats v0.7.1
 	gitlab.com/NebulousLabs/encoding v0.0.0-20200604091946-456c3dc907fe
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.40.0

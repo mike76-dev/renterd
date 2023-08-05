@@ -275,12 +275,16 @@ github.com/mike76-dev/renterd-satellite v0.1.8 h1:1/lCSNiGEc8lzDit2gr8WUAqLY20es
 github.com/mike76-dev/renterd-satellite v0.1.8/go.mod h1:SWZOizj//w0McHuqxZhKQZQ3WfE4k64YYeuwGyF6il0=
 github.com/mike76-dev/renterd-satellite v0.1.9 h1:CFGDEh0+H38N5czDZkIUyjqQNGSgbR74As19zuEM9m0=
 github.com/mike76-dev/renterd-satellite v0.1.9/go.mod h1:SWZOizj//w0McHuqxZhKQZQ3WfE4k64YYeuwGyF6il0=
+github.com/mike76-dev/renterd-satellite v0.1.10 h1:N8b/8BWj8GfS/1xeTrIbWiZOV7mQQUoERecMhpXomMA=
+github.com/mike76-dev/renterd-satellite v0.1.10/go.mod h1:SWZOizj//w0McHuqxZhKQZQ3WfE4k64YYeuwGyF6il0=
 github.com/mike76-dev/sia-web/renterd v0.1.7 h1:sXSlTPb2X5zhnyoVfqUqMXKWkCUYip/MJDH0WHIkKFk=
 github.com/mike76-dev/sia-web/renterd v0.1.7/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
 github.com/mike76-dev/sia-web/renterd v0.1.8 h1:QQbLqEFLG9/vxkHvDRBnjCWo3cRB7pTeytlU5RU/dcc=
 github.com/mike76-dev/sia-web/renterd v0.1.8/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
 github.com/mike76-dev/sia-web/renterd v0.1.9 h1:0nGb3qM9pevVoChfLQNCSmrfqkVRd9iQp9F0ccSLoFA=
 github.com/mike76-dev/sia-web/renterd v0.1.9/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
+github.com/mike76-dev/sia-web/renterd v0.1.11 h1:nT1n9PBfJDMDpGj7BUggJVMOjlLFr6MQ+KzsaPhn5Fs=
+github.com/mike76-dev/sia-web/renterd v0.1.11/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
 github.com/mitchellh/go-homedir v1.1.0/go.mod h1:SfyaCUpYCn1Vlf4IUYiD9fPX4A5wJrkLzIz1N1q0pr0=
 github.com/mitchellh/mapstructure v1.1.2/go.mod h1:FVVH3fgwuzCH5S8UJGiWEs2h04kUh9fWfEaFds41c1Y=
 github.com/modern-go/concurrent v0.0.0-20180228061459-e0a39a4cb421/go.mod h1:6dJC0mAP4ikYIbvyc7fijjWJddQyLn8Ig3JB5CqoB9Q=
