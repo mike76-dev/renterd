@@ -708,6 +708,17 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 	if err != nil {
 		return nil, err
 	}
+	if cfg.Enabled {
+		sctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		rs, err := satellite.StaticSatellite.GetSettings(sctx)
+		if err != nil {
+			c.ap.logger.Error("failed to fetch renter settings")
+		}
+		if rs.AutoRepairFiles {
+			return nil, nil // formations are handled by satellite
+		}
+	}
 
 	// convenience variables
 	state := c.ap.State()
@@ -895,6 +906,17 @@ func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, toRefre
 	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return nil, err
+	}
+	if cfg.Enabled {
+		sctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		rs, err := satellite.StaticSatellite.GetSettings(sctx)
+		if err != nil {
+			c.ap.logger.Error("failed to fetch renter settings")
+		}
+		if rs.AutoRepairFiles {
+			return nil, nil // refreshes are handled by satellite
+		}
 	}
 
 	c.logger.Debugw(
