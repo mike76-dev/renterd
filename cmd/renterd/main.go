@@ -31,8 +31,9 @@ import (
 	"golang.org/x/term"
 
 	// Satellite
-	satellite "github.com/mike76-dev/renterd-satellite"
+	//satellite "github.com/mike76-dev/renterd-satellite"
 	"github.com/mike76-dev/sia-web/renterd"
+	"go.sia.tech/renterd/satellite"
 )
 
 const (
