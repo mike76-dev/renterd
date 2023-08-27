@@ -295,7 +295,22 @@ func (ap *Autopilot) Run() error {
 			}
 
 			// migration
-			ap.m.tryPerformMigrations(ctx, ap.workers)
+			cfg, err := satellite.StaticSatellite.Config()
+			if err != nil {
+				ap.logger.Error("failed to fetch satellite config")
+			}
+			if cfg.Enabled {
+				sctx, cancel := context.WithTimeout(ctx, time.Minute)
+				rs, err := satellite.StaticSatellite.GetSettings(sctx)
+				cancel()
+				if err != nil {
+					ap.logger.Error("failed to fetch renter settings")
+				}
+				if !rs.AutoRepairFiles {
+					ap.m.tryPerformMigrations(ctx, ap.workers)
+				}
+			}
+
 		})
 
 		select {
