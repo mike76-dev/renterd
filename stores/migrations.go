@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/go-gormigrate/gormigrate/v2"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
-	glogger "gorm.io/gorm/logger"
 )
 
 var (
@@ -16,16 +16,15 @@ var (
 		&dbContract{},
 		&dbContractSet{},
 		&dbObject{},
+		&dbBufferedSlab{},
 		&dbSlab{},
 		&dbSector{},
 		&dbSlice{},
-		&dbSlabBuffer{},
 
 		// bus.HostDB tables
 		&dbAnnouncement{},
 		&dbConsensusInfo{},
 		&dbHost{},
-		&dbInteraction{},
 		&dbAllowlistEntry{},
 		&dbBlocklistEntry{},
 
@@ -41,23 +40,16 @@ var (
 
 		// bus.AutopilotStore tables
 		&dbAutopilot{},
+
+		// webhooks.WebhookStore tables
+		&dbWebhook{},
 	}
 )
 
-type dbHostBlocklistEntryHost struct {
-	DBBlocklistEntryID uint8 `gorm:"primarykey;column:db_blocklist_entry_id"`
-	DBHostID           uint8 `gorm:"primarykey;index:idx_db_host_id;column:db_host_id"`
-}
-
-func (dbHostBlocklistEntryHost) TableName() string {
-	return "host_blocklist_entry_hosts"
-}
-
 // migrateShards performs the migrations necessary for removing the 'shards'
 // table.
-func migrateShards(ctx context.Context, db *gorm.DB, l glogger.Interface) error {
+func migrateShards(ctx context.Context, db *gorm.DB, logger *zap.SugaredLogger) error {
 	m := db.Migrator()
-	logger := l.LogMode(glogger.Info)
 
 	// add columns
 	if !m.HasColumn(&dbSlice{}, "db_slab_id") {
@@ -132,7 +124,7 @@ func migrateShards(ctx context.Context, db *gorm.DB, l glogger.Interface) error 
 	return nil
 }
 
-func performMigrations(db *gorm.DB, logger glogger.Interface) error {
+func performMigrations(db *gorm.DB, logger *zap.SugaredLogger) error {
 	migrations := []*gormigrate.Migration{
 		{
 			ID: "00001_gormigrate",
@@ -148,8 +140,81 @@ func performMigrations(db *gorm.DB, logger glogger.Interface) error {
 			},
 			Rollback: nil,
 		},
+		{
+			ID: "00003_healthcache",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00003_healthcache(tx, logger)
+			},
+			Rollback: nil,
+		},
+		{
+			ID: "00004_objectID_collation",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00004_objectID_collation(tx, logger)
+			},
+			Rollback: nil,
+		},
+		{
+			ID: "00005_uploadPacking",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00005_uploadPacking(tx, logger)
+			},
+			Rollback: nil,
+		},
+		{
+			ID: "00006_contractspending",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00006_contractspending(tx, logger)
+			},
+			Rollback: nil,
+		},
+		{
+			ID: "00007_contractspending",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00007_archivedcontractspending(tx, logger)
+			},
+			Rollback: nil,
+		},
+		{
+			ID: "00008_jointableindices",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00008_jointableindices(tx, logger)
+			},
+			Rollback: nil,
+		},
+		{
+			ID: "00009_dropInteractions",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00009_dropInteractions(tx, logger)
+			},
+			Rollback: nil,
+		},
+		{
+			ID: "00010_distinctcontractsector",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00010_distinctcontractsector(tx, logger)
+			},
+			Rollback: nil,
+		},
+		{
+			ID: "00011_healthValidColumn",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00011_healthValidColumn(tx, logger)
+			},
+		},
+		{
+			ID: "00012_webhooks",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00012_webhooks(tx, logger)
+			},
+		},
+		{
+			ID: "00013_uploadPackingOptimisations",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00013_uploadPackingOptimisations(tx, logger)
+			},
+		},
 	}
-
 	// Create migrator.
 	m := gormigrate.New(db, gormigrate.DefaultOptions, migrations)
 
@@ -171,12 +236,62 @@ func performMigrations(db *gorm.DB, logger glogger.Interface) error {
 // initSchema is executed only on a clean database. Otherwise the individual
 // migrations are executed.
 func initSchema(tx *gorm.DB) error {
-	return tx.AutoMigrate(tables...)
+	// Setup join tables.
+	err := setupJoinTables(tx)
+	if err != nil {
+		return fmt.Errorf("failed to setup join tables: %w", err)
+	}
+
+	// Run auto migrations.
+	err = tx.AutoMigrate(tables...)
+	if err != nil {
+		return fmt.Errorf("failed to init schema: %w", err)
+	}
+	// Change the object_id colum to use case sensitive collation.
+	if !isSQLite(tx) {
+		return tx.Exec("ALTER TABLE objects MODIFY COLUMN object_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;").Error
+	}
+	return nil
+}
+
+func setupJoinTables(tx *gorm.DB) error {
+	jointables := []struct {
+		model     interface{}
+		joinTable interface{ TableName() string }
+		field     string
+	}{
+		{
+			&dbAllowlistEntry{},
+			&dbHostAllowlistEntryHost{},
+			"Hosts",
+		},
+		{
+			&dbBlocklistEntry{},
+			&dbHostBlocklistEntryHost{},
+			"Hosts",
+		},
+		{
+			&dbSector{},
+			&dbContractSector{},
+			"Contracts",
+		},
+		{
+			&dbContractSet{},
+			&dbContractSetContract{},
+			"Contracts",
+		},
+	}
+	for _, t := range jointables {
+		if err := tx.SetupJoinTable(t.model, t.field, t.joinTable); err != nil {
+			return fmt.Errorf("failed to setup join table '%s': %w", t.joinTable.TableName(), err)
+		}
+	}
+	return nil
 }
 
 // performMigration00001_gormigrate performs the first migration before
 // introducing gormigrate.
-func performMigration00001_gormigrate(txn *gorm.DB, logger glogger.Interface) error {
+func performMigration00001_gormigrate(txn *gorm.DB, logger *zap.SugaredLogger) error {
 	ctx := context.Background()
 	m := txn.Migrator()
 
@@ -277,13 +392,12 @@ func performMigration00001_gormigrate(txn *gorm.DB, logger glogger.Interface) er
 	return nil
 }
 
-func performMigration00002_dropconstraintslabcsid(txn *gorm.DB, logger glogger.Interface) error {
+func performMigration00002_dropconstraintslabcsid(txn *gorm.DB, logger *zap.SugaredLogger) error {
 	ctx := context.Background()
 	m := txn.Migrator()
 
 	// Disable foreign keys in SQLite to avoid issues with updating constraints.
 	if isSQLite(txn) {
-		fmt.Println("DISABLING constraints")
 		if err := txn.Exec(`PRAGMA foreign_keys = 0`).Error; err != nil {
 			return err
 		}
@@ -319,5 +433,218 @@ func performMigration00002_dropconstraintslabcsid(txn *gorm.DB, logger glogger.I
 			return err
 		}
 	}
+	return nil
+}
+
+func performMigration00003_healthcache(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info(context.Background(), "performing migration 00003_healthcache")
+	if !txn.Migrator().HasColumn(&dbSlab{}, "health") {
+		if err := txn.Migrator().AddColumn(&dbSlab{}, "health"); err != nil {
+			return err
+		}
+	}
+	logger.Info(context.Background(), "migration 00003_healthcheck complete")
+	return nil
+}
+
+func performMigration00004_objectID_collation(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info(context.Background(), "performing migration 00004_objectID_collation")
+	if !isSQLite(txn) {
+		err := txn.Exec("ALTER TABLE objects MODIFY COLUMN object_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;").Error
+		if err != nil {
+			return err
+		}
+	}
+	logger.Info(context.Background(), "migration 00004_objectID_collation complete")
+	return nil
+}
+
+func performMigration00005_uploadPacking(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info(context.Background(), "performing migration performMigration00005_uploadPacking")
+	m := txn.Migrator()
+
+	// Disable foreign keys in SQLite to avoid issues with updating constraints.
+	if isSQLite(txn) {
+		if err := txn.Exec(`PRAGMA foreign_keys = 0`).Error; err != nil {
+			return err
+		}
+	}
+
+	if m.HasTable(&dbBufferedSlab{}) {
+		// Drop buffered slabs since the schema has changed and the table was
+		// unused so far.
+		if err := m.DropTable(&dbBufferedSlab{}); err != nil {
+			return fmt.Errorf("failed to drop table 'buffered_slabs': %w", err)
+		}
+	}
+
+	// Use AutoMigrate to recreate buffered_slabs.
+	if err := m.AutoMigrate(&dbBufferedSlab{}); err != nil {
+		return fmt.Errorf("failed to create table 'buffered_slabs': %w", err)
+	}
+
+	// Migrate slabs.
+	if isSQLite(txn) {
+		if !m.HasIndex(&dbSlab{}, "MinShards") {
+			if err := m.CreateIndex(&dbSlab{}, "MinShards"); err != nil {
+				return fmt.Errorf("failed to create index 'MinShards' on table 'slabs': %w", err)
+			}
+		}
+		if !m.HasIndex(&dbSlab{}, "TotalShards") {
+			if err := m.CreateIndex(&dbSlab{}, "TotalShards"); err != nil {
+				return fmt.Errorf("failed to create index 'TotalShards' on table 'slabs': %w", err)
+			}
+		}
+		if !m.HasColumn(&dbSlab{}, "db_buffered_slab_id") {
+			if err := m.AddColumn(&dbSlab{}, "db_buffered_slab_id"); err != nil {
+				return fmt.Errorf("failed to create column 'db_buffered_slab_id' on table 'slabs': %w", err)
+			}
+		}
+	} else if err := m.AutoMigrate(&dbSlab{}); err != nil {
+		return fmt.Errorf("failed to migrate table 'slabs': %w", err)
+	}
+
+	// Enable foreign keys again.
+	if isSQLite(txn) {
+		if err := txn.Exec(`PRAGMA foreign_keys = 1`).Error; err != nil {
+			return err
+		}
+		if err := txn.Exec(`PRAGMA foreign_key_check(slabs)`).Error; err != nil {
+			return err
+		}
+	}
+	logger.Info(context.Background(), "migration performMigration00005_uploadPacking complete")
+	return nil
+}
+
+func performMigration00006_contractspending(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info(context.Background(), "performing migration 00006_contractspending")
+	if !txn.Migrator().HasColumn(&dbContract{}, "delete_spending") {
+		if err := txn.Migrator().AddColumn(&dbContract{}, "delete_spending"); err != nil {
+			return err
+		}
+	}
+	if !txn.Migrator().HasColumn(&dbContract{}, "list_spending") {
+		if err := txn.Migrator().AddColumn(&dbContract{}, "list_spending"); err != nil {
+			return err
+		}
+	}
+	logger.Info(context.Background(), "migration 00006_contractspending complete")
+	return nil
+}
+
+func performMigration00007_archivedcontractspending(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info(context.Background(), "performing migration 00007_archivedcontractspending")
+	if !txn.Migrator().HasColumn(&dbArchivedContract{}, "delete_spending") {
+		if err := txn.Migrator().AddColumn(&dbArchivedContract{}, "delete_spending"); err != nil {
+			return err
+		}
+	}
+	if !txn.Migrator().HasColumn(&dbArchivedContract{}, "list_spending") {
+		if err := txn.Migrator().AddColumn(&dbArchivedContract{}, "list_spending"); err != nil {
+			return err
+		}
+	}
+	logger.Info(context.Background(), "migration 00007_archivedcontractspending complete")
+	return nil
+}
+
+func performMigration00008_jointableindices(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info(context.Background(), "performing migration 00008_jointableindices")
+
+	indices := []struct {
+		joinTable interface{ TableName() string }
+		column    string
+	}{
+		{
+			&dbHostAllowlistEntryHost{},
+			"DBHostID",
+		},
+		{
+			&dbHostBlocklistEntryHost{},
+			"DBHostID",
+		},
+		{
+			&dbContractSector{},
+			"DBContractID",
+		},
+		{
+			&dbContractSetContract{},
+			"DBContractID",
+		},
+	}
+
+	m := txn.Migrator()
+	for _, idx := range indices {
+		if !m.HasIndex(idx.joinTable, idx.column) {
+			if err := m.CreateIndex(idx.joinTable, idx.column); err != nil {
+				return fmt.Errorf("failed to create index on column '%s' of table '%s': %w", idx.column, idx.joinTable.TableName(), err)
+			}
+		}
+	}
+
+	logger.Info(context.Background(), "migration 00008_jointableindices complete")
+	return nil
+}
+
+func performMigration00009_dropInteractions(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info(context.Background(), "performing migration 00009_dropInteractions")
+	if !txn.Migrator().HasTable("host_interactions") {
+		if err := txn.Migrator().DropTable("host_interactions"); err != nil {
+			return err
+		}
+	}
+	logger.Info(context.Background(), "migration 00009_dropInteractions complete")
+	return nil
+}
+
+func performMigration00010_distinctcontractsector(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info(context.Background(), "performing migration 00010_distinctcontractsector")
+
+	if !txn.Migrator().HasIndex(&dbContractSector{}, "DBSectorID") {
+		if err := txn.Migrator().CreateIndex(&dbContractSector{}, "DBSectorID"); err != nil {
+			return fmt.Errorf("failed to create index on column 'DBSectorID' of table 'contract_sectors': %w", err)
+		}
+	}
+
+	logger.Info(context.Background(), "migration 00010_distinctcontractsector complete")
+	return nil
+}
+
+func performMigration00011_healthValidColumn(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info(context.Background(), "performing migration 00011_healthValidColumn")
+	if !txn.Migrator().HasColumn(&dbSlab{}, "health_valid") {
+		if err := txn.Migrator().AddColumn(&dbSlab{}, "health_valid"); err != nil {
+			return err
+		}
+	}
+	logger.Info(context.Background(), "migration 00011_healthValidColumn complete")
+	return nil
+}
+
+func performMigration00012_webhooks(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info(context.Background(), "performing migration 00012_webhooks")
+	if !txn.Migrator().HasTable(&dbWebhook{}) {
+		if err := txn.Migrator().CreateTable(&dbWebhook{}); err != nil {
+			return err
+		}
+	}
+	logger.Info(context.Background(), "migration 00012_webhooks complete")
+	return nil
+}
+
+func performMigration00013_uploadPackingOptimisations(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info(context.Background(), "performing migration 00013_uploadPackingOptimisations")
+	if txn.Migrator().HasColumn(&dbBufferedSlab{}, "lock_id") {
+		if err := txn.Migrator().DropColumn(&dbBufferedSlab{}, "lock_id"); err != nil {
+			return err
+		}
+	}
+	if txn.Migrator().HasColumn(&dbBufferedSlab{}, "locked_until") {
+		if err := txn.Migrator().DropColumn(&dbBufferedSlab{}, "locked_until"); err != nil {
+			return err
+		}
+	}
+	logger.Info(context.Background(), "migration 00013_uploadPackingOptimisations complete")
 	return nil
 }

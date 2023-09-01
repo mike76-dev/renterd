@@ -8,6 +8,7 @@ import (
 	"go.sia.tech/core/consensus"
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/wallet"
+	"go.uber.org/zap"
 	"lukechampine.com/frand"
 )
 
@@ -17,8 +18,11 @@ type mockStore struct {
 	utxos []wallet.SiacoinElement
 }
 
-func (s *mockStore) Balance() (types.Currency, error)                         { return types.ZeroCurrency, nil }
-func (s *mockStore) UnspentSiacoinElements() ([]wallet.SiacoinElement, error) { return s.utxos, nil }
+func (s *mockStore) Balance() (types.Currency, error) { return types.ZeroCurrency, nil }
+func (s *mockStore) Height() uint64                   { return 0 }
+func (s *mockStore) UnspentSiacoinElements(bool) ([]wallet.SiacoinElement, error) {
+	return s.utxos, nil
+}
 func (s *mockStore) Transactions(before, since time.Time, offset, limit int) ([]wallet.Transaction, error) {
 	return nil, nil
 }
@@ -47,7 +51,7 @@ func TestWalletRedistribute(t *testing.T) {
 		0,
 	}
 	s := &mockStore{utxos: []wallet.SiacoinElement{utxo}}
-	w := wallet.NewSingleAddressWallet(priv, s, 0)
+	w := wallet.NewSingleAddressWallet(priv, s, 0, zap.NewNop().Sugar())
 
 	numOutputsWithValue := func(v types.Currency) (c uint64) {
 		utxos, _ := w.UnspentOutputs()

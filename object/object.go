@@ -5,7 +5,7 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
+	"fmt"
 	"io"
 	"math"
 
@@ -34,7 +34,7 @@ func (k *EncryptionKey) UnmarshalText(b []byte) error {
 	if n, err := hex.Decode(k.entropy[:], []byte(bytes.TrimPrefix(b, []byte("key:")))); err != nil {
 		return err
 	} else if n != len(k.entropy) {
-		return errors.New("wrong seed length")
+		return fmt.Errorf("wrong key length: expected %v, got %v", len(k.entropy), n)
 	}
 	return nil
 }
@@ -72,8 +72,9 @@ func GenerateEncryptionKey() EncryptionKey {
 
 // An Object is a unit of data that has been stored on a host.
 type Object struct {
-	Key   EncryptionKey `json:"key"`
-	Slabs []SlabSlice   `json:"slabs"`
+	Key          EncryptionKey `json:"key"`
+	Slabs        []SlabSlice   `json:"slabs"`
+	PartialSlabs []PartialSlab `json:"partialSlab,omitempty"`
 }
 
 // NewObject returns a new Object with a random key.
@@ -83,11 +84,14 @@ func NewObject() Object {
 	}
 }
 
-// Size returns the total size of the object.
-func (o Object) Size() int64 {
+// TotalSize returns the total size of the object.
+func (o Object) TotalSize() int64 {
 	var n int64
 	for _, ss := range o.Slabs {
 		n += int64(ss.Length)
+	}
+	for _, partialSlab := range o.PartialSlabs {
+		n += int64(partialSlab.Length)
 	}
 	return n
 }

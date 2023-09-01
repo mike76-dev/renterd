@@ -18,9 +18,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	rhpv3 "go.sia.tech/core/rhp/v3"
 	"go.sia.tech/core/types"
+	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
@@ -47,6 +49,15 @@ func TestNewTestCluster(t *testing.T) {
 	}()
 	b := cluster.Bus
 	w := cluster.Worker
+
+	// Upload packing should be disabled by default.
+	ups, err := b.UploadPackingSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ups.Enabled {
+		t.Fatalf("expected upload packing to be disabled by default, got %v", ups.Enabled)
+	}
 
 	// Try talking to the bus API by adding an object.
 	err = b.AddObject(context.Background(), "foo", testAutopilotConfig.Contracts.Set, object.Object{
@@ -196,17 +207,17 @@ func TestNewTestCluster(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if hi.ScoreBreakdown.Score() == 0 {
-			js, _ := json.MarshalIndent(hi.ScoreBreakdown, "", "  ")
+		if hi.Checks.ScoreBreakdown.Score() == 0 {
+			js, _ := json.MarshalIndent(hi.Checks.ScoreBreakdown, "", "  ")
 			t.Fatalf("score shouldn't be 0 because that means one of the fields was 0: %s", string(js))
 		}
-		if hi.Score == 0 {
+		if hi.Checks.Score == 0 {
 			t.Fatal("score shouldn't be 0")
 		}
-		if !hi.Usable {
+		if !hi.Checks.Usable {
 			t.Fatal("host should be usable")
 		}
-		if len(hi.UnusableReasons) != 0 {
+		if len(hi.Checks.UnusableReasons) != 0 {
 			t.Fatal("usable hosts don't have any reasons set")
 		}
 		if reflect.DeepEqual(hi.Host, hostdb.HostInfo{}) {
@@ -217,31 +228,28 @@ func TestNewTestCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	allHosts := make(map[types.PublicKey]struct{})
 	for _, hi := range hostInfos {
-		if hi.ScoreBreakdown.Score() == 0 {
-			js, _ := json.MarshalIndent(hi.ScoreBreakdown, "", "  ")
+		if hi.Checks.ScoreBreakdown.Score() == 0 {
+			js, _ := json.MarshalIndent(hi.Checks.ScoreBreakdown, "", "  ")
 			t.Fatalf("score shouldn't be 0 because that means one of the fields was 0: %s", string(js))
 		}
-		if hi.Score == 0 {
+		if hi.Checks.Score == 0 {
 			t.Fatal("score shouldn't be 0")
 		}
-		if !hi.Usable {
+		if !hi.Checks.Usable {
 			t.Fatal("host should be usable")
 		}
-		if len(hi.UnusableReasons) != 0 {
+		if len(hi.Checks.UnusableReasons) != 0 {
 			t.Fatal("usable hosts don't have any reasons set")
 		}
 		if reflect.DeepEqual(hi.Host, hostdb.HostInfo{}) {
 			t.Fatal("host wasn't set")
 		}
+		allHosts[hi.Host.PublicKey] = struct{}{}
 	}
-	hostInfosUsable, err := cluster.Autopilot.HostInfos(context.Background(), api.HostFilterModeAll, api.UsabilityFilterModeUsable, "", nil, 0, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(hostInfos, hostInfosUsable) {
-		t.Fatal("result for 'usable' should match the result for ''")
-	}
+
 	hostInfosUnusable, err := cluster.Autopilot.HostInfos(context.Background(), api.HostFilterModeAll, api.UsabilityFilterModeUnusable, "", nil, 0, -1)
 	if err != nil {
 		t.Fatal(err)
@@ -250,25 +258,36 @@ func TestNewTestCluster(t *testing.T) {
 		t.Fatal("there should be no unusable hosts", len(hostInfosUnusable))
 	}
 
-	// Fetch the autopilot status
-	status, err := cluster.Autopilot.Status()
+	hostInfosUsable, err := cluster.Autopilot.HostInfos(context.Background(), api.HostFilterModeAll, api.UsabilityFilterModeUsable, "", nil, 0, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !status.Configured {
-		t.Fatal("autopilot should be configured")
+	for _, hI := range hostInfosUsable {
+		delete(allHosts, hI.Host.PublicKey)
 	}
-	if time.Time(status.MigratingLastStart).IsZero() {
+	if len(hostInfosUsable) != len(hostInfos) || len(allHosts) != 0 {
+		t.Fatalf("result for 'usable' should match the result for 'all', \n\nall: %+v \n\nusable: %+v", hostInfos, hostInfosUsable)
+	}
+
+	// Fetch the autopilot state
+	state, err := cluster.Autopilot.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Time(state.StartTime).IsZero() {
+		t.Fatal("autopilot should have start time")
+	}
+	if time.Time(state.MigratingLastStart).IsZero() {
 		t.Fatal("autopilot should have completed a migration")
 	}
-	if time.Time(status.ScanningLastStart).IsZero() {
+	if time.Time(state.ScanningLastStart).IsZero() {
 		t.Fatal("autopilot should have completed a scan")
 	}
-	if !status.Synced {
-		t.Fatal("autopilot should be synced")
-	}
-	if status.UptimeMS == 0 {
+	if state.UptimeMS == 0 {
 		t.Fatal("uptime should be set")
+	}
+	if !state.Configured {
+		t.Fatal("autopilot should be configured")
 	}
 }
 
@@ -319,6 +338,7 @@ func TestObjectEntries(t *testing.T) {
 		{"/fileś/śpecial", 6}, // utf8
 		{"//double/", 7},
 		{"///triple", 8},
+		{"/FOO/bar", 9}, // test case sensitivity
 	}
 
 	for _, upload := range uploads {
@@ -340,22 +360,23 @@ func TestObjectEntries(t *testing.T) {
 		prefix string
 		want   []api.ObjectMetadata
 	}{
-		{"/", "", []api.ObjectMetadata{{Name: "//", Size: 15}, {Name: "/fileś/", Size: 6}, {Name: "/foo/", Size: 10}, {Name: "/gab/", Size: 5}}},
-		{"//", "", []api.ObjectMetadata{{Name: "///", Size: 8}, {Name: "//double/", Size: 7}}},
-		{"///", "", []api.ObjectMetadata{{Name: "///triple", Size: 8}}},
-		{"/foo/", "", []api.ObjectMetadata{{Name: "/foo/bar", Size: 1}, {Name: "/foo/bat", Size: 2}, {Name: "/foo/baz/", Size: 7}}},
-		{"/foo/baz/", "", []api.ObjectMetadata{{Name: "/foo/baz/quux", Size: 3}, {Name: "/foo/baz/quuz", Size: 4}}},
-		{"/gab/", "", []api.ObjectMetadata{{Name: "/gab/guub", Size: 5}}},
-		{"/fileś/", "", []api.ObjectMetadata{{Name: "/fileś/śpecial", Size: 6}}},
+		{"/", "", []api.ObjectMetadata{{Name: "//", Size: 15, Health: 1}, {Name: "/FOO/", Size: 9, Health: 1}, {Name: "/fileś/", Size: 6, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}, {Name: "/gab/", Size: 5, Health: 1}}},
+		{"//", "", []api.ObjectMetadata{{Name: "///", Size: 8, Health: 1}, {Name: "//double/", Size: 7, Health: 1}}},
+		{"///", "", []api.ObjectMetadata{{Name: "///triple", Size: 8, Health: 1}}},
+		{"/foo/", "", []api.ObjectMetadata{{Name: "/foo/bar", Size: 1, Health: 1}, {Name: "/foo/bat", Size: 2, Health: 1}, {Name: "/foo/baz/", Size: 7, Health: 1}}},
+		{"/FOO/", "", []api.ObjectMetadata{{Name: "/FOO/bar", Size: 9, Health: 1}}},
+		{"/foo/baz/", "", []api.ObjectMetadata{{Name: "/foo/baz/quux", Size: 3, Health: 1}, {Name: "/foo/baz/quuz", Size: 4, Health: 1}}},
+		{"/gab/", "", []api.ObjectMetadata{{Name: "/gab/guub", Size: 5, Health: 1}}},
+		{"/fileś/", "", []api.ObjectMetadata{{Name: "/fileś/śpecial", Size: 6, Health: 1}}},
 
-		{"/", "f", []api.ObjectMetadata{{Name: "/fileś/", Size: 6}, {Name: "/foo/", Size: 10}}},
+		{"/", "f", []api.ObjectMetadata{{Name: "/fileś/", Size: 6, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}}},
 		{"/foo/", "fo", []api.ObjectMetadata{}},
-		{"/foo/baz/", "quux", []api.ObjectMetadata{{Name: "/foo/baz/quux", Size: 3}}},
+		{"/foo/baz/", "quux", []api.ObjectMetadata{{Name: "/foo/baz/quux", Size: 3, Health: 1}}},
 		{"/gab/", "/guub", []api.ObjectMetadata{}},
 	}
 	for _, test := range tests {
 		// use the bus client
-		_, got, err := b.Object(context.Background(), test.path, test.prefix, 0, -1)
+		_, got, err := b.Object(context.Background(), test.path, api.ObjectsWithPrefix(test.prefix))
 		if err != nil {
 			t.Fatal(err, test.path)
 		}
@@ -363,7 +384,7 @@ func TestObjectEntries(t *testing.T) {
 			t.Errorf("\nlist: %v\nprefix: %v\ngot: %v\nwant: %v", test.path, test.prefix, got, test.want)
 		}
 		for offset := 0; offset < len(test.want); offset++ {
-			_, got, err := b.Object(context.Background(), test.path, test.prefix, offset, 1)
+			_, got, err := b.Object(context.Background(), test.path, api.ObjectsWithPrefix(test.prefix), api.ObjectsWithOffset(offset), api.ObjectsWithLimit(1))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -556,7 +577,7 @@ func TestUploadDownloadBasic(t *testing.T) {
 	}
 
 	// prepare a file
-	data := make([]byte, 128) //rhpv2.SectorSize/12
+	data := make([]byte, 128)
 	if _, err := frand.Read(data); err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +596,7 @@ func TestUploadDownloadBasic(t *testing.T) {
 
 	// assert it matches
 	if !bytes.Equal(data, buffer.Bytes()) {
-		t.Fatal("unexpected")
+		t.Fatal("unexpected", len(data), buffer.Len())
 	}
 
 	// download again, 32 bytes at a time.
@@ -590,6 +611,47 @@ func TestUploadDownloadBasic(t *testing.T) {
 			fmt.Println(buffer.Bytes())
 			t.Fatalf("mismatch for offset %v", offset)
 		}
+	}
+
+	// fetch the contracts.
+	contracts, err := cluster.Bus.Contracts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// broadcast the revision for each contract and assert the revision height
+	// is 0.
+	for _, c := range contracts {
+		if c.RevisionHeight != 0 {
+			t.Fatal("revision height should be 0")
+		}
+		if err := w.RHPBroadcast(context.Background(), c.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// mine a block to get the revisions mined.
+	if err := cluster.MineBlocks(1); err != nil {
+		t.Fatal(err)
+	}
+
+	// check the revision height was updated.
+	err = Retry(100, 100*time.Millisecond, func() error {
+		// fetch the contracts.
+		contracts, err := cluster.Bus.Contracts(context.Background())
+		if err != nil {
+			return err
+		}
+		// assert the revision height was updated.
+		for _, c := range contracts {
+			if c.RevisionHeight == 0 {
+				return errors.New("revision height should be > 0")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -652,7 +714,7 @@ func TestUploadDownloadExtended(t *testing.T) {
 	}
 
 	// fetch entries with "file" prefix
-	_, entries, err = cluster.Bus.Object(context.Background(), "fileś/", "file", 0, -1)
+	_, entries, err = cluster.Bus.Object(context.Background(), "fileś/", api.ObjectsWithPrefix("file"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +723,7 @@ func TestUploadDownloadExtended(t *testing.T) {
 	}
 
 	// fetch entries with "fileś" prefix
-	_, entries, err = cluster.Bus.Object(context.Background(), "fileś/", "foo", 0, -1)
+	_, entries, err = cluster.Bus.Object(context.Background(), "fileś/", api.ObjectsWithPrefix("foo"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -864,7 +926,7 @@ func TestUploadDownloadSpending(t *testing.T) {
 			}
 
 			// Should be registered in bus.
-			_, entries, err := cluster.Bus.Object(context.Background(), "", "", 0, -1)
+			_, entries, err := cluster.Bus.Object(context.Background(), "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1703,5 +1765,472 @@ func TestWalletTransactions(t *testing.T) {
 		if txn.Timestamp.Unix() < medianTxnTimestamp.Unix() {
 			t.Fatal("expected only transactions after median timestamp", medianTxnTimestamp.Unix())
 		}
+	}
+}
+
+func TestUploadPacking(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	// sanity check the default settings
+	if testAutopilotConfig.Contracts.Amount < uint64(testRedundancySettings.MinShards) {
+		t.Fatal("too few hosts to support the redundancy settings")
+	}
+
+	// create a test cluster
+	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := cluster.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	b := cluster.Bus
+	w := cluster.Worker
+	rs := testRedundancySettings
+
+	// Enable upload packing.
+	err = b.UpdateSetting(context.Background(), api.SettingUploadPacking, api.UploadPackingSettings{
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// add hosts
+	if _, err := cluster.AddHostsBlocking(rs.TotalShards); err != nil {
+		t.Fatal(err)
+	}
+
+	// wait for accounts to be funded
+	if _, err := cluster.WaitForAccounts(); err != nil {
+		t.Fatal(err)
+	}
+
+	// prepare 3 files which are all smaller than a slab but together make up
+	// for 2 full slabs.
+	slabSize := rhpv2.SectorSize * rs.MinShards
+	totalDataSize := 2 * slabSize
+	data1 := make([]byte, (totalDataSize-(slabSize-256))/2)
+	data2 := make([]byte, slabSize-256) // large partial slab
+	data3 := make([]byte, (totalDataSize-(slabSize-256))/2)
+	frand.Read(data1)
+	frand.Read(data2)
+	frand.Read(data3)
+
+	// declare helpers
+	download := func(name string, data []byte, offset, length uint64) {
+		t.Helper()
+		var buffer bytes.Buffer
+		if err := w.DownloadObject(context.Background(), &buffer, name,
+			api.DownloadWithRange(offset, length)); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(data[offset:offset+length], buffer.Bytes()) {
+			t.Fatal("unexpected", len(data), buffer.Len())
+		}
+	}
+	uploadDownload := func(name string, data []byte) {
+		t.Helper()
+		if err := w.UploadObject(context.Background(), bytes.NewReader(data), name); err != nil {
+			t.Fatal(err)
+		}
+		download(name, data, 0, uint64(len(data)))
+		obj, _, err := b.Object(context.Background(), name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if obj.Size != int64(len(data)) {
+			t.Fatal("unexpected size after upload", obj.Size, len(data))
+		}
+		entries, err := w.ObjectEntries(context.Background(), "/", "", 0, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found bool
+		for _, entry := range entries {
+			if entry.Name == "/"+name {
+				if entry.Size != int64(len(data)) {
+					t.Fatal("unexpected size after upload", entry.Size, len(data))
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatal("object not found in list", name, entries)
+		}
+	}
+
+	// upload file 1 and download it.
+	uploadDownload("file1", data1)
+
+	// download it 32 bytes at a time.
+	for i := uint64(0); i < 4; i++ {
+		download("file1", data1, 32*i, 32)
+	}
+
+	// upload file 2 and download it.
+	uploadDownload("file2", data2)
+
+	// file 1 should still be available.
+	for i := uint64(0); i < 4; i++ {
+		download("file1", data1, 32*i, 32)
+	}
+
+	// upload file 3 and download it.
+	uploadDownload("file3", data3)
+
+	// file 1 should still be available.
+	for i := uint64(0); i < 4; i++ {
+		download("file1", data1, 32*i, 32)
+	}
+
+	// file 2 should still be available. Download each half separately.
+	download("file2", data2, 0, uint64(len(data2)))
+	download("file2", data2, 0, uint64(len(data2))/2)
+	download("file2", data2, uint64(len(data2))/2, uint64(len(data2))/2)
+
+	// download file 3 32 bytes at a time as well.
+	for i := uint64(0); i < 4; i++ {
+		download("file3", data3, 32*i, 32)
+	}
+
+	// upload 2 more files which are half a slab each to test filling up a slab
+	// exactly.
+	data4 := make([]byte, slabSize/2)
+	data5 := make([]byte, slabSize/2)
+	uploadDownload("file4", data4)
+	uploadDownload("file5", data5)
+	download("file4", data4, 0, uint64(len(data4)))
+
+	// check the object stats
+	os, err := b.ObjectsStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.NumObjects != 5 {
+		t.Fatal("expected 5 objects, got", os.NumObjects)
+	}
+	totalObjectSize := uint64(3 * slabSize)
+	totalRedundantSize := totalObjectSize * uint64(rs.TotalShards) / uint64(rs.MinShards)
+	if os.TotalObjectsSize != totalObjectSize {
+		t.Fatalf("expected totalObjectSize of %v, got %v", totalObjectSize, os.TotalObjectsSize)
+	}
+	if os.TotalSectorsSize != uint64(totalRedundantSize) {
+		t.Errorf("expected totalSectorSize of %v, got %v", totalRedundantSize, os.TotalSectorsSize)
+	}
+	if os.TotalUploadedSize != uint64(totalRedundantSize) {
+		t.Errorf("expected totalUploadedSize of %v, got %v", totalRedundantSize, os.TotalUploadedSize)
+	}
+
+	// ObjectsBySlabKey should return 2 objects for the slab of file1 since file1
+	// and file2 share the same slab.
+	file1, _, err := b.Object(context.Background(), "file1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs, err := b.ObjectsBySlabKey(context.Background(), file1.Slabs[0].Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objs) != 2 {
+		t.Fatal("expected 2 objects", len(objs))
+	}
+	sort.Slice(objs, func(i, j int) bool {
+		return objs[i].Name < objs[j].Name // make result deterministic
+	})
+	if objs[0].Name != "/file1" {
+		t.Fatal("expected file1", objs[0].Name)
+	} else if objs[1].Name != "/file2" {
+		t.Fatal("expected file2", objs[1].Name)
+	}
+}
+
+func TestWallet(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	cluster, err := newTestCluster(t.TempDir(), newTestLoggerCustom(zapcore.DebugLevel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := cluster.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	b := cluster.Bus
+
+	// Check wallet info is sane after startup.
+	wallet, err := b.Wallet(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wallet.ScanHeight == 0 {
+		t.Fatal("wallet scan height should not be 0")
+	}
+	if wallet.Confirmed.IsZero() {
+		t.Fatal("wallet confirmed balance should not be zero")
+	}
+	if !wallet.Spendable.Equals(wallet.Confirmed) {
+		t.Fatal("wallet spendable balance should match confirmed")
+	}
+	if !wallet.Unconfirmed.IsZero() {
+		t.Fatal("wallet unconfirmed balance should be zero")
+	}
+	if wallet.Address == (types.Address{}) {
+		t.Fatal("wallet address should be set")
+	}
+
+	// Send 1 SC to an address outside our wallet. We manually do this to be in
+	// control of the miner fees.
+	sendAmt := types.HastingsPerSiacoin
+	minerFee := types.NewCurrency64(1)
+	txn := types.Transaction{
+		SiacoinOutputs: []types.SiacoinOutput{
+			{Value: sendAmt, Address: types.VoidAddress},
+		},
+		MinerFees: []types.Currency{minerFee},
+	}
+	toSign, parents, err := b.WalletFund(context.Background(), &txn, txn.SiacoinOutputs[0].Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = b.WalletSign(context.Background(), &txn, toSign, types.CoveredFields{WholeTransaction: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.BroadcastTransaction(context.Background(), append(parents, txn)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The wallet should still have the same confirmed balance, a lower
+	// spendable balance and a greater unconfirmed balance.
+	err = Retry(600, 100*time.Millisecond, func() error {
+		updated, err := b.Wallet(context.Background())
+		if err != nil {
+			return err
+		}
+		if !updated.Confirmed.Equals(wallet.Confirmed) {
+			return fmt.Errorf("wallet confirmed balance should not have changed: %v %v", updated.Confirmed, wallet.Confirmed)
+		}
+
+		// The diffs of the spendable balance and unconfirmed balance should add up
+		// to the amount of money sent as well as the miner fees used.
+		spendableDiff := wallet.Spendable.Sub(updated.Spendable)
+		if updated.Unconfirmed.Cmp(spendableDiff) > 0 {
+			t.Fatalf("unconfirmed balance can't be greater than the difference in spendable balance here, confirmed %v->%v unconfirmed %v->%v spendable %v->%v fee %v", wallet.Confirmed, updated.Confirmed, wallet.Unconfirmed, updated.Unconfirmed, wallet.Spendable, updated.Spendable, minerFee)
+		}
+		withdrawnAmt := spendableDiff.Sub(updated.Unconfirmed)
+		expectedWithdrawnAmt := sendAmt.Add(minerFee)
+		if !withdrawnAmt.Equals(expectedWithdrawnAmt) {
+			return fmt.Errorf("withdrawn amount doesn't match expectation: %v!=%v", withdrawnAmt.ExactString(), expectedWithdrawnAmt.ExactString())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSlabBufferStats(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	// sanity check the default settings
+	if testAutopilotConfig.Contracts.Amount < uint64(testRedundancySettings.MinShards) {
+		t.Fatal("too few hosts to support the redundancy settings")
+	}
+
+	// create a test cluster
+	busCfg := testBusCfg()
+	threshold := 1 << 12 // 4 KiB
+	busCfg.SlabBufferCompletionThreshold = int64(threshold)
+	cluster, err := newTestClusterCustom(t.TempDir(), "", true, types.GeneratePrivateKey(), busCfg, testWorkerCfg(), testApCfg(), newTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := cluster.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	b := cluster.Bus
+	w := cluster.Worker
+	rs := testRedundancySettings
+
+	// Enable upload packing.
+	err = b.UpdateSetting(context.Background(), api.SettingUploadPacking, api.UploadPackingSettings{
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// add hosts
+	if _, err := cluster.AddHostsBlocking(rs.TotalShards); err != nil {
+		t.Fatal(err)
+	}
+
+	// wait for accounts to be funded
+	if _, err := cluster.WaitForAccounts(); err != nil {
+		t.Fatal(err)
+	}
+
+	// prepare 3 files which are all smaller than a slab but together make up
+	// for 2 full slabs.
+	slabSize := rhpv2.SectorSize * rs.MinShards
+	data1 := make([]byte, (slabSize - threshold - 1))
+	data2 := make([]byte, 1)
+	frand.Read(data1)
+	frand.Read(data2)
+
+	// upload the first file - buffer should still be incomplete after this
+	if err := w.UploadObject(context.Background(), bytes.NewReader(data1), "1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// check the object stats
+	os, err := b.ObjectsStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.NumObjects != 1 {
+		t.Fatal("expected 1 object, got", os.NumObjects)
+	}
+	if os.TotalObjectsSize != uint64(len(data1)) {
+		t.Fatalf("expected totalObjectSize of %v, got %v", len(data1), os.TotalObjectsSize)
+	}
+	if os.TotalSectorsSize != 0 {
+		t.Fatal("expected totalSectorSize of 0, got", os.TotalSectorsSize)
+	}
+	if os.TotalUploadedSize != 0 {
+		t.Fatal("expected totalUploadedSize of 0, got", os.TotalUploadedSize)
+	}
+	buffers, err := b.SlabBuffers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buffers) != 1 {
+		t.Fatal("expected 1 slab buffer, got", len(buffers))
+	}
+	if buffers[0].ContractSet != testContractSet {
+		t.Fatalf("expected slab buffer contract set of %v, got %v", testContractSet, buffers[0].ContractSet)
+	}
+	if buffers[0].Size != int64(len(data1)) {
+		t.Fatalf("expected slab buffer size of %v, got %v", len(data1), buffers[0].Size)
+	}
+	if buffers[0].MaxSize != int64(slabSize) {
+		t.Fatalf("expected slab buffer max size of %v, got %v", slabSize, buffers[0].MaxSize)
+	}
+	if buffers[0].Complete {
+		t.Fatal("expected slab buffer to be incomplete")
+	}
+	if buffers[0].Filename == "" {
+		t.Fatal("expected slab buffer to have a filename")
+	}
+	if buffers[0].Locked {
+		t.Fatal("expected slab buffer to be unlocked")
+	}
+
+	// upload the second file - this should fill the buffer
+	if err := w.UploadObject(context.Background(), bytes.NewReader(data2), "2"); err != nil {
+		t.Fatal(err)
+	}
+
+	os, err = b.ObjectsStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.NumObjects != 2 {
+		t.Fatal("expected 1 object, got", os.NumObjects)
+	}
+	if os.TotalObjectsSize != uint64(len(data1)+len(data2)) {
+		t.Fatalf("expected totalObjectSize of %v, got %v", len(data1)+len(data2), os.TotalObjectsSize)
+	}
+	if os.TotalSectorsSize != 3*rhpv2.SectorSize {
+		t.Fatalf("expected totalSectorSize of %v, got %v", 3*rhpv2.SectorSize, os.TotalSectorsSize)
+	}
+	if os.TotalUploadedSize != 3*rhpv2.SectorSize {
+		t.Fatalf("expected totalUploadedSize of %v, got %v", 3*rhpv2.SectorSize, os.TotalUploadedSize)
+	}
+	buffers, err = b.SlabBuffers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buffers) != 0 {
+		t.Fatal("expected 0 slab buffers, got", len(buffers))
+	}
+}
+
+func TestAlerts(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	cluster, err := newTestCluster(t.TempDir(), newTestLoggerCustom(zapcore.DebugLevel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := cluster.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	b := cluster.Bus
+
+	// register alert
+	alert := alerts.Alert{
+		ID:       frand.Entropy256(),
+		Severity: alerts.SeverityCritical,
+		Message:  "test",
+		Data: map[string]interface{}{
+			"origin": "test",
+		},
+		Timestamp: time.Now(),
+	}
+	if err := b.RegisterAlert(context.Background(), alert); err != nil {
+		t.Fatal(err)
+	}
+	findAlert := func(id types.Hash256) *alerts.Alert {
+		t.Helper()
+		alerts, err := b.Alerts()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, alert := range alerts {
+			if alert.ID == id {
+				return &alert
+			}
+		}
+		return nil
+	}
+	foundAlert := findAlert(alert.ID)
+	if foundAlert == nil {
+		t.Fatal("alert not found")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cmp.Equal(*foundAlert, alert) {
+		t.Fatal("alert mismatch", cmp.Diff(*foundAlert, alert))
+	}
+
+	// dismiss alert
+	err = b.DismissAlerts(context.Background(), alert.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundAlert = findAlert(alert.ID)
+	if foundAlert != nil {
+		t.Fatal("alert found")
 	}
 }

@@ -9,16 +9,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"gitlab.com/NebulousLabs/encoding"
 	"go.sia.tech/core/consensus"
 	"go.sia.tech/core/types"
+	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/autopilot"
 	"go.sia.tech/renterd/bus"
+	"go.sia.tech/renterd/config"
 	"go.sia.tech/renterd/stores"
 	"go.sia.tech/renterd/wallet"
+	"go.sia.tech/renterd/webhooks"
 	"go.sia.tech/renterd/worker"
 	"go.sia.tech/siad/modules"
 	mconsensus "go.sia.tech/siad/modules/consensus"
@@ -32,43 +34,23 @@ import (
 	"gorm.io/gorm"
 )
 
-type WorkerConfig struct {
-	ID                       string
-	AllowPrivateIPs          bool
-	BusFlushInterval         time.Duration
-	ContractLockTimeout      time.Duration
-	DownloadOverdriveTimeout time.Duration
-	UploadOverdriveTimeout   time.Duration
-	DownloadMaxOverdrive     uint64
-	UploadMaxOverdrive       uint64
-}
-
 type BusConfig struct {
-	Bootstrap       bool
-	GatewayAddr     string
-	Network         *consensus.Network
-	Miner           *Miner
-	PersistInterval time.Duration
-	UsedUTXOExpiry  time.Duration
-
+	config.Bus
+	Network        *consensus.Network
+	Miner          *Miner
 	DBLoggerConfig stores.LoggerConfig
 	DBDialector    gorm.Dialector
 }
 
 type AutopilotConfig struct {
-	ID                             string
-	AccountsRefillInterval         time.Duration
-	Heartbeat                      time.Duration
-	MigrationHealthCutoff          float64
-	RevisionSubmissionBuffer       uint64
-	ScannerInterval                time.Duration
-	ScannerBatchSize               uint64
-	ScannerMinRecentFailures       uint64
-	ScannerNumThreads              uint64
-	MigratorParallelSlabsPerWorker uint64
+	config.Autopilot
+	ID string
 }
 
-type ShutdownFn = func(context.Context) error
+type (
+	RunFn      = func() error
+	ShutdownFn = func(context.Context) error
+)
 
 func convertToSiad(core types.EncoderTo, siad encoding.SiaUnmarshaler) {
 	var buf bytes.Buffer
@@ -246,12 +228,21 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 		dbConn = stores.NewSQLiteConnection(filepath.Join(dbDir, "db.sqlite"))
 	}
 
+	alertsMgr := alerts.NewManager()
 	sqlLogger := stores.NewSQLLogger(l.Named("db"), cfg.DBLoggerConfig)
 	walletAddr := wallet.StandardAddress(seed.PublicKey())
-	sqlStore, ccid, err := stores.NewSQLStore(dbConn, true, cfg.PersistInterval, walletAddr, sqlLogger)
+	sqlStoreDir := filepath.Join(dir, "partial_slabs")
+	sqlStore, ccid, err := stores.NewSQLStore(dbConn, alerts.WithOrigin(alertsMgr, "bus"), sqlStoreDir, true, cfg.PersistInterval, walletAddr, cfg.SlabBufferCompletionThreshold, l.Sugar(), sqlLogger)
 	if err != nil {
 		return nil, nil, err
 	}
+	hooksMgr, err := webhooks.NewManager(l.Named("webhooks").Sugar(), sqlStore)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Hook up webhooks to alerts.
+	alertsMgr.RegisterWebhookBroadcaster(hooksMgr)
 
 	cancelSubscribe := make(chan struct{})
 	go func() {
@@ -271,7 +262,8 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 		}
 	}()
 
-	w := wallet.NewSingleAddressWallet(seed, sqlStore, cfg.UsedUTXOExpiry)
+	w := wallet.NewSingleAddressWallet(seed, sqlStore, cfg.UsedUTXOExpiry, zap.NewNop().Sugar())
+	tp.TransactionPoolSubscribe(w)
 
 	if m := cfg.Miner; m != nil {
 		if err := cs.ConsensusSetSubscribe(m, ccid, nil); err != nil {
@@ -280,13 +272,13 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 		tp.TransactionPoolSubscribe(m)
 	}
 
-	b, err := bus.New(syncer{g, tp}, chainManager{cs: cs, network: cfg.Network}, txpool{tp}, w, sqlStore, sqlStore, sqlStore, sqlStore, sqlStore, l)
+	b, err := bus.New(syncer{g, tp}, alertsMgr, hooksMgr, chainManager{cs: cs, network: cfg.Network}, txpool{tp}, w, sqlStore, sqlStore, sqlStore, sqlStore, sqlStore, l)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	shutdownFn := func(ctx context.Context) error {
-		return joinErrors([]error{
+		return errors.Join(
 			func() error {
 				close(cancelSubscribe)
 				return nil
@@ -296,12 +288,12 @@ func NewBus(cfg BusConfig, dir string, seed types.PrivateKey, l *zap.Logger) (ht
 			tp.Close(),
 			b.Shutdown(ctx),
 			sqlStore.Close(),
-		})
+		)
 	}
 	return b.Handler(), shutdownFn, nil
 }
 
-func NewWorker(cfg WorkerConfig, b worker.Bus, seed types.PrivateKey, l *zap.Logger) (http.Handler, ShutdownFn, error) {
+func NewWorker(cfg config.Worker, b worker.Bus, seed types.PrivateKey, l *zap.Logger) (http.Handler, ShutdownFn, error) {
 	workerKey := blake2b.Sum256(append([]byte("worker"), seed...))
 	w, err := worker.New(workerKey, cfg.ID, b, cfg.ContractLockTimeout, cfg.BusFlushInterval, cfg.DownloadOverdriveTimeout, cfg.UploadOverdriveTimeout, cfg.DownloadMaxOverdrive, cfg.UploadMaxOverdrive, cfg.AllowPrivateIPs, l)
 	if err != nil {
@@ -311,8 +303,8 @@ func NewWorker(cfg WorkerConfig, b worker.Bus, seed types.PrivateKey, l *zap.Log
 	return w.Handler(), w.Shutdown, nil
 }
 
-func NewAutopilot(cfg AutopilotConfig, b autopilot.Bus, workers []autopilot.Worker, l *zap.Logger) (http.Handler, func() error, ShutdownFn, error) {
-	ap, err := autopilot.New(cfg.ID, b, workers, l, cfg.Heartbeat, cfg.ScannerInterval, cfg.ScannerBatchSize, cfg.ScannerMinRecentFailures, cfg.ScannerNumThreads, cfg.MigrationHealthCutoff, cfg.AccountsRefillInterval, cfg.RevisionSubmissionBuffer, cfg.MigratorParallelSlabsPerWorker)
+func NewAutopilot(cfg AutopilotConfig, b autopilot.Bus, workers []autopilot.Worker, l *zap.Logger) (http.Handler, RunFn, ShutdownFn, error) {
+	ap, err := autopilot.New(cfg.ID, b, workers, l, cfg.Heartbeat, cfg.ScannerInterval, cfg.ScannerBatchSize, cfg.ScannerMinRecentFailures, cfg.ScannerNumThreads, cfg.MigrationHealthCutoff, cfg.AccountsRefillInterval, cfg.RevisionSubmissionBuffer, cfg.MigratorParallelSlabsPerWorker, cfg.RevisionBroadcastInterval)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -357,26 +349,4 @@ func NewLogger(path string) (*zap.Logger, func(context.Context) error, error) {
 		closeFn()
 		return nil
 	}, nil
-}
-
-func joinErrors(errs []error) error {
-	filtered := errs[:0]
-	for _, err := range errs {
-		if err != nil {
-			filtered = append(filtered, err)
-		}
-	}
-
-	switch len(filtered) {
-	case 0:
-		return nil
-	case 1:
-		return filtered[0]
-	default:
-		strs := make([]string, len(filtered))
-		for i := range strs {
-			strs[i] = filtered[i].Error()
-		}
-		return errors.New(strings.Join(strs, ";"))
-	}
 }

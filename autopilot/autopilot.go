@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -16,10 +17,12 @@ import (
 	"go.sia.tech/jape"
 	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
+	"go.sia.tech/renterd/build"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
 	"go.sia.tech/renterd/tracing"
 	"go.sia.tech/renterd/wallet"
+	"go.sia.tech/renterd/webhooks"
 	"go.uber.org/zap"
 	"lukechampine.com/frand"
 
@@ -29,6 +32,9 @@ import (
 )
 
 type Bus interface {
+	webhooks.Broadcaster
+	alerts.Alerter
+
 	// Accounts
 	Account(ctx context.Context, id rhpv3.Account, host types.PublicKey) (account api.Account, err error)
 	Accounts(ctx context.Context) (accounts []api.Account, err error)
@@ -38,10 +44,8 @@ type Bus interface {
 	UpdateAutopilot(ctx context.Context, autopilot api.Autopilot) error
 
 	// wallet
-	WalletAddress(ctx context.Context) (types.Address, error)
-	WalletBalance(ctx context.Context) (types.Currency, error)
+	Wallet(ctx context.Context) (api.WalletResponse, error)
 	WalletDiscard(ctx context.Context, txn types.Transaction) error
-	WalletFund(ctx context.Context, txn *types.Transaction, amount types.Currency) ([]types.Hash256, []types.Transaction, error)
 	WalletOutputs(ctx context.Context) (resp []wallet.SiacoinElement, err error)
 	WalletPending(ctx context.Context) (resp []types.Transaction, err error)
 	WalletRedistribute(ctx context.Context, outputs int, amount types.Currency) (id types.TransactionID, err error)
@@ -51,7 +55,6 @@ type Bus interface {
 	Hosts(ctx context.Context, offset, limit int) ([]hostdb.Host, error)
 	SearchHosts(ctx context.Context, filterMode, addressContains string, keyIn []types.PublicKey, offset, limit int) ([]hostdb.Host, error)
 	HostsForScanning(ctx context.Context, maxLastScan time.Time, offset, limit int) ([]hostdb.HostAddress, error)
-	RecordInteractions(ctx context.Context, interactions []hostdb.Interaction) error
 	RemoveOfflineHosts(ctx context.Context, minRecentScanFailures uint64, maxDowntime time.Duration) (uint64, error)
 
 	// contracts
@@ -72,6 +75,8 @@ type Bus interface {
 	ConsensusState(ctx context.Context) (api.ConsensusState, error)
 
 	// objects
+	ObjectsBySlabKey(ctx context.Context, key object.EncryptionKey) (objects []api.ObjectMetadata, err error)
+	RefreshHealth(ctx context.Context) error
 	Slab(ctx context.Context, key object.EncryptionKey) (object.Slab, error)
 	SlabsForMigration(ctx context.Context, healthCutoff float64, set string, limit int) ([]api.UnhealthySlab, error)
 
@@ -83,6 +88,7 @@ type Bus interface {
 
 type Worker interface {
 	Account(ctx context.Context, hostKey types.PublicKey) (rhpv3.Account, error)
+	RHPBroadcast(ctx context.Context, fcid types.FileContractID) (err error)
 	Contracts(ctx context.Context, hostTimeout time.Duration) (api.ContractsResponse, error)
 	ID(ctx context.Context) (string, error)
 	MigrateSlab(ctx context.Context, s object.Slab, set string) error
@@ -97,29 +103,27 @@ type Worker interface {
 type Autopilot struct {
 	id string
 
+	alerts  alerts.Alerter
 	bus     Bus
 	logger  *zap.SugaredLogger
 	workers *workerPool
 
-	mu         sync.Mutex
-	configured bool
-	synced     bool
-	state      state
+	mu    sync.Mutex
+	state state
 
-	alerts *alerts.Manager
-	a      *accounts
-	c      *contractor
-	m      *migrator
-	s      *scanner
+	a *accounts
+	c *contractor
+	m *migrator
+	s *scanner
 
 	tickerDuration time.Duration
 	wg             sync.WaitGroup
 
-	startStopMu  sync.Mutex
-	runningSince time.Time
-	stopChan     chan struct{}
-	ticker       *time.Ticker
-	triggerChan  chan bool
+	startStopMu sync.Mutex
+	startTime   time.Time
+	stopChan    chan struct{}
+	ticker      *time.Ticker
+	triggerChan chan bool
 }
 
 // state holds a bunch of variables that are used by the autopilot and updated
@@ -168,14 +172,12 @@ func (wp *workerPool) withWorkers(workerFunc func([]Worker)) {
 // Handler returns an HTTP handler that serves the autopilot api.
 func (ap *Autopilot) Handler() http.Handler {
 	return jape.Mux(tracing.TracedRoutes(api.DefaultAutopilotID, map[string]jape.Handler{
-		"GET    /alerts":         ap.handleGETAlerts,
-		"POST   /alerts/dismiss": ap.handlePOSTAlertsDismiss,
-		"GET    /config":         ap.configHandlerGET,
-		"PUT    /config":         ap.configHandlerPUT,
-		"POST   /debug/trigger":  ap.triggerHandlerPOST,
-		"POST   /hosts":          ap.hostsHandlerPOST,
-		"GET    /host/:hostKey":  ap.hostHandlerGET,
-		"GET    /status":         ap.statusHandlerGET,
+		"GET    /config":        ap.configHandlerGET,
+		"PUT    /config":        ap.configHandlerPUT,
+		"POST   /debug/trigger": ap.triggerHandlerPOST,
+		"POST   /hosts":         ap.hostsHandlerPOST,
+		"GET    /host/:hostKey": ap.hostHandlerGET,
+		"GET    /state":         ap.stateHandlerGET,
 	}))
 }
 
@@ -185,7 +187,7 @@ func (ap *Autopilot) Run() error {
 		ap.startStopMu.Unlock()
 		return errors.New("already running")
 	}
-	ap.runningSince = time.Now()
+	ap.startTime = time.Now()
 	ap.stopChan = make(chan struct{})
 	ap.triggerChan = make(chan bool)
 	ap.ticker = time.NewTicker(ap.tickerDuration)
@@ -193,18 +195,6 @@ func (ap *Autopilot) Run() error {
 	ap.wg.Add(1)
 	defer ap.wg.Done()
 	ap.startStopMu.Unlock()
-
-	// block until the autopilot is configured
-	if !ap.blockUntilConfigured() {
-		ap.logger.Error("autopilot stopped before it was able to confirm it was configured in the bus")
-		return nil
-	}
-
-	// block until consensus is synced
-	if !ap.blockUntilSynced() {
-		ap.logger.Error("autopilot stopped before consensus was synced")
-		return nil
-	}
 
 	// fetch satellite config
 	cfg, err := satellite.StaticSatellite.Config()
@@ -229,10 +219,38 @@ func (ap *Autopilot) Run() error {
 	var launchAccountRefillsOnce sync.Once
 	for {
 		ap.logger.Info("autopilot iteration starting")
+		tickerFired := make(chan struct{})
 		ap.workers.withWorker(func(w Worker) {
 			defer ap.logger.Info("autopilot iteration ended")
 			ctx, span := tracing.Tracer.Start(context.Background(), "Autopilot Iteration")
 			defer span.End()
+
+			// initiate a host scan - no need to be synced or configured for scanning
+			ap.s.tryUpdateTimeout()
+			ap.s.tryPerformHostScan(ctx, w, forceScan)
+
+			// reset forceScan
+			forceScan = false
+
+			// block until the autopilot is configured
+			if configured, interrupted := ap.blockUntilConfigured(ap.ticker.C); !configured {
+				if interrupted {
+					close(tickerFired)
+					return
+				}
+				ap.logger.Error("autopilot stopped before it was able to confirm it was configured in the bus")
+				return
+			}
+
+			// block until consensus is synced
+			if synced, interrupted := ap.blockUntilSynced(ap.ticker.C); !synced {
+				if interrupted {
+					close(tickerFired)
+					return
+				}
+				ap.logger.Error("autopilot stopped before consensus was synced")
+				return
+			}
 
 			// Trace/Log worker id chosen for this maintenance iteration.
 			workerID, err := w.ID(ctx)
@@ -252,16 +270,6 @@ func (ap *Autopilot) Run() error {
 			err = ap.updateState(ctx)
 			if err != nil {
 				ap.logger.Errorf("failed to update state, err: %v", err)
-				return
-			}
-
-			// initiate a host scan
-			ap.s.tryUpdateTimeout()
-			ap.s.tryPerformHostScan(ctx, w, forceScan)
-
-			// do not continue if we are not synced
-			if !ap.isSynced() {
-				ap.logger.Debug("iteration interrupted, consensus not synced")
 				return
 			}
 
@@ -320,7 +328,7 @@ func (ap *Autopilot) Run() error {
 			ap.logger.Info("autopilot iteration triggered")
 			ap.ticker.Reset(ap.tickerDuration)
 		case <-ap.ticker.C:
-			forceScan = false
+		case <-tickerFired:
 		}
 	}
 }
@@ -335,7 +343,7 @@ func (ap *Autopilot) Shutdown(_ context.Context) error {
 		close(ap.stopChan)
 		close(ap.triggerChan)
 		ap.wg.Wait()
-		ap.runningSince = time.Time{}
+		ap.startTime = time.Time{}
 	}
 	return nil
 }
@@ -358,60 +366,58 @@ func (ap *Autopilot) Trigger(forceScan bool) bool {
 	}
 }
 
+func (ap *Autopilot) StartTime() time.Time {
+	ap.startStopMu.Lock()
+	defer ap.startStopMu.Unlock()
+	return ap.startTime
+}
+
 func (ap *Autopilot) Uptime() (dur time.Duration) {
 	ap.startStopMu.Lock()
 	defer ap.startStopMu.Unlock()
 	if ap.isRunning() {
-		dur = time.Since(ap.runningSince)
+		dur = time.Since(ap.startTime)
 	}
 	return
 }
 
-func (ap *Autopilot) blockUntilConfigured() bool {
+func (ap *Autopilot) blockUntilConfigured(interrupt <-chan time.Time) (configured, interrupted bool) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	var once sync.Once
 
 	for {
-		select {
-		case <-ap.stopChan:
-			return false
-		case <-ticker.C:
-		}
-
 		// try and fetch the config
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_, err := ap.bus.Autopilot(ctx, api.DefaultAutopilotID)
+		_, err := ap.bus.Autopilot(ctx, ap.id)
 		cancel()
 
 		// if the config was not found, or we were unable to fetch it, keep blocking
 		if err != nil && strings.Contains(err.Error(), api.ErrAutopilotNotFound.Error()) {
 			once.Do(func() { ap.logger.Info("autopilot is waiting to be configured...") })
-			continue
 		} else if err != nil {
 			ap.logger.Errorf("autopilot is unable to fetch its configuration from the bus, err: %v", err)
-			continue
 		}
-
-		ap.mu.Lock()
-		ap.configured = true
-		ap.mu.Unlock()
-		return true
+		if err != nil {
+			select {
+			case <-ap.stopChan:
+				return false, false
+			case <-interrupt:
+				return false, true
+			case <-ticker.C:
+				continue
+			}
+		}
+		return true, false
 	}
 }
 
-func (ap *Autopilot) blockUntilSynced() bool {
+func (ap *Autopilot) blockUntilSynced(interrupt <-chan time.Time) (synced, interrupted bool) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for {
-		select {
-		case <-ap.stopChan:
-			return false
-		case <-ticker.C:
-		}
-
 		// try and fetch consensus
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		cs, err := ap.bus.ConsensusState(ctx)
@@ -420,32 +426,23 @@ func (ap *Autopilot) blockUntilSynced() bool {
 		// if an error occurred, or if we're not synced, we continue
 		if err != nil {
 			ap.logger.Errorf("failed to get consensus state, err: %v", err)
-			continue
-		} else if !cs.Synced {
-			continue
 		}
-
-		ap.mu.Lock()
-		ap.synced = true
-		ap.mu.Unlock()
-		return true
+		if err != nil || !cs.Synced {
+			select {
+			case <-ap.stopChan:
+				return false, false
+			case <-interrupt:
+				return false, true
+			case <-ticker.C:
+				continue
+			}
+		}
+		return true, false
 	}
 }
 
-func (ap *Autopilot) isConfigured() bool {
-	ap.mu.Lock()
-	defer ap.mu.Unlock()
-	return ap.configured
-}
-
-func (ap *Autopilot) isSynced() bool {
-	ap.mu.Lock()
-	defer ap.mu.Unlock()
-	return ap.synced
-}
-
 func (ap *Autopilot) isRunning() bool {
-	return !ap.runningSince.IsZero()
+	return !ap.startTime.IsZero()
 }
 
 func (ap *Autopilot) updateState(ctx context.Context) error {
@@ -480,10 +477,11 @@ func (ap *Autopilot) updateState(ctx context.Context) error {
 	}
 
 	// fetch our wallet address
-	address, err := ap.bus.WalletAddress(ctx)
+	wi, err := ap.bus.Wallet(ctx)
 	if err != nil {
 		return fmt.Errorf("could not fetch wallet address, err: %v", err)
 	}
+	address := wi.Address
 
 	// update current period if necessary
 	if cs.Synced {
@@ -527,21 +525,6 @@ func (ap *Autopilot) isStopped() bool {
 	default:
 		return false
 	}
-}
-
-func (ap *Autopilot) handleGETAlerts(c jape.Context) {
-	c.Encode(ap.alerts.Active())
-}
-
-func (ap *Autopilot) handlePOSTAlertsDismiss(c jape.Context) {
-	var ids []types.Hash256
-	if c.Decode(&ids) != nil {
-		return
-	} else if len(ids) == 0 {
-		c.Error(errors.New("no alerts to dismiss"), http.StatusBadRequest)
-		return
-	}
-	ap.alerts.Dismiss(ids...)
 }
 
 func (ap *Autopilot) configHandlerGET(jc jape.Context) {
@@ -594,9 +577,9 @@ func (ap *Autopilot) triggerHandlerPOST(jc jape.Context) {
 }
 
 // New initializes an Autopilot.
-func New(id string, bus Bus, workers []Worker, logger *zap.Logger, heartbeat time.Duration, scannerScanInterval time.Duration, scannerBatchSize, scannerMinRecentFailures, scannerNumThreads uint64, migrationHealthCutoff float64, accountsRefillInterval time.Duration, revisionSubmissionBuffer, migratorParallelSlabsPerWorker uint64) (*Autopilot, error) {
+func New(id string, bus Bus, workers []Worker, logger *zap.Logger, heartbeat time.Duration, scannerScanInterval time.Duration, scannerBatchSize, scannerMinRecentFailures, scannerNumThreads uint64, migrationHealthCutoff float64, accountsRefillInterval time.Duration, revisionSubmissionBuffer, migratorParallelSlabsPerWorker uint64, revisionBroadcastInterval time.Duration) (*Autopilot, error) {
 	ap := &Autopilot{
-		alerts:  alerts.NewManager(),
+		alerts:  alerts.WithOrigin(bus, fmt.Sprintf("autopilot.%s", id)),
 		id:      id,
 		bus:     bus,
 		logger:  logger.Sugar().Named(api.DefaultAutopilotID),
@@ -618,7 +601,7 @@ func New(id string, bus Bus, workers []Worker, logger *zap.Logger, heartbeat tim
 	}
 
 	ap.s = scanner
-	ap.c = newContractor(ap, revisionSubmissionBuffer)
+	ap.c = newContractor(ap, revisionSubmissionBuffer, revisionBroadcastInterval)
 	ap.m = newMigrator(ap, migrationHealthCutoff, migratorParallelSlabsPerWorker)
 	ap.a = newAccounts(ap, ap.bus, ap.bus, ap.workers, ap.logger, accountsRefillInterval)
 
@@ -638,17 +621,31 @@ func (ap *Autopilot) hostHandlerGET(jc jape.Context) {
 	jc.Encode(host)
 }
 
-func (ap *Autopilot) statusHandlerGET(jc jape.Context) {
+func (ap *Autopilot) stateHandlerGET(jc jape.Context) {
 	migrating, mLastStart := ap.m.Status()
 	scanning, sLastStart := ap.s.Status()
-	jc.Encode(api.AutopilotStatusResponse{
-		Configured:         ap.isConfigured(),
+	_, err := ap.bus.Autopilot(jc.Request.Context(), ap.id)
+	if err != nil && !strings.Contains(err.Error(), api.ErrAutopilotNotFound.Error()) {
+		jc.Error(err, http.StatusInternalServerError)
+		return
+	}
+
+	jc.Encode(api.AutopilotStateResponse{
+		Configured:         err == nil,
 		Migrating:          migrating,
 		MigratingLastStart: api.ParamTime(mLastStart),
 		Scanning:           scanning,
 		ScanningLastStart:  api.ParamTime(sLastStart),
-		Synced:             ap.isSynced(),
 		UptimeMS:           api.ParamDuration(ap.Uptime()),
+
+		StartTime: ap.StartTime(),
+		BuildState: api.BuildState{
+			Network:   build.NetworkName(),
+			Version:   build.Version(),
+			Commit:    build.Commit(),
+			OS:        runtime.GOOS,
+			BuildTime: build.BuildTime(),
+		},
 	})
 }
 

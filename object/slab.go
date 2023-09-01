@@ -21,15 +21,16 @@ type Sector struct {
 // be used for each Slab, and should not be the same key used for the parent
 // Object.
 type Slab struct {
+	Health    float64       `json:"health"`
 	Key       EncryptionKey `json:"key"`
 	MinShards uint8         `json:"minShards"`
 	Shards    []Sector      `json:"shards"`
 }
 
 type PartialSlab struct {
-	MinShards   uint8  `json:"minShards"`
-	TotalShards uint8  `json:"totalShards"`
-	Data        []byte `json:"data"`
+	Key    EncryptionKey `json:"key"`
+	Offset uint32        `json:"offset"`
+	Length uint32        `json:"length"`
 }
 
 // NewSlab returns a new slab for the shards.

@@ -169,22 +169,19 @@ func (t *transportV3) DialStream(ctx context.Context) (*streamV3, error) {
 
 // transportPoolV3 is a pool of rhpv3.Transports which allows for reusing them.
 type transportPoolV3 struct {
-	recordInteractions func([]hostdb.Interaction)
-
 	mu   sync.Mutex
 	pool map[string]*transportV3
 }
 
 func newTransportPoolV3(w *worker) *transportPoolV3 {
 	return &transportPoolV3{
-		recordInteractions: w.recordInteractions,
-		pool:               make(map[string]*transportV3),
+		pool: make(map[string]*transportV3),
 	}
 }
 
 func dialTransport(ctx context.Context, siamuxAddr string, hostKey types.PublicKey) (*rhpv3.Transport, error) {
 	// Dial host.
-	conn, err := dial(ctx, siamuxAddr, hostKey)
+	conn, err := dial(ctx, siamuxAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +206,7 @@ func dialTransport(ctx context.Context, siamuxAddr string, hostKey types.PublicK
 func (p *transportPoolV3) withTransportV3(ctx context.Context, hostKey types.PublicKey, siamuxAddr string, fn func(context.Context, *transportV3) error) (err error) {
 	var mr ephemeralMetricsRecorder
 	defer func() {
-		p.recordInteractions(mr.interactions())
+		// TODO: record metrics
 	}()
 	ctx = metrics.WithRecorder(ctx, &mr)
 
@@ -625,7 +622,7 @@ func (h *host) DownloadSector(ctx context.Context, w io.Writer, root types.Hash2
 
 			var refund types.Currency
 			payment := rhpv3.PayByEphemeralAccount(h.acc.id, cost, pt.HostBlockHeight+defaultWithdrawalExpiryBlocks, h.accountKey)
-			cost, refund, err = RPCReadSector(ctx, t, w, pt, &payment, offset, length, root, true)
+			cost, refund, err = RPCReadSector(ctx, t, w, pt, &payment, offset, length, root)
 			amount = cost.Sub(refund)
 			return err
 		})
@@ -659,7 +656,7 @@ func (h *host) UploadSector(ctx context.Context, sector *[rhpv2.SectorSize]byte,
 
 	var cost types.Currency
 	err = h.transportPool.withTransportV3(ctx, h.HostKey(), h.siamuxAddr, func(ctx context.Context, t *transportV3) error {
-		root, cost, err = RPCAppendSector(ctx, t, h.renterKey, pt, rev, &payment, sector)
+		root, cost, err = RPCAppendSector(ctx, t, h.renterKey, pt, &rev, &payment, sector)
 		return err
 	})
 	if err != nil {
@@ -674,18 +671,37 @@ func (h *host) UploadSector(ctx context.Context, sector *[rhpv2.SectorSize]byte,
 	return root, err
 }
 
+// padBandwitdh pads the bandwidth to the next multiple of 1460 bytes.  1460
+// bytes is the maximum size of a TCP packet when using IPv4.
+// TODO: once hostd becomes the only host implementation we can simplify this.
+func padBandwidth(pt rhpv3.HostPriceTable, rc rhpv3.ResourceCost) rhpv3.ResourceCost {
+	padCost := func(cost, paddingSize types.Currency) types.Currency {
+		if paddingSize.IsZero() {
+			return cost // might happen if bandwidth is free
+		}
+		return cost.Add(paddingSize).Sub(types.NewCurrency64(1)).Div(paddingSize).Mul(paddingSize)
+	}
+	minPacketSize := uint64(1460)
+	minIngress := pt.UploadBandwidthCost.Mul64(minPacketSize)
+	minEgress := pt.DownloadBandwidthCost.Mul64(3 * minPacketSize)
+	rc.Ingress = padCost(rc.Ingress, minIngress)
+	rc.Egress = padCost(rc.Egress, minEgress)
+	return rc
+}
+
 // readSectorCost returns an overestimate for the cost of reading a sector from a host
 func readSectorCost(pt rhpv3.HostPriceTable, length uint64) (types.Currency, error) {
 	rc := pt.BaseCost()
 	rc = rc.Add(pt.ReadSectorCost(length))
+	rc = padBandwidth(pt, rc)
 	cost, _ := rc.Total()
 
-	// overestimate the cost by 5%
-	cost, overflow := cost.Mul64WithOverflow(21)
+	// overestimate the cost by 10%
+	cost, overflow := cost.Mul64WithOverflow(11)
 	if overflow {
 		return types.ZeroCurrency, errors.New("overflow occurred while adding leeway to read sector cost")
 	}
-	return cost.Div64(20), nil
+	return cost.Div64(10), nil
 }
 
 // uploadSectorCost returns an overestimate for the cost of uploading a sector
@@ -698,19 +714,15 @@ func uploadSectorCost(pt rhpv3.HostPriceTable, windowEnd uint64) (cost, collater
 
 	rc := pt.BaseCost()
 	rc = rc.Add(pt.AppendSectorCost(windowEnd - pt.HostBlockHeight))
+	rc = padBandwidth(pt, rc)
 	cost, collateral = rc.Total()
 
-	// overestimate the cost by 5%
-	// if a Satellite is used, increase by 25% instead to prevent low budget errors TODO
-	factor := uint64(21)
-	/*if cfg.Enabled {
-		factor = 25
-	}*/
-	cost, overflow := cost.Mul64WithOverflow(factor)
+	// overestimate the cost by 10%
+	cost, overflow := cost.Mul64WithOverflow(11)
 	if overflow {
 		return types.ZeroCurrency, types.ZeroCurrency, types.ZeroCurrency, errors.New("overflow occurred while adding leeway to read sector cost")
 	}
-	return cost.Div64(20), collateral, rc.Storage, nil
+	return cost.Div64(10), collateral, rc.Storage, nil
 }
 
 // priceTableValidityLeeway is the number of time before the actual expiry of a
@@ -1083,7 +1095,7 @@ func RPCLatestRevision(ctx context.Context, t *transportV3, contractID types.Fil
 }
 
 // RPCReadSector calls the ExecuteProgram RPC with a ReadSector instruction.
-func RPCReadSector(ctx context.Context, t *transportV3, w io.Writer, pt rhpv3.HostPriceTable, payment rhpv3.PaymentMethod, offset, length uint32, merkleRoot types.Hash256, merkleProof bool) (cost, refund types.Currency, err error) {
+func RPCReadSector(ctx context.Context, t *transportV3, w io.Writer, pt rhpv3.HostPriceTable, payment rhpv3.PaymentMethod, offset, length uint32, merkleRoot types.Hash256) (cost, refund types.Currency, err error) {
 	defer wrapErr(&err, "ReadSector")
 	s, err := t.DialStream(ctx)
 	if err != nil {
@@ -1194,7 +1206,7 @@ func RPCReadRegistry(ctx context.Context, t *transportV3, payment rhpv3.PaymentM
 	}, nil
 }
 
-func RPCAppendSector(ctx context.Context, t *transportV3, renterKey types.PrivateKey, pt rhpv3.HostPriceTable, rev types.FileContractRevision, payment rhpv3.PaymentMethod, sector *[rhpv2.SectorSize]byte) (sectorRoot types.Hash256, cost types.Currency, err error) {
+func RPCAppendSector(ctx context.Context, t *transportV3, renterKey types.PrivateKey, pt rhpv3.HostPriceTable, rev *types.FileContractRevision, payment rhpv3.PaymentMethod, sector *[rhpv2.SectorSize]byte) (sectorRoot types.Hash256, cost types.Currency, err error) {
 	defer wrapErr(&err, "AppendSector")
 
 	// sanity check revision first
@@ -1291,7 +1303,7 @@ func RPCAppendSector(ctx context.Context, t *transportV3, renterKey types.Privat
 	}
 
 	// finalize the program with a new revision.
-	newRevision := rev
+	newRevision := *rev
 	newValid, newMissed, err := updateRevisionOutputs(&newRevision, types.ZeroCurrency, collateral)
 	if err != nil {
 		return types.Hash256{}, types.ZeroCurrency, err
@@ -1328,6 +1340,8 @@ func RPCAppendSector(ctx context.Context, t *transportV3, renterKey types.Privat
 		err = errFinalise
 		return
 	}
+
+	*rev = newRevision
 	return
 }
 

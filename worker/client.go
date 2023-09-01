@@ -15,7 +15,6 @@ import (
 	rhpv3 "go.sia.tech/core/rhp/v3"
 	"go.sia.tech/core/types"
 	"go.sia.tech/jape"
-	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
@@ -26,19 +25,20 @@ type Client struct {
 	c jape.Client
 }
 
-// Alerts fetches the active alerts from the bus.
-func (c *Client) Alerts() (alerts []alerts.Alert, err error) {
-	err = c.c.GET("/alerts", &alerts)
+func (c *Client) ID(ctx context.Context) (id string, err error) {
+	err = c.c.WithContext(ctx).GET("/id", &id)
 	return
 }
 
-// DismissAlerts dimisses the alerts with the given IDs.
-func (c *Client) DismissAlerts(ids ...types.Hash256) error {
-	return c.c.POST("/alerts/dismiss", ids, nil)
+// RHPBroadcast broadcasts the latest revision for a contract.
+func (c *Client) RHPBroadcast(ctx context.Context, fcid types.FileContractID) (err error) {
+	err = c.c.WithContext(ctx).POST(fmt.Sprintf("/rhp/contract/%s/broadcast", fcid), nil, nil)
+	return
 }
 
-func (c *Client) ID(ctx context.Context) (id string, err error) {
-	err = c.c.WithContext(ctx).GET("/id", &id)
+// RHPContractRoots fetches the roots of the contract with given id.
+func (c *Client) RHPContractRoots(ctx context.Context, fcid types.FileContractID) (roots []types.Hash256, err error) {
+	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/rhp/contract/%s/roots", fcid), &roots)
 	return
 }
 
@@ -140,6 +140,12 @@ func (c *Client) RHPUpdateRegistry(ctx context.Context, hostKey types.PublicKey,
 		RegistryValue: value,
 	}
 	err = c.c.WithContext(ctx).POST("/rhp/registry/update", req, nil)
+	return
+}
+
+// State returns the current state of the worker.
+func (c *Client) State() (state api.WorkerStateResponse, err error) {
+	err = c.c.GET("/state", &state)
 	return
 }
 

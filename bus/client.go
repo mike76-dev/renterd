@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
 	"go.sia.tech/renterd/wallet"
+	"go.sia.tech/renterd/webhooks"
 )
 
 // A Client provides methods for interacting with a renterd API server.
@@ -35,8 +37,44 @@ func (c *Client) Alerts() (alerts []alerts.Alert, err error) {
 }
 
 // DismissAlerts dimisses the alerts with the given IDs.
-func (c *Client) DismissAlerts(ids ...types.Hash256) error {
-	return c.c.POST("/alerts/dismiss", ids, nil)
+func (c *Client) DismissAlerts(ctx context.Context, ids ...types.Hash256) error {
+	return c.c.WithContext(ctx).POST("/alerts/dismiss", ids, nil)
+}
+
+// RegisterAlert dimisses the alerts with the given IDs.
+func (c *Client) RegisterAlert(ctx context.Context, alert alerts.Alert) error {
+	return c.c.WithContext(ctx).POST("/alerts/register", alert, nil)
+}
+
+// RegisterWebhook registers a new webhook for the given URL.
+func (c *Client) RegisterWebhook(ctx context.Context, url, module, event string) error {
+	err := c.c.WithContext(ctx).POST("/webhooks", webhooks.Webhook{
+		Event:  event,
+		Module: module,
+		URL:    url,
+	}, nil)
+	return err
+}
+
+// BroadcastAction broadcasts an action that triggers a webhook.
+func (c *Client) BroadcastAction(ctx context.Context, action webhooks.Event) error {
+	err := c.c.WithContext(ctx).POST("/webhooks/action", action, nil)
+	return err
+}
+
+// DeleteWebhook deletes the webhook with the given ID.
+func (c *Client) DeleteWebhook(ctx context.Context, url, module, event string) error {
+	return c.c.POST("/webhook/delete", webhooks.Webhook{
+		URL:    url,
+		Module: module,
+		Event:  event,
+	}, nil)
+}
+
+// Webhooks returns all webhooks currently registered.
+func (c *Client) Webhooks(ctx context.Context) (resp api.WebHookResponse, err error) {
+	err = c.c.WithContext(ctx).GET("/webhooks", &resp)
+	return
 }
 
 // Autopilots returns all autopilots in the autopilots store.
@@ -105,6 +143,12 @@ func (c *Client) BroadcastTransaction(ctx context.Context, txns []types.Transact
 	return c.c.WithContext(ctx).POST("/txpool/broadcast", txns, nil)
 }
 
+// Wallet calls the /wallet endpoint on the bus.
+func (c *Client) Wallet(ctx context.Context) (resp api.WalletResponse, err error) {
+	err = c.c.WithContext(ctx).GET("/wallet", &resp)
+	return
+}
+
 // WalletBalance returns the current wallet balance.
 func (c *Client) WalletBalance(ctx context.Context) (bal types.Currency, err error) {
 	err = c.c.WithContext(ctx).GET("/wallet/balance", &bal)
@@ -123,27 +167,14 @@ func (c *Client) WalletOutputs(ctx context.Context) (resp []wallet.SiacoinElemen
 	return
 }
 
-// estimatedSiacoinTxnSize estimates the txn size of a siacoin txn without file
-// contract given its number of outputs.
-func estimatedSiacoinTxnSize(nOutputs uint64) uint64 {
-	return 1000 + 60*nOutputs
-}
-
 // SendSiacoins is a helper method that sends siacoins to the given outputs.
 func (c *Client) SendSiacoins(ctx context.Context, scos []types.SiacoinOutput) (err error) {
-	fee, err := c.RecommendedFee(ctx)
-	if err != nil {
-		return err
-	}
-	fee = fee.Mul64(estimatedSiacoinTxnSize(uint64(len(scos))))
-
 	var value types.Currency
 	for _, sco := range scos {
 		value = value.Add(sco.Value)
 	}
 	txn := types.Transaction{
 		SiacoinOutputs: scos,
-		MinerFees:      []types.Currency{fee},
 	}
 	toSign, parents, err := c.WalletFund(ctx, &txn, value)
 	if err != nil {
@@ -323,8 +354,18 @@ func (c *Client) UpdateHostBlocklist(ctx context.Context, add, remove []string, 
 }
 
 // RecordHostInteraction records an interaction for the supplied host.
-func (c *Client) RecordInteractions(ctx context.Context, interactions []hostdb.Interaction) (err error) {
-	err = c.c.WithContext(ctx).POST("/hosts/interactions", interactions, nil)
+func (c *Client) RecordHostScans(ctx context.Context, scans []hostdb.HostScan) (err error) {
+	err = c.c.WithContext(ctx).POST("/hosts/scans", api.HostsScanRequest{
+		Scans: scans,
+	}, nil)
+	return
+}
+
+// RecordHostInteraction records an interaction for the supplied host.
+func (c *Client) RecordPriceTables(ctx context.Context, priceTableUpdates []hostdb.PriceTableUpdate) (err error) {
+	err = c.c.WithContext(ctx).POST("/hosts/pricetables", api.HostsPriceTablesRequest{
+		PriceTableUpdates: priceTableUpdates,
+	}, nil)
 	return
 }
 
@@ -360,6 +401,16 @@ func (c *Client) ContractSetContracts(ctx context.Context, set string) (contract
 func (c *Client) Contract(ctx context.Context, id types.FileContractID) (contract api.ContractMetadata, err error) {
 	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/contract/%s", id), &contract)
 	return
+}
+
+// ContractRoots returns the sector roots, as well as the ones that are still
+// uploading, for the contract with given id.
+func (c *Client) ContractRoots(ctx context.Context, fcid types.FileContractID) (roots, uploading []types.Hash256, err error) {
+	var resp api.ContractRootsResponse
+	if err = c.c.WithContext(ctx).GET(fmt.Sprintf("/contract/%s/roots", fcid), &resp); err != nil {
+		return
+	}
+	return resp.Roots, resp.Uploading, nil
 }
 
 // ContractSets returns the contract sets of the bus.
@@ -470,6 +521,19 @@ func (c *Client) ReleaseContract(ctx context.Context, fcid types.FileContractID,
 	return
 }
 
+// PrunableData returns an overview of all contract sizes, the total size and
+// the amount of data that can be pruned.
+func (c *Client) PrunableData(ctx context.Context) (prunableData api.ContractsPrunableDataResponse, err error) {
+	err = c.c.WithContext(ctx).GET("/contracts/prunable", &prunableData)
+	return
+}
+
+// ContractSize returns the contract's size.
+func (c *Client) ContractSize(ctx context.Context, fcid types.FileContractID) (size api.ContractSize, err error) {
+	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/contract/%s/size", fcid), &size)
+	return
+}
+
 // RecommendedFee returns the recommended fee for a txn.
 func (c *Client) RecommendedFee(ctx context.Context) (fee types.Currency, err error) {
 	err = c.c.WithContext(ctx).GET("/txpool/recommendedfee", &fee)
@@ -510,6 +574,11 @@ func (c *Client) GougingSettings(ctx context.Context) (gs api.GougingSettings, e
 	return
 }
 
+func (c *Client) UploadPackingSettings(ctx context.Context) (ups api.UploadPackingSettings, err error) {
+	err = c.Setting(ctx, api.SettingUploadPacking, &ups)
+	return
+}
+
 // RedundancySettings returns the redundancy settings.
 func (c *Client) RedundancySettings(ctx context.Context) (rs api.RedundancySettings, err error) {
 	err = c.Setting(ctx, api.SettingRedundancy, &rs)
@@ -528,6 +597,12 @@ func (c *Client) SearchHosts(ctx context.Context, filterMode string, addressCont
 	return
 }
 
+// ObjectsBySlabKey returns all objects that reference a given slab.
+func (c *Client) ObjectsBySlabKey(ctx context.Context, key object.EncryptionKey) (objects []api.ObjectMetadata, err error) {
+	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/slab/%v/objects", key), &objects)
+	return
+}
+
 // SearchObjects returns all objects that contains a sub-string in their key.
 func (c *Client) SearchObjects(ctx context.Context, key string, offset, limit int) (entries []api.ObjectMetadata, err error) {
 	values := url.Values{}
@@ -538,14 +613,12 @@ func (c *Client) SearchObjects(ctx context.Context, key string, offset, limit in
 	return
 }
 
-// Object returns the object at the given path with the given prefix, or, if
-// path ends in '/', the entries under that path.
-func (c *Client) Object(ctx context.Context, path, prefix string, offset, limit int) (o object.Object, entries []api.ObjectMetadata, err error) {
+func (c *Client) Object(ctx context.Context, path string, opts ...api.ObjectsOption) (o api.Object, entries []api.ObjectMetadata, err error) {
 	path = strings.TrimPrefix(path, "/")
 	values := url.Values{}
-	values.Set("prefix", url.QueryEscape(prefix))
-	values.Set("offset", fmt.Sprint(offset))
-	values.Set("limit", fmt.Sprint(limit))
+	for _, opt := range opts {
+		opt(values)
+	}
 	path += "?" + values.Encode()
 	var or api.ObjectsResponse
 	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/objects/%s", path), &or)
@@ -560,7 +633,7 @@ func (c *Client) Object(ctx context.Context, path, prefix string, offset, limit 
 // AddObject stores the provided object under the given path.
 func (c *Client) AddObject(ctx context.Context, path, contractSet string, o object.Object, usedContract map[types.PublicKey]types.FileContractID) (err error) {
 	path = strings.TrimPrefix(path, "/")
-	err = c.c.WithContext(ctx).PUT(fmt.Sprintf("/objects/%s", path), api.AddObjectRequest{
+	err = c.c.WithContext(ctx).PUT(fmt.Sprintf("/objects/%s", path), api.ObjectAddRequest{
 		ContractSet:   contractSet,
 		Object:        o,
 		UsedContracts: usedContract,
@@ -576,6 +649,11 @@ func (c *Client) DeleteObject(ctx context.Context, path string, batch bool) (err
 	values.Set("batch", fmt.Sprint(batch))
 	err = c.c.WithContext(ctx).DELETE(fmt.Sprintf("/objects/%s?"+values.Encode(), path))
 	return
+}
+
+// RecomputeHealth recomputes the cached health of all slabs.
+func (c *Client) RefreshHealth(ctx context.Context) error {
+	return c.c.WithContext(ctx).POST("/slabs/refreshhealth", nil, nil)
 }
 
 // SlabsForMigration returns up to 'limit' slabs which require migration. A slab
@@ -688,9 +766,125 @@ func (c *Client) FileContractTax(ctx context.Context, payout types.Currency) (ta
 	return
 }
 
+func (c *Client) PackedSlabsForUpload(ctx context.Context, lockingDuration time.Duration, minShards, totalShards uint8, set string, limit int) (slabs []api.PackedSlab, err error) {
+	err = c.c.WithContext(ctx).POST("/slabbuffer/fetch", api.PackedSlabsRequestGET{
+		LockingDuration: api.ParamDuration(lockingDuration),
+		MinShards:       minShards,
+		TotalShards:     totalShards,
+		ContractSet:     set,
+		Limit:           limit,
+	}, &slabs)
+	return
+}
+
+func (c *Client) MarkPackedSlabsUploaded(ctx context.Context, slabs []api.UploadedPackedSlab, usedContracts map[types.PublicKey]types.FileContractID) (err error) {
+	err = c.c.WithContext(ctx).POST("/slabbuffer/done", api.PackedSlabsRequestPOST{
+		Slabs:         slabs,
+		UsedContracts: usedContracts,
+	}, nil)
+	return
+}
+
+// TrackUpload tracks the upload with given id in the bus.
+func (c *Client) TrackUpload(ctx context.Context, uID api.UploadID) (err error) {
+	err = c.c.WithContext(ctx).POST(fmt.Sprintf("/upload/%s", uID), nil, nil)
+	return
+}
+
+// AddUploadingSector adds the given sector to the upload with given id.
+func (c *Client) AddUploadingSector(ctx context.Context, uID api.UploadID, id types.FileContractID, root types.Hash256) (err error) {
+	err = c.c.WithContext(ctx).POST(fmt.Sprintf("/upload/%s/sector", uID), api.UploadSectorRequest{
+		ContractID: id,
+		Root:       root,
+	}, nil)
+	return
+}
+
+func (c *Client) AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) (slabs []object.PartialSlab, err error) {
+	c.c.Custom("POST", "/slabs/partial", nil, &api.AddPartialSlabResponse{})
+	values := url.Values{}
+	values.Set("minShards", fmt.Sprint(minShards))
+	values.Set("totalShards", fmt.Sprint(totalShards))
+	values.Set("contractSet", contractSet)
+
+	u, err := url.Parse(fmt.Sprintf("%v/slabs/partial", c.c.BaseURL))
+	if err != nil {
+		panic(err)
+	}
+	u.RawQuery = values.Encode()
+	req, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(data))
+	if err != nil {
+		panic(err)
+	}
+	req.SetBasicAuth("", c.c.WithContext(ctx).Password)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer io.Copy(io.Discard, resp.Body)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		err, _ := io.ReadAll(resp.Body)
+		return nil, errors.New(string(err))
+	}
+	var apsr api.AddPartialSlabResponse
+	err = json.NewDecoder(resp.Body).Decode(&apsr)
+	if err != nil {
+		return nil, err
+	}
+	return apsr.Slabs, nil
+}
+
+func (c *Client) FetchPartialSlab(ctx context.Context, key object.EncryptionKey, offset, length uint32) ([]byte, error) {
+	c.c.Custom("GET", fmt.Sprintf("/slabs/partial/%s", key), nil, &[]byte{})
+	values := url.Values{}
+	values.Set("offset", fmt.Sprint(offset))
+	values.Set("length", fmt.Sprint(length))
+
+	u, err := url.Parse(fmt.Sprintf("%s/slabs/partial/%s", c.c.BaseURL, key))
+	if err != nil {
+		panic(err)
+	}
+	u.RawQuery = values.Encode()
+	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	if err != nil {
+		panic(err)
+	}
+	req.SetBasicAuth("", c.c.WithContext(ctx).Password)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer io.Copy(io.Discard, resp.Body)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 && resp.StatusCode != 206 {
+		err, _ := io.ReadAll(resp.Body)
+		return nil, errors.New(string(err))
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// FinishUpload marks the given upload as finished.
+func (c *Client) FinishUpload(ctx context.Context, uID api.UploadID) (err error) {
+	err = c.c.WithContext(ctx).DELETE(fmt.Sprintf("/upload/%s", uID))
+	return
+}
+
 // ObjectsStats returns information about the number of objects and their size.
-func (c *Client) ObjectsStats() (osr api.ObjectsStats, err error) {
+func (c *Client) ObjectsStats() (osr api.ObjectsStatsResponse, err error) {
 	err = c.c.GET("/stats/objects", &osr)
+	return
+}
+
+// SlabBuffers returns information about the number of objects and their size.
+func (c *Client) SlabBuffers() (buffers []api.SlabBuffer, err error) {
+	err = c.c.GET("/slabbuffers", &buffers)
+	return
+}
+
+// State returns the current state of the bus.
+func (c *Client) State() (state api.BusStateResponse, err error) {
+	err = c.c.GET("/state", &state)
 	return
 }
 

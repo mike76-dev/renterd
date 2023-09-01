@@ -10,6 +10,7 @@ import (
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	rhpv3 "go.sia.tech/core/rhp/v3"
 	"go.sia.tech/core/types"
+	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
 )
 
@@ -31,9 +32,10 @@ const (
 )
 
 const (
-	SettingContractSet = "contractset"
-	SettingGouging     = "gouging"
-	SettingRedundancy  = "redundancy"
+	SettingContractSet   = "contractset"
+	SettingGouging       = "gouging"
+	SettingRedundancy    = "redundancy"
+	SettingUploadPacking = "uploadpacking"
 )
 
 var (
@@ -41,21 +43,33 @@ var (
 	// yet because it has been set too recently.
 	ErrRequiresSyncSetRecently = errors.New("account had 'requiresSync' flag set recently")
 
-	// ErrOBjectNotFound is returned if get is unable to retrieve an object from
-	// the database.
+	// ErrOBjectNotFound is returned when an object can't be retrieved from the
+	// database.
 	ErrObjectNotFound = errors.New("object not found")
 
 	// ErrObjectCorrupted is returned if we were unable to retrieve the object
 	// from the database.
 	ErrObjectCorrupted = errors.New("object corrupted")
 
-	// ErrContractSetNotFound is returned when a contract can't be retrieved
+	// ErrContractNotFound is returned when a contract can't be retrieved from
+	// the database.
+	ErrContractNotFound = errors.New("couldn't find contract")
+
+	// ErrContractSetNotFound is returned when a contract set can't be retrieved
 	// from the database.
 	ErrContractSetNotFound = errors.New("couldn't find contract set")
 
 	// ErrSettingNotFound is returned if a requested setting is not present in the
 	// database.
 	ErrSettingNotFound = errors.New("setting not found")
+
+	// ErrUploadAlreadyExists is returned when starting an upload with an id
+	// that's already in use.
+	ErrUploadAlreadyExists = errors.New("upload already exists")
+
+	// ErrUnknownUpload is returned when adding sectors for an upload id that's
+	// not known.
+	ErrUnknownUpload = errors.New("unknown upload")
 )
 
 // ArchiveContractsRequest is the request type for the /contracts/archive endpoint.
@@ -64,6 +78,12 @@ type ArchiveContractsRequest = map[types.FileContractID]string
 // AccountHandlerPOST is the request type for the /account/:id endpoint.
 type AccountHandlerPOST struct {
 	HostKey types.PublicKey `json:"hostKey"`
+}
+
+// BusStateResponse is the response type for the /bus/state endpoint.
+type BusStateResponse struct {
+	StartTime time.Time `json:"startTime"`
+	BuildState
 }
 
 // ConsensusState holds the current blockheight and whether we are synced or not.
@@ -86,6 +106,12 @@ type ContractsIDAddRequest struct {
 	PublicKey   types.PublicKey        `json:"publicKey"`
 }
 
+// UploadSectorRequest is the request type for the /upload/:id/sector endpoint.
+type UploadSectorRequest struct {
+	ContractID types.FileContractID `json:"contractID"`
+	Root       types.Hash256        `json:"root"`
+}
+
 // ContractsIDRenewedRequest is the request type for the /contract/:id/renewed
 // endpoint.
 type ContractsIDRenewedRequest struct {
@@ -94,6 +120,13 @@ type ContractsIDRenewedRequest struct {
 	StartHeight uint64                 `json:"startHeight"`
 	TotalCost   types.Currency         `json:"totalCost"`
 	PublicKey   types.PublicKey        `json:"publicKey"`
+}
+
+// ContractRootsResponse is the response type for the /contract/:id/roots
+// endpoint.
+type ContractRootsResponse struct {
+	Roots     []types.Hash256 `json:"roots"`
+	Uploading []types.Hash256 `json:"uploading"`
 }
 
 // ContractAcquireRequest is the request type for the /contract/acquire
@@ -120,29 +153,81 @@ type ContractAcquireResponse struct {
 	LockID uint64 `json:"lockID"`
 }
 
+// ContractsPrunableDataResponse is the response type for the
+// /contracts/prunable endpoint.
+type ContractsPrunableDataResponse struct {
+	Contracts     []ContractPrunableData `json:"contracts"`
+	TotalPrunable uint64                 `json:"totalPrunable"`
+	TotalSize     uint64                 `json:"totalSize"`
+}
+
+type ContractPrunableData struct {
+	ID types.FileContractID `json:"id"`
+	ContractSize
+}
+
+type HostsScanRequest struct {
+	Scans []hostdb.HostScan `json:"scans"`
+}
+
+type HostsPriceTablesRequest struct {
+	PriceTableUpdates []hostdb.PriceTableUpdate `json:"priceTableUpdates"`
+}
+
 // HostsRemoveRequest is the request type for the /hosts/remove endpoint.
 type HostsRemoveRequest struct {
 	MaxDowntimeHours      ParamDurationHour `json:"maxDowntimeHours"`
 	MinRecentScanFailures uint64            `json:"minRecentScanFailures"`
 }
 
-type ObjectMetadata struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
+// Object wraps an object.Object with its metadata.
+type Object struct {
+	ObjectMetadata
+	object.Object
 }
 
+// ObjectMetadata contains various metadata about an object.
+type ObjectMetadata struct {
+	Name   string  `json:"name"`
+	Size   int64   `json:"size"`
+	Health float64 `json:"health"`
+}
+
+// ObjectAddRequest is the request type for the /object/*key endpoint.
+type ObjectAddRequest struct {
+	ContractSet   string                                   `json:"contractSet"`
+	Object        object.Object                            `json:"object"`
+	UsedContracts map[types.PublicKey]types.FileContractID `json:"usedContracts"`
+}
+
+// ObjectsResponse is the response type for the /objects endpoint.
+type ObjectsResponse struct {
+	Entries []ObjectMetadata `json:"entries,omitempty"`
+	Object  *Object          `json:"object,omitempty"`
+}
+
+// ObjectsRenameRequest is the request type for the /objects/rename endpoint.
 type ObjectsRenameRequest struct {
 	From string `json:"from"`
 	To   string `json:"to"`
 	Mode string `json:"mode"`
 }
 
-// ObjectsStats is the response type for the /stats/objects endpoint.
-type ObjectsStats struct {
+// ObjectsStatsResponse is the response type for the /stats/objects endpoint.
+type ObjectsStatsResponse struct {
 	NumObjects        uint64 `json:"numObjects"`        // number of objects
 	TotalObjectsSize  uint64 `json:"totalObjectsSize"`  // size of all objects
 	TotalSectorsSize  uint64 `json:"totalSectorsSize"`  // uploaded size of all objects
 	TotalUploadedSize uint64 `json:"totalUploadedSize"` // uploaded size of all objects including redundant sectors
+}
+
+type SlabBuffer struct {
+	ContractSet string `json:"contractSet"` // contract set that be buffer will be uploaded to
+	Complete    bool   `json:"complete"`    // whether the slab buffer is complete and ready to upload
+	Filename    string `json:"filename"`    // name of the buffer on disk
+	Size        int64  `json:"size"`        // size of the buffer
+	MaxSize     int64  `json:"maxSize"`     // maximum size of the buffer
+	Locked      bool   `json:"locked"`      // whether the slab buffer is locked for uploading
 }
 
 // WalletFundRequest is the request type for the /wallet/fund endpoint.
@@ -233,19 +318,6 @@ func WalletTransactionsWithOffset(offset int) WalletTransactionsOption {
 	}
 }
 
-// ObjectsResponse is the response type for the /objects endpoint.
-type ObjectsResponse struct {
-	Entries []ObjectMetadata `json:"entries,omitempty"`
-	Object  *object.Object   `json:"object,omitempty"`
-}
-
-// AddObjectRequest is the request type for the /object/*key endpoint.
-type AddObjectRequest struct {
-	ContractSet   string                                   `json:"contractSet"`
-	Object        object.Object                            `json:"object"`
-	UsedContracts map[types.PublicKey]types.FileContractID `json:"usedContracts"`
-}
-
 // MigrationSlabsRequest is the request type for the /slabs/migration endpoint.
 type MigrationSlabsRequest struct {
 	ContractSet  string  `json:"contractSet"`
@@ -254,15 +326,13 @@ type MigrationSlabsRequest struct {
 }
 
 type PackedSlab struct {
-	BufferID    uint   `json:"bufferID"`
-	MinShards   uint8  `json:"minShards"`
-	TotalShards uint8  `json:"totalShards"`
-	Data        []byte `json:"data"`
+	BufferID uint                 `json:"bufferID"`
+	Data     []byte               `json:"data"`
+	Key      object.EncryptionKey `json:"key"`
 }
 
 type UploadedPackedSlab struct {
 	BufferID uint
-	Key      object.EncryptionKey
 	Shards   []object.Sector
 }
 
@@ -316,10 +386,24 @@ type AccountsAddBalanceRequest struct {
 	Amount  *big.Int        `json:"amount"`
 }
 
+type PackedSlabsRequestGET struct {
+	LockingDuration ParamDuration `json:"lockingDuration"`
+	MinShards       uint8         `json:"minShards"`
+	TotalShards     uint8         `json:"totalShards"`
+	ContractSet     string        `json:"contractSet"`
+	Limit           int           `json:"limit"`
+}
+
+type PackedSlabsRequestPOST struct {
+	Slabs         []UploadedPackedSlab                     `json:"slabs"`
+	UsedContracts map[types.PublicKey]types.FileContractID `json:"usedContracts"`
+}
+
 // UploadParams contains the metadata needed by a worker to upload an object.
 type UploadParams struct {
 	CurrentHeight uint64
 	ContractSet   string
+	UploadPacking bool
 	GougingParams
 }
 
@@ -376,6 +460,14 @@ type GougingSettings struct {
 	MinMaxEphemeralAccountBalance types.Currency `json:"minMaxEphemeralAccountBalance"`
 }
 
+type WalletResponse struct {
+	ScanHeight  uint64         `json:"scanHeight"`
+	Address     types.Address  `json:"address"`
+	Spendable   types.Currency `json:"spendable"`
+	Confirmed   types.Currency `json:"confirmed"`
+	Unconfirmed types.Currency `json:"unconfirmed"`
+}
+
 // Validate returns an error if the gouging settings are not considered valid.
 func (gs GougingSettings) Validate() error {
 	if gs.HostBlockHeightLeeway < 3 {
@@ -400,6 +492,10 @@ type SearchHostsRequest struct {
 	UsabilityMode   string            `json:"usabilityMode"`
 	AddressContains string            `json:"addressContains"`
 	KeyIn           []types.PublicKey `json:"keyIn"`
+}
+
+type UploadPackingSettings struct {
+	Enabled bool `json:"enabled"`
 }
 
 // RedundancySettings contain settings that dictate an object's redundancy.
@@ -427,4 +523,8 @@ func (rs RedundancySettings) Validate() error {
 		return errors.New("TotalShards must be less than 256")
 	}
 	return nil
+}
+
+type AddPartialSlabResponse struct {
+	Slabs []object.PartialSlab `json:"slabs"`
 }

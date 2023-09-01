@@ -1,6 +1,8 @@
 package alerts
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -8,6 +10,7 @@ import (
 	"time"
 
 	"go.sia.tech/core/types"
+	"go.sia.tech/renterd/webhooks"
 )
 
 const (
@@ -24,9 +27,18 @@ const (
 	severityWarningStr  = "warning"
 	severityErrorStr    = "error"
 	severityCriticalStr = "critical"
+
+	webhookModule        = "alerts"
+	webhookEventDismiss  = "dismiss"
+	webhookEventRegister = "register"
 )
 
 type (
+	Alerter interface {
+		RegisterAlert(_ context.Context, a Alert) error
+		DismissAlerts(_ context.Context, ids ...types.Hash256) error
+	}
+
 	// Severity indicates the severity of an alert.
 	Severity uint8
 
@@ -48,7 +60,8 @@ type (
 	Manager struct {
 		mu sync.Mutex
 		// alerts is a map of alert IDs to their current alert.
-		alerts map[types.Hash256]Alert
+		alerts             map[types.Hash256]Alert
+		webhookBroadcaster webhooks.Broadcaster
 	}
 )
 
@@ -91,26 +104,58 @@ func (s *Severity) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Register registers a new alert with the manager
-func (m *Manager) Register(a Alert) {
-	if a.ID == (types.Hash256{}) {
-		panic("cannot register alert with empty ID") // developer error
-	} else if a.Timestamp.IsZero() {
-		panic("cannot register alert with zero timestamp") // developer error
+// RegisterAlert implements the Alerter interface.
+func (m *Manager) RegisterAlert(ctx context.Context, alert Alert) error {
+	if alert.ID == (types.Hash256{}) {
+		return errors.New("cannot register alert with zero id")
+	} else if alert.Timestamp.IsZero() {
+		return errors.New("cannot register alert with zero timestamp")
+	} else if alert.Severity == 0 {
+		return errors.New("cannot register alert without severity")
+	} else if alert.Message == "" {
+		return errors.New("cannot register alert without a message")
+	} else if alert.Data == nil || alert.Data["origin"] == "" {
+		return errors.New("caannot register alert without origin")
 	}
 
 	m.mu.Lock()
-	m.alerts[a.ID] = a
+	m.alerts[alert.ID] = alert
+	wb := m.webhookBroadcaster
 	m.mu.Unlock()
+
+	return wb.BroadcastAction(ctx, webhooks.Event{
+		Module:  webhookModule,
+		Event:   webhookEventRegister,
+		Payload: alert,
+	})
 }
 
-// Dismiss removes the alerts with the given IDs.
-func (m *Manager) Dismiss(ids ...types.Hash256) {
+// DismissAlerts implements the Alerter interface.
+func (m *Manager) DismissAlerts(ctx context.Context, ids ...types.Hash256) error {
+	var dismissed []types.Hash256
 	m.mu.Lock()
 	for _, id := range ids {
+		_, exists := m.alerts[id]
+		if !exists {
+			continue
+		}
 		delete(m.alerts, id)
+		dismissed = append(dismissed, id)
 	}
+	if len(m.alerts) == 0 {
+		m.alerts = make(map[types.Hash256]Alert) // reclaim memory
+	}
+	wb := m.webhookBroadcaster
 	m.mu.Unlock()
+
+	if len(dismissed) == 0 {
+		return nil // don't fire webhook to avoid spam
+	}
+	return wb.BroadcastAction(ctx, webhooks.Event{
+		Module:  webhookModule,
+		Event:   webhookEventDismiss,
+		Payload: dismissed,
+	})
 }
 
 // Active returns the host's active alerts.
@@ -128,9 +173,47 @@ func (m *Manager) Active() []Alert {
 	return alerts
 }
 
+func (m *Manager) RegisterWebhookBroadcaster(b webhooks.Broadcaster) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.webhookBroadcaster.(*webhooks.NoopBroadcaster); !ok {
+		panic("webhook broadcaster already registered")
+	}
+	m.webhookBroadcaster = b
+}
+
 // NewManager initializes a new alerts manager.
 func NewManager() *Manager {
 	return &Manager{
-		alerts: make(map[types.Hash256]Alert),
+		alerts:             make(map[types.Hash256]Alert),
+		webhookBroadcaster: &webhooks.NoopBroadcaster{},
 	}
+}
+
+type originAlerter struct {
+	alerter Alerter
+	origin  string
+}
+
+// WithOrigin wraps an Alerter in an originAlerter which always attaches the
+// origin field to alerts.
+func WithOrigin(alerter Alerter, origin string) Alerter {
+	return &originAlerter{
+		alerter: alerter,
+		origin:  origin,
+	}
+}
+
+// RegisterAlert implements the Alerter interface.
+func (a *originAlerter) RegisterAlert(ctx context.Context, alert Alert) error {
+	if alert.Data == nil {
+		alert.Data = make(map[string]any)
+	}
+	alert.Data["origin"] = a.origin
+	return a.alerter.RegisterAlert(ctx, alert)
+}
+
+// DismissAlerts implements the Alerter interface.
+func (a *originAlerter) DismissAlerts(ctx context.Context, ids ...types.Hash256) error {
+	return a.alerter.DismissAlerts(ctx, ids...)
 }

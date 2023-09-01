@@ -1,12 +1,15 @@
 package testing
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	rhpv2 "go.sia.tech/core/rhp/v2"
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/hostdb"
@@ -42,23 +45,24 @@ func TestHostPruning(t *testing.T) {
 	// create a helper function that records n failed interactions
 	now := time.Now()
 	recordFailedInteractions := func(n int, hk types.PublicKey) {
-		his := make([]hostdb.Interaction, n)
+		t.Helper()
+		his := make([]hostdb.HostScan, n)
 		for i := 0; i < n; i++ {
 			now = now.Add(time.Hour).Add(time.Minute) // 1m leeway
-			his[i] = hostdb.Interaction{
-				Host:      hk,
+			his[i] = hostdb.HostScan{
+				HostKey:   hk,
 				Timestamp: now,
 				Success:   false,
-				Type:      hostdb.InteractionTypeScan,
 			}
 		}
-		if err = b.RecordInteractions(context.Background(), his); err != nil {
+		if err = b.RecordHostScans(context.Background(), his); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// create a helper function that waits for an autopilot loop to finish
 	waitForAutopilotLoop := func() {
+		t.Helper()
 		var nTriggered int
 		if err := Retry(10, 500*time.Millisecond, func() error {
 			if triggered, err := a.Trigger(true); err != nil {
@@ -153,5 +157,123 @@ func TestHostPruning(t *testing.T) {
 	ap.Config.Hosts.MaxDowntimeHours = 99 * 365 * 24 // allowed max
 	if err = b.UpdateAutopilot(context.Background(), api.Autopilot{ID: t.Name(), Config: ap.Config}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSectorPruning(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	// create a cluster
+	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := cluster.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	// add a helper to check whether a root is in a given slice
+	hasRoot := func(roots []types.Hash256, root types.Hash256) bool {
+		for _, r := range roots {
+			if r == root {
+				return true
+			}
+		}
+		return false
+	}
+
+	// convenience variables
+	cfg := testAutopilotConfig
+	rs := testRedundancySettings
+	w := cluster.Worker
+	b := cluster.Bus
+
+	// add hosts
+	_, err = cluster.AddHostsBlocking(int(cfg.Contracts.Amount))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// wait until we have accounts
+	if _, err := cluster.WaitForAccounts(); err != nil {
+		t.Fatal(err)
+	}
+
+	// create a contracts dict
+	contracts, err := b.Contracts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// add several objects
+	for i := 0; i < 10; i++ {
+		filename := fmt.Sprintf("obj_%d", i)
+		if err := w.UploadObject(context.Background(), bytes.NewReader([]byte(filename)), filename); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// compare database against roots returned by the host
+	var n int
+	for _, c := range contracts {
+		dbRoots, _, err := b.ContractRoots(context.Background(), c.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cRoots, err := w.RHPContractRoots(context.Background(), c.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(dbRoots) != len(cRoots) {
+			t.Fatal("unexpected number of roots", dbRoots, cRoots)
+		}
+		for _, root := range dbRoots {
+			if !hasRoot(cRoots, root) {
+				t.Fatal("missing root", dbRoots, cRoots)
+			}
+		}
+		n += len(cRoots)
+	}
+	if n != rs.TotalShards*10 {
+		t.Fatal("unexpected number of roots", n)
+	}
+
+	// reboot the cluster to ensure spending records get flushed
+	// Restart cluster to have worker fetch the account from the bus again.
+	cluster2, err := cluster.Reboot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := cluster2.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	b = cluster2.Bus
+
+	// assert prunable data is 0
+	if res, err := b.PrunableData(context.Background()); err != nil {
+		t.Fatal(err)
+	} else if res.TotalPrunable != 0 {
+		t.Fatal("expected 0 prunable data", n)
+	}
+
+	// delete a random number of objects
+	for i := 0; i < 10; i += 2 {
+		filename := fmt.Sprintf("obj_%d", i)
+		if err := b.DeleteObject(context.Background(), filename, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// assert amount of prunable data
+	if res, err := b.PrunableData(context.Background()); err != nil {
+		t.Fatal(err)
+	} else if res.TotalPrunable != 5*uint64(rs.TotalShards)*rhpv2.SectorSize {
+		t.Fatal("unexpected prunable data", n)
 	}
 }

@@ -76,6 +76,7 @@ type (
 	}
 
 	upload struct {
+		id  api.UploadID
 		mgr *uploadManager
 
 		allowed          map[types.FileContractID]struct{}
@@ -215,10 +216,11 @@ func (mgr *uploadManager) newUploader(c api.ContractMetadata) *uploader {
 
 func (mgr *uploadManager) Migrate(ctx context.Context, shards [][]byte, contracts []api.ContractMetadata, bh uint64) ([]object.Sector, error) {
 	// initiate the upload
-	upload, err := mgr.newUpload(len(shards), contracts, bh)
+	upload, finishFn, err := mgr.newUpload(ctx, len(shards), contracts, bh)
 	if err != nil {
 		return nil, err
 	}
+	defer finishFn(ctx)
 
 	// upload the shards
 	return upload.uploadShards(ctx, shards, nil)
@@ -260,7 +262,7 @@ func (mgr *uploadManager) Stop() {
 	}
 }
 
-func (mgr *uploadManager) Upload(ctx context.Context, r io.Reader, rs api.RedundancySettings, contracts []api.ContractMetadata, bh uint64) (_ object.Object, err error) {
+func (mgr *uploadManager) Upload(ctx context.Context, r io.Reader, rs api.RedundancySettings, contracts []api.ContractMetadata, bh uint64, uploadPacking bool) (_ object.Object, partialSlab []byte, err error) {
 	// cancel all in-flight requests when the upload is done
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -279,10 +281,11 @@ func (mgr *uploadManager) Upload(ctx context.Context, r io.Reader, rs api.Redund
 	cr := o.Encrypt(r)
 
 	// create the upload
-	u, err := mgr.newUpload(rs.TotalShards, contracts, bh)
+	u, finishFn, err := mgr.newUpload(ctx, rs.TotalShards, contracts, bh)
 	if err != nil {
-		return object.Object{}, err
+		return object.Object{}, nil, err
 	}
+	defer finishFn(ctx)
 
 	// create the next slab channel
 	nextSlabChan := make(chan struct{}, 1)
@@ -307,9 +310,9 @@ loop:
 	for {
 		select {
 		case <-mgr.stopChan:
-			return object.Object{}, errors.New("manager was stopped")
+			return object.Object{}, nil, errors.New("manager was stopped")
 		case <-ctx.Done():
-			return object.Object{}, errors.New("upload timed out")
+			return object.Object{}, nil, errors.New("upload timed out")
 		case nextSlabChan <- struct{}{}:
 			// read next slab's data
 			data := make([]byte, size)
@@ -319,19 +322,33 @@ loop:
 					break loop
 				}
 				numSlabs = slabIndex
+				if partialSlab != nil {
+					numSlabs-- // don't wait on partial slab
+				}
+				if len(responses) == numSlabs {
+					break loop
+				}
 				continue
 			} else if err != nil && err != io.ErrUnexpectedEOF {
-				return object.Object{}, err
+				return object.Object{}, nil, err
 			}
-			wg.Add(1)
-			go func(rs api.RedundancySettings, data []byte, length, slabIndex int) {
-				u.uploadSlab(ctx, rs, data, length, slabIndex, respChan, nextSlabChan)
-				wg.Done()
-			}(rs, data, length, slabIndex)
+			if uploadPacking && errors.Is(err, io.ErrUnexpectedEOF) {
+				// If uploadPacking is true, we return the partial slab without
+				// uploading.
+				partialSlab = data[:length]
+				<-nextSlabChan // trigger next iteration
+			} else {
+				// Otherwise we upload it.
+				wg.Add(1)
+				go func(rs api.RedundancySettings, data []byte, length, slabIndex int) {
+					u.uploadSlab(ctx, rs, data, length, slabIndex, respChan, nextSlabChan)
+					wg.Done()
+				}(rs, data, length, slabIndex)
+			}
 			slabIndex++
 		case res := <-respChan:
 			if res.err != nil {
-				return object.Object{}, res.err
+				return object.Object{}, nil, res.err
 			}
 			responses = append(responses, res)
 			if len(responses) == numSlabs {
@@ -349,7 +366,7 @@ loop:
 	for _, resp := range responses {
 		o.Slabs = append(o.Slabs, resp.slab)
 	}
-	return o, nil
+	return o, partialSlab, nil
 }
 
 func (mgr *uploadManager) launch(req *sectorUploadReq) error {
@@ -365,7 +382,7 @@ func (mgr *uploadManager) launch(req *sectorUploadReq) error {
 	return nil
 }
 
-func (mgr *uploadManager) newUpload(totalShards int, contracts []api.ContractMetadata, bh uint64) (*upload, error) {
+func (mgr *uploadManager) newUpload(ctx context.Context, totalShards int, contracts []api.ContractMetadata, bh uint64) (*upload, func(context.Context), error) {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 
@@ -374,7 +391,7 @@ func (mgr *uploadManager) newUpload(totalShards int, contracts []api.ContractMet
 
 	// check if we have enough contracts
 	if len(contracts) < totalShards {
-		return nil, errNotEnoughContracts
+		return nil, func(_ context.Context) {}, errNotEnoughContracts
 	}
 
 	// create allowed map
@@ -383,8 +400,22 @@ func (mgr *uploadManager) newUpload(totalShards int, contracts []api.ContractMet
 		allowed[c.ID] = struct{}{}
 	}
 
+	// track the upload in the bus
+	id := api.NewUploadID()
+	if err := mgr.b.TrackUpload(ctx, id); err != nil {
+		mgr.logger.Errorf("failed to track upload '%v', err: %v", id, err)
+	}
+
+	// create a finish function to finish the upload
+	finishFn := func(ctx context.Context) {
+		if err := mgr.b.FinishUpload(ctx, id); err != nil {
+			mgr.logger.Errorf("failed to mark upload %v as finished: %v", id, err)
+		}
+	}
+
 	// create upload
 	return &upload{
+		id:  id,
 		mgr: mgr,
 
 		allowed:          allowed,
@@ -392,7 +423,7 @@ func (mgr *uploadManager) newUpload(totalShards int, contracts []api.ContractMet
 
 		ongoing: make([]slabID, 0),
 		used:    make(map[slabID]map[types.FileContractID]struct{}),
-	}, nil
+	}, finishFn, nil
 }
 
 func (mgr *uploadManager) numUploaders() int {
@@ -880,11 +911,17 @@ func (u *uploader) Stats() (healthy bool, mbps float64) {
 func (u *uploader) execute(req *sectorUploadReq, rev types.FileContractRevision) (types.Hash256, error) {
 	u.mu.Lock()
 	host := u.host
+	fcid := u.fcid
 	u.mu.Unlock()
 
 	// fetch span from context
 	span := trace.SpanFromContext(req.ctx)
 	span.AddEvent("execute")
+
+	// update the bus
+	if err := u.mgr.b.AddUploadingSector(req.ctx, req.upload.id, fcid, rhpv2.SectorRoot(req.sector)); err != nil {
+		return types.Hash256{}, fmt.Errorf("failed to add uploading sector to contract %v, err: %v", fcid, err)
+	}
 
 	// upload the sector
 	start := time.Now()
@@ -898,6 +935,7 @@ func (u *uploader) execute(req *sectorUploadReq, rev types.FileContractRevision)
 	span.SetAttributes(attribute.Int64("duration", elapsed.Milliseconds()))
 	span.RecordError(err)
 	span.End()
+
 	return root, nil
 }
 

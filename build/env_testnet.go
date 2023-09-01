@@ -5,20 +5,18 @@ package build
 import (
 	"time"
 
-	"go.sia.tech/core/chain"
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/api"
 )
 
 const (
-	ConsensusNetworkName  = "Testnet-Zen"
+	network = "zen"
+
 	DefaultAPIAddress     = "localhost:9880"
 	DefaultGatewayAddress = ":9881"
 )
 
 var (
-	ConsensusNetwork, _ = chain.TestnetZen()
-
 	// DefaultGougingSettings define the default gouging settings the bus is
 	// configured with on startup. These values can be adjusted using the
 	// settings API.
@@ -35,6 +33,12 @@ var (
 		MinPriceTableValidity:         5 * time.Minute,                                     // 5 minutes
 		MinAccountExpiry:              24 * time.Hour,                                      // 1 day
 		MinMaxEphemeralAccountBalance: types.Siacoins(1),                                   // 1 SC
+	}
+
+	// DefaultUploadPackingSettings define the default upload packing settings
+	// the bus is configured with on startup.
+	DefaultUploadPackingSettings = api.UploadPackingSettings{
+		Enabled: false,
 	}
 
 	// DefaultRedundancySettings define the default redundancy settings the bus

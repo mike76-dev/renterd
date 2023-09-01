@@ -6,7 +6,6 @@ import (
 
 	"go.sia.tech/core/types"
 	"go.sia.tech/jape"
-	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
 )
 
@@ -22,17 +21,6 @@ func NewClient(addr, password string) *Client {
 		BaseURL:  addr,
 		Password: password,
 	}}
-}
-
-// Alerts fetches the active alerts from the bus.
-func (c *Client) Alerts() (alerts []alerts.Alert, err error) {
-	err = c.c.GET("/alerts", &alerts)
-	return
-}
-
-// DismissAlerts dimisses the alerts with the given IDs.
-func (c *Client) DismissAlerts(ids ...types.Hash256) error {
-	return c.c.POST("/alerts/dismiss", ids, nil)
 }
 
 func (c *Client) Config() (cfg api.AutopilotConfig, err error) {
@@ -61,8 +49,9 @@ func (c *Client) HostInfos(ctx context.Context, filterMode, usabilityMode string
 	return
 }
 
-func (c *Client) Status() (resp api.AutopilotStatusResponse, err error) {
-	err = c.c.GET("/status", &resp)
+// State returns the current state of the autopilot.
+func (c *Client) State() (state api.AutopilotStateResponse, err error) {
+	err = c.c.GET("/state", &state)
 	return
 }
 

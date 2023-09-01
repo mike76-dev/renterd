@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,10 +26,12 @@ import (
 	"go.sia.tech/jape"
 	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
+	"go.sia.tech/renterd/build"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/metrics"
 	"go.sia.tech/renterd/object"
 	"go.sia.tech/renterd/tracing"
+	"go.sia.tech/renterd/webhooks"
 	"go.sia.tech/siad/modules"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/blake2b"
@@ -39,6 +42,8 @@ import (
 )
 
 const (
+	batchSizeFetchSectors = uint64(130000) // ~4MiB of roots
+
 	defaultRevisionFetchTimeout = 30 * time.Second
 
 	lockingPriorityActiveContractRevision = 100 // highest
@@ -130,7 +135,9 @@ type ContractLocker interface {
 
 // A Bus is the source of truth within a renterd system.
 type Bus interface {
+	alerts.Alerter
 	consensusState
+	webhooks.Broadcaster
 
 	AccountStore
 	ContractLocker
@@ -139,9 +146,12 @@ type Bus interface {
 
 	BroadcastTransaction(ctx context.Context, txns []types.Transaction) error
 
+	Contract(ctx context.Context, id types.FileContractID) (api.ContractMetadata, error)
+	ContractRoots(ctx context.Context, id types.FileContractID) ([]types.Hash256, []types.Hash256, error)
 	Contracts(ctx context.Context) ([]api.ContractMetadata, error)
 	ContractSetContracts(ctx context.Context, set string) ([]api.ContractMetadata, error)
-	RecordInteractions(ctx context.Context, interactions []hostdb.Interaction) error
+	RecordHostScans(ctx context.Context, scans []hostdb.HostScan) error
+	RecordPriceTables(ctx context.Context, priceTableUpdate []hostdb.PriceTableUpdate) error
 	RecordContractSpending(ctx context.Context, records []api.ContractSpendingRecord) error
 	RenewedContract(ctx context.Context, renewedFrom types.FileContractID) (api.ContractMetadata, error)
 
@@ -150,14 +160,26 @@ type Bus interface {
 	GougingParams(ctx context.Context) (api.GougingParams, error)
 	UploadParams(ctx context.Context) (api.UploadParams, error)
 
-	Object(ctx context.Context, path, prefix string, offset, limit int) (object.Object, []api.ObjectMetadata, error)
+	Object(ctx context.Context, path string, opts ...api.ObjectsOption) (api.Object, []api.ObjectMetadata, error)
 	AddObject(ctx context.Context, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID) error
 	DeleteObject(ctx context.Context, path string, batch bool) error
+
+	AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) (slabs []object.PartialSlab, err error)
+	FetchPartialSlab(ctx context.Context, key object.EncryptionKey, offset, length uint32) ([]byte, error)
+	Slab(ctx context.Context, key object.EncryptionKey) (object.Slab, error)
+
+	MarkPackedSlabsUploaded(ctx context.Context, slabs []api.UploadedPackedSlab, usedContracts map[types.PublicKey]types.FileContractID) error
+	PackedSlabsForUpload(ctx context.Context, lockingDuration time.Duration, minShards, totalShards uint8, set string, limit int) ([]api.PackedSlab, error)
 
 	Accounts(ctx context.Context) ([]api.Account, error)
 	UpdateSlab(ctx context.Context, s object.Slab, contractSet string, goodContracts map[types.PublicKey]types.FileContractID) error
 
+	TrackUpload(ctx context.Context, uID api.UploadID) error
+	AddUploadingSector(ctx context.Context, uID api.UploadID, id types.FileContractID, root types.Hash256) error
+	FinishUpload(ctx context.Context, uID api.UploadID) error
+
 	WalletDiscard(ctx context.Context, txn types.Transaction) error
+	WalletFund(ctx context.Context, txn *types.Transaction, amount types.Currency) ([]types.Hash256, []types.Transaction, error)
 	WalletPrepareForm(ctx context.Context, renterAddress types.Address, renterKey types.PublicKey, renterFunds, hostCollateral types.Currency, hostKey types.PublicKey, hostSettings rhpv2.HostSettings, endHeight uint64) (txns []types.Transaction, err error)
 	WalletPrepareRenew(ctx context.Context, revision types.FileContractRevision, hostAddress, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, newCollateral types.Currency, hostKey types.PublicKey, pt rhpv3.HostPriceTable, endHeight, windowSize uint64) (api.WalletPrepareRenewResponse, error)
 	WalletSign(ctx context.Context, txn *types.Transaction, toSign []types.Hash256, cf types.CoveredFields) error
@@ -217,14 +239,19 @@ type hostProvider interface {
 	newHostV3(types.FileContractID, types.PublicKey, string) hostV3
 }
 
+type partialSlabStore interface {
+	PartialSlab(ctx context.Context, key object.EncryptionKey, offset, length uint32) ([]byte, *object.Slab, error)
+}
+
 // A worker talks to Sia hosts to perform contract and storage operations within
 // a renterd system.
 type worker struct {
-	alerts          *alerts.Manager
+	alerts          alerts.Alerter
 	allowPrivateIPs bool
 	id              string
 	bus             Bus
 	masterKey       [32]byte
+	startTime       time.Time
 
 	downloadManager *downloadManager
 	uploadManager   *uploadManager
@@ -234,9 +261,10 @@ type worker struct {
 
 	busFlushInterval time.Duration
 
-	interactionsMu         sync.Mutex
-	interactions           []hostdb.Interaction
-	interactionsFlushTimer *time.Timer
+	interactionsMu                sync.Mutex
+	interactionsScans             []hostdb.HostScan
+	interactionsPriceTableUpdates []hostdb.PriceTableUpdate
+	interactionsFlushTimer        *time.Timer
 
 	contractSpendingRecorder *contractSpendingRecorder
 	contractLockingDuration  time.Duration
@@ -245,7 +273,7 @@ type worker struct {
 	logger          *zap.SugaredLogger
 }
 
-func dial(ctx context.Context, hostIP string, hostKey types.PublicKey) (net.Conn, error) {
+func dial(ctx context.Context, hostIP string) (net.Conn, error) {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", hostIP)
 	return conn, err
 }
@@ -253,10 +281,10 @@ func dial(ctx context.Context, hostIP string, hostKey types.PublicKey) (net.Conn
 func (w *worker) withTransportV2(ctx context.Context, hostKey types.PublicKey, hostIP string, fn func(*rhpv2.Transport) error) (err error) {
 	var mr ephemeralMetricsRecorder
 	defer func() {
-		w.recordInteractions(mr.interactions())
+		// TODO record metrics
 	}()
 	ctx = metrics.WithRecorder(ctx, &mr)
-	conn, err := dial(ctx, hostIP, hostKey)
+	conn, err := dial(ctx, hostIP)
 	if err != nil {
 		return err
 	}
@@ -350,9 +378,18 @@ func (w *worker) rhpScanHandler(jc jape.Context) {
 	}
 
 	// record scan
-	var mr ephemeralMetricsRecorder
-	recordScan(&mr, elapsed, rsr.HostIP, rsr.HostKey, priceTable, settings, err)
-	w.recordInteractions(mr.interactions())
+	err = w.bus.RecordHostScans(jc.Request.Context(), []hostdb.HostScan{{
+		HostKey:    rsr.HostKey,
+		Success:    err == nil,
+		Timestamp:  time.Now(),
+		Settings:   settings,
+		PriceTable: priceTable,
+	}})
+	if jc.Check("failed to record scan", err) != nil {
+		return
+	}
+
+	// TODO: record metric
 
 	jc.Encode(api.RHPScanResponse{
 		Ping:      api.ParamDuration(elapsed),
@@ -520,6 +557,84 @@ func (w *worker) rhpFormHandler(jc jape.Context) {
 	})
 }
 
+func (w *worker) rhpBroadcastHandler(jc jape.Context) {
+	var fcid types.FileContractID
+	if jc.DecodeParam("id", &fcid) != nil {
+		return
+	}
+
+	// Acquire lock before fetching revision.
+	ctx := jc.Request.Context()
+	unlocker, err := w.acquireRevision(ctx, fcid, lockingPriorityActiveContractRevision)
+	if jc.Check("could not acquire revision lock", err) != nil {
+		return
+	}
+	defer unlocker.Release(ctx)
+
+	// Fetch contract from bus.
+	c, err := w.bus.Contract(ctx, fcid)
+	if jc.Check("could not get contract", err) != nil {
+		return
+	}
+	rk := w.deriveRenterKey(c.HostKey)
+
+	rev, err := w.FetchSignedRevision(ctx, c.HostIP, c.HostKey, rk, fcid, time.Minute)
+	if jc.Check("could not fetch revision", err) != nil {
+		return
+	}
+	// Create txn with revision.
+	txn := types.Transaction{
+		FileContractRevisions: []types.FileContractRevision{rev.Revision},
+		Signatures:            rev.Signatures[:],
+	}
+	// Fund the txn. We pass 0 here since we only need the wallet to fund
+	// the fee.
+	toSign, parents, err := w.bus.WalletFund(ctx, &txn, types.ZeroCurrency)
+	if jc.Check("failed to fund transaction", err) != nil {
+		return
+	}
+	// Sign the txn.
+	err = w.bus.WalletSign(ctx, &txn, toSign, types.CoveredFields{
+		WholeTransaction: true,
+	})
+	if jc.Check("failed to sign transaction", err) != nil {
+		_ = w.bus.WalletDiscard(ctx, txn)
+		return
+	}
+	// Broadcast the txn.
+	txnSet := append(parents, txn)
+	err = w.bus.BroadcastTransaction(ctx, txnSet)
+	if jc.Check("failed to broadcast transaction", err) != nil {
+		_ = w.bus.WalletDiscard(ctx, txn)
+		return
+	}
+}
+
+func (w *worker) rhpContractRootsHandlerGET(jc jape.Context) {
+	// decode fcid
+	var id types.FileContractID
+	if jc.DecodeParam("id", &id) != nil {
+		return
+	}
+
+	// fetch the contract from the bus
+	ctx := jc.Request.Context()
+	c, err := w.bus.Contract(ctx, id)
+	if errors.Is(err, api.ErrContractNotFound) {
+		jc.Error(err, http.StatusNotFound)
+		return
+	} else if jc.Check("couldn't fetch contract", err) != nil {
+		return
+	}
+
+	// fetch the roots from the host
+	renterKey := w.deriveRenterKey(c.HostKey)
+	roots, err := w.FetchContractRoots(ctx, c.HostIP, c.HostKey, renterKey, id, c.RevisionNumber, time.Minute)
+	if jc.Check("couldn't fetch contract roots from host", err) == nil {
+		jc.Encode(roots)
+	}
+}
+
 func (w *worker) rhpRenewHandler(jc jape.Context) {
 	ctx := jc.Request.Context()
 
@@ -685,7 +800,7 @@ func (w *worker) slabMigrateHandler(jc jape.Context) {
 
 	// decode the contract set from the query string
 	var contractset string
-	if jc.DecodeForm(api.QueryStringParamContractSet, &contractset) != nil {
+	if jc.DecodeForm("contractset", &contractset) != nil {
 		return
 	} else if contractset != "" {
 		up.ContractSet = contractset
@@ -831,7 +946,7 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 	}
 
 	path := jc.PathParam("path")
-	obj, entries, err := w.bus.Object(ctx, path, prefix, off, limit)
+	obj, entries, err := w.bus.Object(ctx, path, api.ObjectsWithPrefix(prefix), api.ObjectsWithOffset(off), api.ObjectsWithLimit(limit))
 	if err != nil && strings.Contains(err.Error(), api.ErrObjectNotFound.Error()) {
 		jc.Error(err, http.StatusNotFound)
 		return
@@ -843,7 +958,7 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 		jc.Encode(entries)
 		return
 	}
-	if len(obj.Slabs) == 0 {
+	if len(obj.Slabs) == 0 && len(obj.PartialSlabs) == 0 {
 		return
 	}
 
@@ -861,19 +976,19 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 	// Read call. We can improve on this to some degree by buffering, but
 	// without knowing the exact ranges being requested, this will always be
 	// suboptimal. Thus, sadly, we have to roll our own range support.
-	ranges, err := http_range.ParseRange(jc.Request.Header.Get("Range"), obj.Size())
+	ranges, err := http_range.ParseRange(jc.Request.Header.Get("Range"), obj.Size)
 	if err != nil {
 		jc.Error(err, http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
 	var offset int64
-	length := obj.Size()
+	length := obj.Size
 	status := http.StatusOK
 	if len(ranges) > 0 {
 		status = http.StatusPartialContent
-		jc.ResponseWriter.Header().Set("Content-Range", ranges[0].ContentRange(obj.Size()))
+		jc.ResponseWriter.Header().Set("Content-Range", ranges[0].ContentRange(obj.Size))
 		offset, length = ranges[0].Start, ranges[0].Length
-		if offset < 0 || length < 0 || offset+length > obj.Size() {
+		if offset < 0 || length < 0 || offset+length > obj.Size {
 			jc.Error(fmt.Errorf("invalid range: %v %v", offset, length), http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
@@ -895,7 +1010,7 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 	}
 
 	// download the object
-	if jc.Check(fmt.Sprintf("couldn't download object '%v'", path), w.downloadManager.DownloadObject(ctx, &rw, obj, uint64(offset), uint64(length), contracts)) != nil {
+	if jc.Check(fmt.Sprintf("couldn't download object '%v'", path), w.downloadManager.DownloadObject(ctx, &rw, obj.Object, uint64(offset), uint64(length), contracts)) != nil {
 		return
 	}
 }
@@ -912,7 +1027,7 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 
 	// decode the contract set from the query string
 	var contractset string
-	if jc.DecodeForm(api.QueryStringParamContractSet, &contractset) != nil {
+	if jc.DecodeForm("contractset", &contractset) != nil {
 		return
 	} else if contractset != "" {
 		up.ContractSet = contractset
@@ -933,10 +1048,10 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 
 	// allow overriding the redundancy settings
 	rs := up.RedundancySettings
-	if jc.DecodeForm(api.QueryStringParamMinShards, &rs.MinShards) != nil {
+	if jc.DecodeForm("minshards", &rs.MinShards) != nil {
 		return
 	}
-	if jc.DecodeForm(api.QueryStringParamTotalShards, &rs.TotalShards) != nil {
+	if jc.DecodeForm("totalshards", &rs.TotalShards) != nil {
 		return
 	}
 	if jc.Check("invalid redundancy settings", rs.Validate()) != nil {
@@ -953,7 +1068,7 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 	}
 
 	// upload the object
-	object, err := w.uploadManager.Upload(ctx, jc.Request.Body, rs, contracts, up.CurrentHeight)
+	obj, partialSlabData, err := w.uploadManager.Upload(ctx, jc.Request.Body, rs, contracts, up.CurrentHeight, up.UploadPacking)
 	if jc.Check("couldn't upload object", err) != nil {
 		return
 	}
@@ -964,41 +1079,92 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 		h2c[c.HostKey] = c.ID
 	}
 	used := make(map[types.PublicKey]types.FileContractID)
-	for _, s := range object.Slabs {
+	for _, s := range obj.Slabs {
 		for _, ss := range s.Shards {
 			used[ss.Host] = h2c[ss.Host]
 		}
 	}
 
+	if len(partialSlabData) > 0 {
+		partialSlabs, err := w.bus.AddPartialSlab(jc.Request.Context(), partialSlabData, uint8(rs.MinShards), uint8(rs.TotalShards), up.ContractSet)
+		if jc.Check("couldn't add partial slabs to bus", err) != nil {
+			return
+		}
+		obj.PartialSlabs = partialSlabs
+	}
+
 	// persist the object
-	if jc.Check("couldn't add object", w.bus.AddObject(ctx, jc.PathParam("path"), up.ContractSet, object, used)) != nil {
+	if jc.Check("couldn't add object", w.bus.AddObject(ctx, jc.PathParam("path"), up.ContractSet, obj, used)) != nil {
 		return
 	}
 
 	// backup the object metadata if the user has opted in
 	cfg, err := satellite.StaticSatellite.Config()
-	if err != nil {
+	if err == nil && cfg.Enabled {
+		rs, err := satellite.StaticSatellite.GetSettings(ctx)
+		if err == nil && rs.BackupFileMetadata {
+			object, _, err := w.bus.Object(ctx, jc.PathParam("path"), "", 0, 0)
+			if err == nil {
+				satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
+					Key:   object.Key,
+					Path:  jc.PathParam("path"),
+					Slabs: object.Slabs,
+				})
+			}
+		}
+	}
+	// if partial uploads are not enabled we are done.
+	if !up.UploadPacking {
 		return
 	}
-	if cfg.Enabled {
-		rs, err := satellite.StaticSatellite.GetSettings(ctx)
-		if err != nil {
+
+	// if partial uploads are enabled, check whether we have a full slab now
+	packedSlabs, err := w.bus.PackedSlabsForUpload(jc.Request.Context(), 5*time.Minute, uint8(rs.MinShards), uint8(rs.TotalShards), up.ContractSet, 2)
+	if jc.Check("couldn't fetch packed slabs from bus", err) != nil {
+		return
+	}
+
+	for _, ps := range packedSlabs {
+		// upload packed slab.
+		shards := encryptPartialSlab(ps.Data, ps.Key, uint8(rs.MinShards), uint8(rs.TotalShards))
+		sectors, err := w.uploadManager.Migrate(ctx, shards, contracts, up.CurrentHeight)
+		if jc.Check("couldn't upload packed slab", err) != nil {
 			return
 		}
-		if rs.BackupFileMetadata {
-			object, _, err := w.bus.Object(ctx, jc.PathParam("path"), "", 0, 0)
-			if err != nil {
-				return
-			}
-			if err := satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
-				Key:   object.Key,
-				Path:  jc.PathParam("path"),
-				Slabs: object.Slabs,
-			}); err != nil {
-				return
-			}
+
+		// build used contracts map
+		h2c := make(map[types.PublicKey]types.FileContractID)
+		for _, c := range contracts {
+			h2c[c.HostKey] = c.ID
+		}
+		used := make(map[types.PublicKey]types.FileContractID)
+		for _, s := range sectors {
+			used[s.Host] = h2c[s.Host]
+		}
+
+		// mark packed slab as uploaded.
+		err = w.bus.MarkPackedSlabsUploaded(jc.Request.Context(), []api.UploadedPackedSlab{
+			{
+				BufferID: ps.BufferID,
+				Shards:   sectors,
+			},
+		}, used)
+		if jc.Check("couldn't mark packed slabs uploaded", err) != nil {
+			return
 		}
 	}
+}
+
+func encryptPartialSlab(data []byte, key object.EncryptionKey, minShards, totalShards uint8) [][]byte {
+	slab := object.Slab{
+		Key:       key,
+		MinShards: minShards,
+		Shards:    make([]object.Sector, totalShards),
+	}
+	encodedShards := make([][]byte, totalShards)
+	slab.Encode(data, encodedShards)
+	slab.Encrypt(encodedShards)
+	return encodedShards
 }
 
 func (w *worker) objectsHandlerDELETE(jc jape.Context) {
@@ -1052,21 +1218,6 @@ func (w *worker) idHandlerGET(jc jape.Context) {
 	jc.Encode(w.id)
 }
 
-func (w *worker) handleGETAlerts(c jape.Context) {
-	c.Encode(w.alerts.Active())
-}
-
-func (w *worker) handlePOSTAlertsDismiss(c jape.Context) {
-	var ids []types.Hash256
-	if err := c.Decode(&ids); err != nil {
-		return
-	} else if len(ids) == 0 {
-		c.Error(errors.New("no alerts to dismiss"), http.StatusBadRequest)
-		return
-	}
-	w.alerts.Dismiss(ids...)
-}
-
 func (w *worker) accountHandlerGET(jc jape.Context) {
 	var hostKey types.PublicKey
 	if jc.DecodeParam("hostkey", &hostKey) != nil {
@@ -1074,6 +1225,20 @@ func (w *worker) accountHandlerGET(jc jape.Context) {
 	}
 	account := rhpv3.Account(w.accounts.deriveAccountKey(hostKey).PublicKey())
 	jc.Encode(account)
+}
+
+func (w *worker) stateHandlerGET(jc jape.Context) {
+	jc.Encode(api.WorkerStateResponse{
+		ID:        w.id,
+		StartTime: w.startTime,
+		BuildState: api.BuildState{
+			Network:   build.NetworkName(),
+			Version:   build.Version(),
+			Commit:    build.Commit(),
+			OS:        runtime.GOOS,
+			BuildTime: build.BuildTime(),
+		},
+	})
 }
 
 // New returns an HTTP handler that serves the worker API.
@@ -1092,7 +1257,7 @@ func New(masterKey [32]byte, id string, b Bus, contractLockingDuration, busFlush
 	}
 
 	w := &worker{
-		alerts:                  alerts.NewManager(),
+		alerts:                  alerts.WithOrigin(b, fmt.Sprintf("worker.%s", id)),
 		allowPrivateIPs:         allowPrivateIPs,
 		contractLockingDuration: contractLockingDuration,
 		id:                      id,
@@ -1100,6 +1265,7 @@ func New(masterKey [32]byte, id string, b Bus, contractLockingDuration, busFlush
 		masterKey:               masterKey,
 		busFlushInterval:        busFlushInterval,
 		logger:                  l.Sugar().Named("worker").Named(id),
+		startTime:               time.Now(),
 	}
 	w.initTransportPool()
 	w.initAccounts(b)
@@ -1113,20 +1279,20 @@ func New(masterKey [32]byte, id string, b Bus, contractLockingDuration, busFlush
 // Handler returns an HTTP handler that serves the worker API.
 func (w *worker) Handler() http.Handler {
 	return jape.Mux(tracing.TracedRoutes("worker", map[string]jape.Handler{
-		"GET    /alerts":           w.handleGETAlerts,
-		"POST   /alerts/dismiss":   w.handlePOSTAlertsDismiss,
 		"GET    /account/:hostkey": w.accountHandlerGET,
 		"GET    /id":               w.idHandlerGET,
 
-		"GET    /rhp/contracts":       w.rhpContractsHandlerGET,
-		"POST   /rhp/scan":            w.rhpScanHandler,
-		"POST   /rhp/form":            w.rhpFormHandler,
-		"POST   /rhp/renew":           w.rhpRenewHandler,
-		"POST   /rhp/fund":            w.rhpFundHandler,
-		"POST   /rhp/sync":            w.rhpSyncHandler,
-		"POST   /rhp/pricetable":      w.rhpPriceTableHandler,
-		"POST   /rhp/registry/read":   w.rhpRegistryReadHandler,
-		"POST   /rhp/registry/update": w.rhpRegistryUpdateHandler,
+		"GET    /rhp/contracts":              w.rhpContractsHandlerGET,
+		"POST   /rhp/contract/:id/broadcast": w.rhpBroadcastHandler,
+		"GET    /rhp/contract/:id/roots":     w.rhpContractRootsHandlerGET,
+		"POST   /rhp/scan":                   w.rhpScanHandler,
+		"POST   /rhp/form":                   w.rhpFormHandler,
+		"POST   /rhp/renew":                  w.rhpRenewHandler,
+		"POST   /rhp/fund":                   w.rhpFundHandler,
+		"POST   /rhp/sync":                   w.rhpSyncHandler,
+		"POST   /rhp/pricetable":             w.rhpPriceTableHandler,
+		"POST   /rhp/registry/read":          w.rhpRegistryReadHandler,
+		"POST   /rhp/registry/update":        w.rhpRegistryUpdateHandler,
 
 		"GET    /stats/downloads": w.downloadsStatsHandlerGET,
 		"GET    /stats/uploads":   w.uploadsStatsHandlerGET,
@@ -1135,6 +1301,8 @@ func (w *worker) Handler() http.Handler {
 		"GET    /objects/*path": w.objectsHandlerGET,
 		"PUT    /objects/*path": w.objectsHandlerPUT,
 		"DELETE /objects/*path": w.objectsHandlerDELETE,
+
+		"GET    /state": w.stateHandlerGET,
 	}))
 }
 
@@ -1283,6 +1451,24 @@ func (w *worker) scanHost(ctx context.Context, hostKey types.PublicKey, hostIP s
 		})
 	}
 	return settings, pt, elapsed, err
+}
+
+// PartialSlab fetches the data of a partial slab from the bus. It will fall
+// back to ask the bus for the slab metadata in case the slab wasn't found in
+// the partial slab buffer.
+func (w *worker) PartialSlab(ctx context.Context, key object.EncryptionKey, offset, length uint32) ([]byte, *object.Slab, error) {
+	data, err := w.bus.FetchPartialSlab(ctx, key, offset, length)
+	if err != nil && strings.Contains(err.Error(), api.ErrObjectNotFound.Error()) {
+		// Check if slab was already uploaded.
+		slab, err := w.bus.Slab(ctx, key)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to fetch uploaded partial slab: %v", err)
+		}
+		return nil, &slab, nil
+	} else if err != nil {
+		return nil, nil, err
+	}
+	return data, nil, nil
 }
 
 func discardTxnOnErr(ctx context.Context, bus Bus, l *zap.SugaredLogger, txn types.Transaction, errContext string, err *error) {

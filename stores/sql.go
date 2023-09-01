@@ -3,13 +3,17 @@ package stores
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
 	"time"
 
 	"go.sia.tech/core/types"
+	"go.sia.tech/renterd/alerts"
+	"go.sia.tech/renterd/api"
 	"go.sia.tech/siad/modules"
+	"go.uber.org/zap"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -33,8 +37,11 @@ type (
 
 	// SQLStore is a helper type for interacting with a SQL-based backend.
 	SQLStore struct {
+		alerts alerts.Alerter
 		db     *gorm.DB
-		logger glogger.Interface
+		logger *zap.SugaredLogger
+
+		slabBufferMgr *SlabBufferManager
 
 		// Persistence buffer - related fields.
 		lastSave               time.Time
@@ -119,17 +126,21 @@ func DBConfigFromEnv() (uri, user, password, dbName string) {
 // NewSQLStore uses a given Dialector to connect to a SQL database.  NOTE: Only
 // pass migrate=true for the first instance of SQLHostDB if you connect via the
 // same Dialector multiple times.
-func NewSQLStore(conn gorm.Dialector, migrate bool, persistInterval time.Duration, walletAddress types.Address, logger glogger.Interface) (*SQLStore, modules.ConsensusChangeID, error) {
+func NewSQLStore(conn gorm.Dialector, alerts alerts.Alerter, partialSlabDir string, migrate bool, persistInterval time.Duration, walletAddress types.Address, slabBufferCompletionThreshold int64, logger *zap.SugaredLogger, gormLogger glogger.Interface) (*SQLStore, modules.ConsensusChangeID, error) {
+	if err := os.MkdirAll(partialSlabDir, 0700); err != nil {
+		return nil, modules.ConsensusChangeID{}, fmt.Errorf("failed to create partial slab dir: %v", err)
+	}
 	db, err := gorm.Open(conn, &gorm.Config{
-		Logger: logger, // custom logger
+		Logger: gormLogger, // custom logger
 	})
 	if err != nil {
 		return nil, modules.ConsensusChangeID{}, err
 	}
+	l := logger.Named("sql")
 
 	// Perform migrations.
 	if migrate {
-		if err := performMigrations(db, logger); err != nil {
+		if err := performMigrations(db, l); err != nil {
 			return nil, modules.ConsensusChangeID{}, fmt.Errorf("failed to perform migrations: %v", err)
 		}
 	}
@@ -168,8 +179,9 @@ func NewSQLStore(conn gorm.Dialector, migrate bool, persistInterval time.Duratio
 	}
 
 	ss := &SQLStore{
+		alerts:             alerts,
 		db:                 db,
-		logger:             logger,
+		logger:             l,
 		knownContracts:     isOurContract,
 		lastSave:           time.Now(),
 		persistInterval:    persistInterval,
@@ -185,6 +197,11 @@ func NewSQLStore(conn gorm.Dialector, migrate bool, persistInterval time.Duratio
 			Height: ci.Height,
 			ID:     types.BlockID(ci.BlockID),
 		},
+	}
+
+	ss.slabBufferMgr, err = newSlabBufferManager(ss, slabBufferCompletionThreshold, partialSlabDir)
+	if err != nil {
+		return nil, modules.ConsensusChangeID{}, err
 	}
 
 	return ss, ccid, nil
@@ -246,6 +263,11 @@ func (s *SQLStore) Close() error {
 	}
 
 	err = db.Close()
+	if err != nil {
+		return err
+	}
+
+	err = s.slabBufferMgr.Close()
 	if err != nil {
 		return err
 	}
@@ -386,14 +408,24 @@ func (ss *SQLStore) applyUpdates(force bool) (err error) {
 }
 
 func (s *SQLStore) retryTransaction(fc func(tx *gorm.DB) error, opts ...*sql.TxOptions) error {
+	abortRetry := func(err error) bool {
+		if err == nil ||
+			errors.Is(err, gorm.ErrRecordNotFound) ||
+			errors.Is(err, api.ErrObjectNotFound) ||
+			errors.Is(err, api.ErrObjectCorrupted) ||
+			errors.Is(err, api.ErrContractNotFound) {
+			return true
+		}
+		return false
+	}
 	var err error
 	timeoutIntervals := []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, time.Second, 3 * time.Second, 10 * time.Second, 10 * time.Second}
 	for i := 0; i < len(timeoutIntervals); i++ {
 		err = s.db.Transaction(fc, opts...)
-		if err == nil {
-			return nil
+		if abortRetry(err) {
+			return err
 		}
-		s.logger.Warn(context.Background(), fmt.Sprintf("transaction attempt %d/%d failed, retry in %v,  err: %v", i+1, 5, timeoutIntervals[i], err))
+		s.logger.Warn(context.Background(), fmt.Sprintf("transaction attempt %d/%d failed, retry in %v,  err: %v", i+1, len(timeoutIntervals), timeoutIntervals[i], err))
 		time.Sleep(timeoutIntervals[i])
 	}
 	return fmt.Errorf("retryTransaction failed: %w", err)

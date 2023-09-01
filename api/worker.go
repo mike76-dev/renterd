@@ -13,12 +13,6 @@ import (
 	"go.sia.tech/core/types"
 )
 
-const (
-	QueryStringParamContractSet = "contractset"
-	QueryStringParamMinShards   = "minshards"
-	QueryStringParamTotalShards = "totalshards"
-)
-
 // ErrConsensusNotSynced is returned by the worker API by endpoints that rely on
 // consensus and the consensus is not synced.
 var ErrConsensusNotSynced = errors.New("consensus is not synced")
@@ -178,6 +172,13 @@ type UploaderStats struct {
 	AvgSectorUploadSpeedMBPS float64         `json:"avgSectorUploadSpeedMBPS"`
 }
 
+// WorkerStateResponse is the response type for the /worker/state endpoint.
+type WorkerStateResponse struct {
+	ID        string    `json:"id"`
+	StartTime time.Time `json:"startTime"`
+	BuildState
+}
+
 // An UploadOption overrides an option on the upload and migrate endpoints in
 // the worker.
 type UploadOption func(url.Values)
@@ -186,15 +187,15 @@ type UploadOption func(url.Values)
 // upload
 func UploadWithRedundancy(minShards, totalShards int) UploadOption {
 	return func(v url.Values) {
-		v.Set(QueryStringParamMinShards, strconv.Itoa(minShards))
-		v.Set(QueryStringParamTotalShards, strconv.Itoa(totalShards))
+		v.Set("minshards", strconv.Itoa(minShards))
+		v.Set("totalshards", strconv.Itoa(totalShards))
 	}
 }
 
 // UploadWithContractSet sets the contract set that should be used for an upload
 func UploadWithContractSet(set string) UploadOption {
 	return func(v url.Values) {
-		v.Set(QueryStringParamContractSet, set)
+		v.Set("contractset", set)
 	}
 }
 
@@ -203,5 +204,25 @@ type DownloadObjectOption func(http.Header)
 func DownloadWithRange(offset, length uint64) DownloadObjectOption {
 	return func(h http.Header) {
 		h.Set("Range", fmt.Sprintf("bytes=%v-%v", offset, offset+length-1))
+	}
+}
+
+type ObjectsOption func(url.Values)
+
+func ObjectsWithPrefix(prefix string) ObjectsOption {
+	return func(v url.Values) {
+		v.Set("prefix", url.QueryEscape(prefix))
+	}
+}
+
+func ObjectsWithOffset(offset int) ObjectsOption {
+	return func(v url.Values) {
+		v.Set("offset", fmt.Sprint(offset))
+	}
+}
+
+func ObjectsWithLimit(limit int) ObjectsOption {
+	return func(v url.Values) {
+		v.Set("limit", fmt.Sprint(limit))
 	}
 }

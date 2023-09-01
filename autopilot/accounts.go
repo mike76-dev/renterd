@@ -11,12 +11,16 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	rhpv3 "go.sia.tech/core/rhp/v3"
 	"go.sia.tech/core/types"
+	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/tracing"
 	"go.uber.org/zap"
+	"lukechampine.com/frand"
 )
 
 var (
+	alertAccountRefillID = frand.Entropy256() // constant across restarts
+
 	minBalance  = types.Siacoins(1).Div64(2).Big()
 	maxBalance  = types.Siacoins(1)
 	maxNegDrift = new(big.Int).Neg(types.Siacoins(10).Big())
@@ -145,30 +149,54 @@ func (a *accounts) refillWorkerAccounts(w Worker) {
 	// refill accounts in separate goroutines
 	for _, c := range contracts {
 		// add logging for contracts in the set
-		logger := zap.NewNop().Sugar()
-		if _, inSet := inContractSet[c.ID]; inSet {
-			logger = a.l
-		}
+		_, inSet := inContractSet[c.ID]
 
 		// launch refill if not already in progress
 		if a.markRefillInProgress(workerID, c.HostKey) {
-			go func(contract api.ContractMetadata, l *zap.SugaredLogger) {
+			go func(contract api.ContractMetadata, inSet bool) {
+				// add logging for contracts in the set
+				l := zap.NewNop().Sugar()
+				if inSet {
+					l = a.l
+				}
 				rCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-				if accountID, refilled, err := refillWorkerAccount(rCtx, a.a, w, workerID, contract, l); err == nil && refilled {
+				accountID, refilled, err := refillWorkerAccount(rCtx, a.a, a.ap.bus, w, workerID, contract, l)
+				if err == nil && refilled {
 					a.l.Infow("Successfully funded account",
 						"account", accountID,
 						"host", contract.HostKey,
 						"balance", maxBalance,
 					)
 				}
+
+				// handle registering alert.
+				alertID := types.HashBytes(append(alertAccountRefillID[:], accountID[:]...))
+				if err != nil && inSet {
+					rerr := a.ap.alerts.RegisterAlert(ctx, alerts.Alert{
+						ID:       alertID,
+						Severity: alerts.SeverityError,
+						Message:  fmt.Sprintf("failed to refill account: %v", err),
+						Data: map[string]interface{}{
+							"accountID":  accountID.String(),
+							"contractID": contract.ID.String(),
+							"hostKey":    contract.HostKey.String(),
+						},
+						Timestamp: time.Now(),
+					})
+					if rerr != nil {
+						a.ap.logger.Errorf("failed to register alert: %v", err)
+					}
+				} else if err := a.ap.alerts.DismissAlerts(ctx, alertID); err != nil {
+					a.ap.logger.Errorf("failed to dismiss alert: %v", err)
+				}
 				a.markRefillDone(workerID, contract.HostKey)
 				cancel()
-			}(c, logger)
+			}(c, inSet)
 		}
 	}
 }
 
-func refillWorkerAccount(ctx context.Context, a AccountStore, w Worker, workerID string, contract api.ContractMetadata, logger *zap.SugaredLogger) (accountID rhpv3.Account, refilled bool, err error) {
+func refillWorkerAccount(ctx context.Context, a AccountStore, am alerts.Alerter, w Worker, workerID string, contract api.ContractMetadata, logger *zap.SugaredLogger) (accountID rhpv3.Account, refilled bool, err error) {
 	// add tracing
 	ctx, span := tracing.Tracer.Start(ctx, "refillAccount")
 	span.SetAttributes(attribute.Stringer("host", contract.HostKey))

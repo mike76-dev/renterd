@@ -1,21 +1,22 @@
 package stores
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	"go.sia.tech/core/types"
+	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/siad/modules"
 	stypes "go.sia.tech/siad/types"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -31,7 +32,8 @@ func (s *SQLStore) insertTestAnnouncement(hk types.PublicKey, a hostdb.Announcem
 // TestSQLHostDB tests the basic functionality of SQLHostDB using an in-memory
 // SQLite DB.
 func TestSQLHostDB(t *testing.T) {
-	hdb, dbName, ccid, err := newTestSQLStore()
+	dir := t.TempDir()
+	hdb, dbName, ccid, err := newTestSQLStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +148,8 @@ func TestSQLHostDB(t *testing.T) {
 
 	// Connect to the same DB again.
 	conn2 := NewEphemeralSQLiteConnection(dbName)
-	hdb2, ccid, err := NewSQLStore(conn2, false, time.Second, types.Address{}, nil)
+	am := alerts.WithOrigin(alerts.NewManager(), "test")
+	hdb2, ccid, err := NewSQLStore(conn2, am, dir, false, time.Second, types.Address{}, 0, zap.NewNop().Sugar(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,139 +162,20 @@ func TestSQLHostDB(t *testing.T) {
 	}
 }
 
-// TestRecordInteractions is a test for RecordInteractions.
-func TestRecordInteractions(t *testing.T) {
-	hdb, _, _, err := newTestSQLStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer hdb.Close()
-
-	// Add a host.
-	hk := types.GeneratePrivateKey().PublicKey()
-	err = hdb.addTestHost(hk)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// It shouldn't have any interactions.
-	ctx := context.Background()
-	host, err := hdb.Host(ctx, hk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if host.Interactions != (hostdb.Interactions{}) {
-		t.Fatal("mismatch")
-	}
-
-	createInteractions := func(hk types.PublicKey, successful, failed int) (interactions []hostdb.Interaction) {
-		for i := 0; i < successful+failed; i++ {
-			interactions = append(interactions, hostdb.Interaction{
-				Host:      hk,
-				Result:    []byte{1, 2, 3},
-				Success:   i < successful,
-				Timestamp: time.Now(),
-				Type:      "test",
-			})
-		}
-		return
-	}
-
-	// Add one successful and two failed interactions.
-	if err := hdb.RecordInteractions(ctx, createInteractions(hk, 1, 2)); err != nil {
-		t.Fatal(err)
-	}
-	host, err = hdb.Host(ctx, hk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if host.Interactions != (hostdb.Interactions{
-		SuccessfulInteractions: 1,
-		FailedInteractions:     2,
-	}) {
-		t.Fatal("mismatch")
-	}
-
-	// Add some more
-	if err := hdb.RecordInteractions(ctx, createInteractions(hk, 3, 10)); err != nil {
-		t.Fatal(err)
-	}
-	host, err = hdb.Host(ctx, hk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if host.Interactions != (hostdb.Interactions{
-		SuccessfulInteractions: 4,
-		FailedInteractions:     12,
-	}) {
-		t.Fatal("mismatch")
-	}
-
-	// Check that interactions were created.
-	var interactions []dbInteraction
-	if err := hdb.db.Find(&interactions).Error; err != nil {
-		t.Fatal(err)
-	}
-	if len(interactions) != 16 {
-		t.Fatal("wrong number of interactions")
-	}
-	for _, interaction := range interactions {
-		if !bytes.Equal(interaction.Result, []byte{1, 2, 3}) {
-			t.Fatal("result mismatch")
-		}
-		if interaction.Timestamp.IsZero() {
-			t.Fatal("timestamp not set")
-		}
-		if interaction.Type != "test" {
-			t.Fatal("type not set")
-		}
-		if types.PublicKey(interaction.Host) != hk {
-			t.Fatal("wrong host")
-		}
-	}
-
-	// Create a huge batch of interactions and check that it doesn't cause a
-	// "too-many-variables" - error.
-	var hks []types.PublicKey
-	for i := 0; i < 2*maxSQLVars; i++ {
-		hk = types.GeneratePrivateKey().PublicKey()
-		err = hdb.addTestHost(hk)
-		if err != nil {
-			t.Fatal(err)
-		}
-		hks = append(hks, hk)
-	}
-	var largeInteractionsBatch []hostdb.Interaction
-	for _, hostKey := range hks {
-		largeInteractionsBatch = append(largeInteractionsBatch, createInteractions(hostKey, 1, 0)...)
-	}
-	if err := hdb.RecordInteractions(context.Background(), largeInteractionsBatch); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func (s *SQLStore) addTestScan(hk types.PublicKey, t time.Time, err error, settings rhpv2.HostSettings) error {
-	var sr hostdb.ScanResult
-	if err == nil {
-		sr.Settings = settings
-	} else {
-		sr.Error = err.Error()
-	}
-	result, _ := json.Marshal(sr)
-	return s.RecordInteractions(context.Background(), []hostdb.Interaction{
+	return s.RecordHostScans(context.Background(), []hostdb.HostScan{
 		{
-			Host:      hk,
-			Result:    result,
+			HostKey:   hk,
+			Settings:  settings,
 			Success:   err == nil,
 			Timestamp: t,
-			Type:      hostdb.InteractionTypeScan,
 		},
 	})
 }
 
 // TestSQLHosts tests the Hosts method of the SQLHostDB type.
 func TestSQLHosts(t *testing.T) {
-	db, _, _, err := newTestSQLStore()
+	db, _, _, err := newTestSQLStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +259,7 @@ func TestSQLHosts(t *testing.T) {
 
 // TestSearchHosts is a unit test for SearchHosts.
 func TestSearchHosts(t *testing.T) {
-	db, _, _, err := newTestSQLStore()
+	db, _, _, err := newTestSQLStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +295,7 @@ func TestSearchHosts(t *testing.T) {
 
 // TestRecordScan is a test for recording scans.
 func TestRecordScan(t *testing.T) {
-	hdb, _, _, err := newTestSQLStore()
+	hdb, _, _, err := newTestSQLStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +333,7 @@ func TestRecordScan(t *testing.T) {
 	// Record a scan.
 	firstScanTime := time.Now().UTC()
 	settings := rhpv2.HostSettings{NetAddress: "host.com"}
-	if err := hdb.RecordInteractions(ctx, []hostdb.Interaction{newTestScan(hk, firstScanTime, settings, true)}); err != nil {
+	if err := hdb.RecordHostScans(ctx, []hostdb.HostScan{newTestScan(hk, firstScanTime, settings, true)}); err != nil {
 		t.Fatal(err)
 	}
 	host, err = hdb.Host(ctx, hk)
@@ -464,7 +348,7 @@ func TestRecordScan(t *testing.T) {
 		t.Fatal("wrong time")
 	}
 	host.Interactions.LastScan = time.Time{}
-	if host.Interactions != (hostdb.Interactions{
+	if expected := (hostdb.Interactions{
 		TotalScans:              1,
 		LastScan:                time.Time{},
 		LastScanSuccess:         true,
@@ -473,8 +357,8 @@ func TestRecordScan(t *testing.T) {
 		Downtime:                downtime,
 		SuccessfulInteractions:  1,
 		FailedInteractions:      0,
-	}) {
-		t.Fatal("mismatch")
+	}); host.Interactions != expected {
+		t.Fatal("mismatch", cmp.Diff(host.Interactions, expected))
 	}
 	if !reflect.DeepEqual(host.Settings, settings) {
 		t.Fatal("mismatch")
@@ -482,7 +366,7 @@ func TestRecordScan(t *testing.T) {
 
 	// Record another scan 1 hour after the previous one.
 	secondScanTime := firstScanTime.Add(time.Hour)
-	if err := hdb.RecordInteractions(ctx, []hostdb.Interaction{newTestScan(hk, secondScanTime, settings, true)}); err != nil {
+	if err := hdb.RecordHostScans(ctx, []hostdb.HostScan{newTestScan(hk, secondScanTime, settings, true)}); err != nil {
 		t.Fatal(err)
 	}
 	host, err = hdb.Host(ctx, hk)
@@ -509,7 +393,7 @@ func TestRecordScan(t *testing.T) {
 
 	// Record another scan 2 hours after the second one. This time it fails.
 	thirdScanTime := secondScanTime.Add(2 * time.Hour)
-	if err := hdb.RecordInteractions(ctx, []hostdb.Interaction{newTestScan(hk, thirdScanTime, settings, false)}); err != nil {
+	if err := hdb.RecordHostScans(ctx, []hostdb.HostScan{newTestScan(hk, thirdScanTime, settings, false)}); err != nil {
 		t.Fatal(err)
 	}
 	host, err = hdb.Host(ctx, hk)
@@ -536,7 +420,7 @@ func TestRecordScan(t *testing.T) {
 }
 
 func TestRemoveHosts(t *testing.T) {
-	hdb, _, _, err := newTestSQLStore()
+	hdb, _, _, err := newTestSQLStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +458,7 @@ func TestRemoveHosts(t *testing.T) {
 	hi2 := newTestScan(hk, t2, rhpv2.HostSettings{NetAddress: "host.com"}, false)
 
 	// record interactions
-	if err := hdb.RecordInteractions(context.Background(), []hostdb.Interaction{hi1, hi2}); err != nil {
+	if err := hdb.RecordHostScans(context.Background(), []hostdb.HostScan{hi1, hi2}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -602,7 +486,7 @@ func TestRemoveHosts(t *testing.T) {
 	// record interactions
 	t3 := now.Add(-time.Minute * 60) // 1 hour ago (60min downtime)
 	hi3 := newTestScan(hk, t3, rhpv2.HostSettings{NetAddress: "host.com"}, false)
-	if err := hdb.RecordInteractions(context.Background(), []hostdb.Interaction{hi3}); err != nil {
+	if err := hdb.RecordHostScans(context.Background(), []hostdb.HostScan{hi3}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -641,7 +525,7 @@ func TestRemoveHosts(t *testing.T) {
 
 // TestInsertAnnouncements is a test for insertAnnouncements.
 func TestInsertAnnouncements(t *testing.T) {
-	hdb, _, _, err := newTestSQLStore()
+	hdb, _, _, err := newTestSQLStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,7 +610,7 @@ func TestInsertAnnouncements(t *testing.T) {
 }
 
 func TestSQLHostAllowlist(t *testing.T) {
-	hdb, _, _, err := newTestSQLStore()
+	hdb, _, _, err := newTestSQLStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -900,7 +784,7 @@ func TestSQLHostAllowlist(t *testing.T) {
 }
 
 func TestSQLHostBlocklist(t *testing.T) {
-	hdb, _, _, err := newTestSQLStore()
+	hdb, _, _, err := newTestSQLStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1147,7 +1031,7 @@ func TestSQLHostBlocklist(t *testing.T) {
 }
 
 func TestSQLHostBlocklistBasic(t *testing.T) {
-	hdb, _, _, err := newTestSQLStore()
+	hdb, _, _, err := newTestSQLStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1235,23 +1119,11 @@ func hostByPubKey(tx *gorm.DB, hostKey types.PublicKey) (dbHost, error) {
 }
 
 // newTestScan returns a host interaction with given parameters.
-func newTestScan(hk types.PublicKey, scanTime time.Time, settings rhpv2.HostSettings, success bool) hostdb.Interaction {
-	var err string
-	if !success {
-		err = "failure"
-	}
-	result, _ := json.Marshal(struct {
-		Settings rhpv2.HostSettings `json:"settings"`
-		Error    string             `json:"error"`
-	}{
-		Settings: settings,
-		Error:    err,
-	})
-	return hostdb.Interaction{
-		Host:      hk,
-		Result:    result,
+func newTestScan(hk types.PublicKey, scanTime time.Time, settings rhpv2.HostSettings, success bool) hostdb.HostScan {
+	return hostdb.HostScan{
+		HostKey:   hk,
 		Success:   success,
 		Timestamp: scanTime,
-		Type:      hostdb.InteractionTypeScan,
+		Settings:  settings,
 	}
 }

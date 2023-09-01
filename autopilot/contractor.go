@@ -10,10 +10,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/montanaflynn/stats"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	"go.sia.tech/core/types"
+	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/tracing"
@@ -24,9 +26,18 @@ import (
 	// Satellite
 	//satellite "github.com/mike76-dev/renterd-satellite"
 	"go.sia.tech/renterd/satellite"
+	"lukechampine.com/frand"
+)
+
+var (
+	alertLowBalanceID    = frand.Entropy256() // constant until restarted
+	alertRenewalFailedID = frand.Entropy256() // constant until restarted
 )
 
 const (
+	// targetBlockTime is the average block time of the Sia network
+	targetBlockTime = 10 * time.Minute
+
 	// estimatedFileContractTransactionSetSize is the estimated blockchain size
 	// of a transaction set between a renter and a host that contains a file
 	// contract.
@@ -58,6 +69,15 @@ const (
 	// table from the host
 	timeoutHostPriceTable = 30 * time.Second
 
+	// timeoutHostRevision is the amount of time we wait for the broadcast of a
+	// revision to succeed.
+	timeoutBroadcastRevision = time.Minute
+
+	// broadcastRevisionRetriesPerInterval is the number of chances we give a
+	// contract that fails to broadcst to be broadcasted again within a single
+	// contract broadcast interval.
+	broadcastRevisionRetriesPerInterval = 5
+
 	// timeoutHostRevision is the amount of time we wait to receive the latest
 	// revision from the host. This is set to 4 minutes since siad currently
 	// blocks for 3 minutes when trying to fetch a revision and not having
@@ -76,8 +96,10 @@ type (
 		ap     *Autopilot
 		logger *zap.SugaredLogger
 
-		maintenanceTxnID         types.TransactionID
-		revisionSubmissionBuffer uint64
+		maintenanceTxnID          types.TransactionID
+		revisionBroadcastInterval time.Duration
+		revisionLastBroadcast     map[types.FileContractID]time.Time
+		revisionSubmissionBuffer  uint64
 
 		mu               sync.Mutex
 		cachedHostInfo   map[types.PublicKey]hostInfo
@@ -93,8 +115,8 @@ type (
 	contractInfo struct {
 		contract    api.Contract
 		settings    rhpv2.HostSettings
-		recoverable bool
 		usable      bool
+		recoverable bool
 	}
 
 	renewal struct {
@@ -104,11 +126,13 @@ type (
 	}
 )
 
-func newContractor(ap *Autopilot, revisionSubmissionBuffer uint64) *contractor {
+func newContractor(ap *Autopilot, revisionSubmissionBuffer uint64, revisionBroadcastInterval time.Duration) *contractor {
 	return &contractor{
-		ap:                       ap,
-		logger:                   ap.logger.Named("contractor"),
-		revisionSubmissionBuffer: revisionSubmissionBuffer,
+		ap:                        ap,
+		logger:                    ap.logger.Named("contractor"),
+		revisionBroadcastInterval: revisionBroadcastInterval,
+		revisionLastBroadcast:     make(map[types.FileContractID]time.Time),
+		revisionSubmissionBuffer:  revisionSubmissionBuffer,
 	}
 }
 
@@ -117,7 +141,7 @@ func (c *contractor) performContractMaintenance(ctx context.Context, w Worker) (
 	defer span.End()
 
 	// skip contract maintenance if we're stopped or not synced
-	if c.ap.isStopped() || !c.ap.isSynced() {
+	if c.ap.isStopped() {
 		return false, nil
 	}
 	c.logger.Info("performing contract maintenance")
@@ -185,6 +209,9 @@ func (c *contractor) performContractMaintenance(ctx context.Context, w Worker) (
 	}
 	contracts := resp.Contracts
 	c.logger.Debugf("fetched %d contracts from the worker, took %v", len(resp.Contracts), time.Since(start))
+
+	// run revision broadcast
+	c.runRevisionBroadcast(ctx, w, contracts, isInCurrentSet)
 
 	// sort contracts by their size
 	sort.Slice(contracts, func(i, j int) bool {
@@ -297,7 +324,7 @@ func (c *contractor) performContractMaintenance(ctx context.Context, w Worker) (
 	var renewed []renewal
 	if limit > 0 {
 		var toKeep []contractInfo
-		renewed, toKeep = c.runContractRenewals(ctx, w, toRenew, &remaining, uint64(limit))
+		renewed, toKeep = c.runContractRenewals(ctx, w, toRenew, &remaining, limit)
 		for _, ri := range renewed {
 			if ri.ci.usable || ri.ci.recoverable {
 				updatedSet = append(updatedSet, ri.to)
@@ -394,6 +421,7 @@ func (c *contractor) computeContractSetChanged(oldSet []api.ContractMetadata, ne
 	// log added and removed contracts
 	var added []types.FileContractID
 	var removed []types.FileContractID
+	removedReasons := make(map[string]string)
 	for _, contract := range oldSet {
 		_, exists := updated[contract.ID]
 		_, renewed := updated[renewalsFromTo[contract.ID]]
@@ -403,6 +431,7 @@ func (c *contractor) computeContractSetChanged(oldSet []api.ContractMetadata, ne
 			if !ok {
 				reason = "unknown"
 			}
+			removedReasons[contract.ID.String()] = reason
 			c.logger.Debugf("contract %v was removed from the contract set, size: %v, reason: %v", contract.ID, contractData[contract.ID], reason)
 		}
 	}
@@ -439,23 +468,44 @@ func (c *contractor) computeContractSetChanged(oldSet []api.ContractMetadata, ne
 		"added", len(added),
 		"removed", len(removed),
 	)
-	return len(added)+len(removed) > 0
+	hasChanged := len(added)+len(removed) > 0
+	if hasChanged {
+		err := c.ap.alerts.RegisterAlert(context.Background(), alerts.Alert{
+			ID:       frand.Entropy256(),
+			Severity: alerts.SeverityInfo,
+			Message:  fmt.Sprintf("The contract set has changed: %v contracts added and %v removed", len(added), len(removed)),
+			Data: map[string]any{
+				"additions": added,
+				"removals":  removedReasons,
+			},
+			Timestamp: time.Now(),
+		})
+		if err != nil {
+			logFn("failed to register alert", "error", err)
+		}
+	}
+	return hasChanged
 }
 
 func (c *contractor) performWalletMaintenance(ctx context.Context) error {
 	ctx, span := tracing.Tracer.Start(ctx, "contractor.performWalletMaintenance")
 	defer span.End()
 
-	if c.ap.isStopped() || !c.ap.isSynced() {
+	if c.ap.isStopped() {
 		return nil // skip contract maintenance if we're not synced
 	}
 
 	c.logger.Info("performing wallet maintenance")
+
+	// convenience variables
 	b := c.ap.bus
 	l := c.logger
+	state := c.ap.State()
+	cfg := state.cfg
+	period := state.period
+	renewWindow := cfg.Contracts.RenewWindow
 
 	// no contracts - nothing to do
-	cfg := c.ap.State().cfg
 	if cfg.Contracts.Amount == 0 {
 		l.Warn("wallet maintenance skipped, no contracts wanted")
 		return nil
@@ -465,6 +515,47 @@ func (c *contractor) performWalletMaintenance(ctx context.Context) error {
 	if cfg.Contracts.Allowance.IsZero() {
 		l.Warn("wallet maintenance skipped, no allowance set")
 		return nil
+	}
+
+	// fetch consensus state
+	cs, err := c.ap.bus.ConsensusState(ctx)
+	if err != nil {
+		l.Warnf("wallet maintenance skipped, fetching consensus state failed with err: %v", err)
+		return err
+	}
+	bh := cs.BlockHeight
+
+	// fetch wallet balance
+	wallet, err := b.Wallet(ctx)
+	if err != nil {
+		l.Warnf("wallet maintenance skipped, fetching wallet balance failed with err: %v", err)
+		return err
+	}
+	balance := wallet.Confirmed
+
+	// register an alert if balance is low
+	if balance.Cmp(cfg.Contracts.Allowance) < 0 {
+		// increase severity as we progress through renew window
+		severity := alerts.SeverityInfo
+		if bh+renewWindow/2 >= endHeight(cfg, period) {
+			severity = alerts.SeverityCritical
+		} else if bh+renewWindow >= endHeight(cfg, period) {
+			severity = alerts.SeverityWarning
+		}
+
+		err = c.ap.alerts.RegisterAlert(ctx, alerts.Alert{
+			ID:       alertLowBalanceID,
+			Severity: severity,
+			Message:  "wallet is low on funds",
+			Data: map[string]any{
+				"address": state.address,
+				"balance": balance,
+			},
+			Timestamp: time.Now(),
+		})
+		if err != nil {
+			l.Errorf("failed to register alert: err %v", err)
+		}
 	}
 
 	// pending maintenance transaction - nothing to do
@@ -489,12 +580,7 @@ func (c *contractor) performWalletMaintenance(ctx context.Context) error {
 		return nil
 	}
 
-	// not enough balance - nothing to do
-	balance, err := b.WalletBalance(ctx)
-	if err != nil {
-		l.Errorf("wallet maintenance skipped, fetching wallet balance failed with err: %v", err)
-		return err
-	}
+	// not enough balance to redistribute outputs - nothing to do
 	amount := cfg.Contracts.Allowance.Div64(cfg.Contracts.Amount)
 	outputs := balance.Div(amount).Big().Uint64()
 	if outputs < 2 {
@@ -673,7 +759,6 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 		ci.usable = usable
 		ci.recoverable = recoverable
 		if !usable {
-			toStopUsing[fcid] = strings.Join(reasons, ",")
 			c.logger.Infow(
 				"unusable contract",
 				"hk", hk,
@@ -681,8 +766,13 @@ func (c *contractor) runContractChecks(ctx context.Context, w Worker, contracts 
 				"reasons", reasons,
 				"refresh", refresh,
 				"renew", renew,
+				"recoverable", recoverable,
 			)
 		}
+		if len(reasons) > 0 {
+			toStopUsing[fcid] = strings.Join(reasons, ",")
+		}
+
 		if renew {
 			toRenew = append(toRenew, ci)
 		} else if refresh {
@@ -826,7 +916,76 @@ func (c *contractor) runContractFormations(ctx context.Context, w Worker, hosts 
 	return formed, nil
 }
 
-func (c *contractor) runContractRenewals(ctx context.Context, w Worker, toRenew []contractInfo, budget *types.Currency, limit uint64) (renewals []renewal, toKeep []contractInfo) {
+// runRevisionBroadcast broadcasts contract revisions from the current set of
+// contracts. Since we are migrating away from all contracts not in the set and
+// are not uploading to those contracts anyway, we only worry about contracts in
+// the set.
+func (c *contractor) runRevisionBroadcast(ctx context.Context, w Worker, allContracts []api.Contract, isInSet map[types.FileContractID]struct{}) {
+	if c.revisionBroadcastInterval == 0 {
+		return // not enabled
+	}
+
+	cs, err := c.ap.bus.ConsensusState(ctx)
+	if err != nil {
+		c.logger.Warnf("revision broadcast failed to fetch blockHeight: %v", err)
+		return
+	}
+	bh := cs.BlockHeight
+
+	successful, failed := 0, 0
+	for _, contract := range allContracts {
+		// check whether broadcasting is necessary
+		timeSinceRevisionHeight := targetBlockTime * time.Duration(bh-contract.RevisionHeight)
+		timeSinceLastTry := time.Since(c.revisionLastBroadcast[contract.ID])
+		_, inSet := isInSet[contract.ID]
+		if !inSet || contract.RevisionHeight == math.MaxUint64 || timeSinceRevisionHeight < c.revisionBroadcastInterval || timeSinceLastTry < c.revisionBroadcastInterval/broadcastRevisionRetriesPerInterval {
+			continue // nothing to do
+		}
+
+		// remember that we tried to broadcast this contract now
+		c.revisionLastBroadcast[contract.ID] = time.Now()
+
+		// ignore contracts for which we weren't able to obtain a revision
+		if contract.Revision == nil {
+			c.logger.Warnw("failed to broadcast contract revision: failed to fetch revision",
+				"hk", contract.HostKey,
+				"fcid", contract.ID)
+			continue
+		}
+
+		// broadcast revision
+		ctx, cancel := context.WithTimeout(ctx, timeoutBroadcastRevision)
+		err := w.RHPBroadcast(ctx, contract.ID)
+		cancel()
+		if err != nil && strings.Contains(err.Error(), "transaction has a file contract with an outdated revision number") {
+			continue // don't log - revision was already broadcasted
+		} else if err != nil {
+			c.logger.Warnw(fmt.Sprintf("failed to broadcast contract revision: %v", err),
+				"hk", contract.HostKey,
+				"fcid", contract.ID)
+			failed++
+			delete(c.revisionLastBroadcast, contract.ID) // reset to try again
+			continue
+		}
+		successful++
+	}
+	c.logger.Infow("revision broadcast completed",
+		"successful", successful,
+		"failed", failed)
+
+	// prune revisionLastBroadcast
+	contractMap := make(map[types.FileContractID]struct{})
+	for _, contract := range allContracts {
+		contractMap[contract.ID] = struct{}{}
+	}
+	for contractID := range c.revisionLastBroadcast {
+		if _, ok := contractMap[contractID]; !ok {
+			delete(c.revisionLastBroadcast, contractID)
+		}
+	}
+}
+
+func (c *contractor) runContractRenewals(ctx context.Context, w Worker, toRenew []contractInfo, budget *types.Currency, limit int) (renewals []renewal, toKeep []contractInfo) {
 	ctx, span := tracing.Tracer.Start(ctx, "runContractRenewals")
 	defer span.End()
 
@@ -857,45 +1016,67 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, toRenew 
 		c.logger.Debugw(
 			"contracts renewals completed",
 			"renewals", len(renewals),
+			"tokeep", len(toKeep),
 			"budget", budget,
 		)
 	}()
 
-	var nRenewed uint64
-	for _, ci := range toRenew {
-		// TODO: keep track of consecutive failures and break at some point
-
-		// limit the number of contracts to renew
-		if nRenewed >= limit {
-			break
+	var i int
+	for i = 0; i < len(toRenew); i++ {
+		// check if the autopilot is stopped
+		if c.ap.isStopped() {
+			return
 		}
 
-		// break if the autopilot is stopped
-		if c.ap.isStopped() {
+		// limit the number of contracts to renew
+		if len(renewals)+len(toKeep) >= limit {
 			break
 		}
 
 		state := c.ap.state
 		var renewed api.ContractMetadata
 		var proceed bool
+		// renew and add if it succeeds or if it's usable
 		if cfg.Enabled {
-			renewed, err = satellite.StaticSatellite.RenewContract(ctx, ci.contract.ID, endHeight(state.cfg, state.period), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
+			renewed, err = satellite.StaticSatellite.RenewContract(ctx, toRenew[i].contract.ID, endHeight(state.cfg, state.period), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
 			proceed = true
 		} else {
-			renewed, proceed, err = c.renewContract(ctx, w, ci, budget)
+			renewed, proceed, err = c.renewContract(ctx, w, toRenew[i], budget)
 		}
 
 		if err == nil {
-			renewals = append(renewals, renewal{from: ci.contract.ID, to: renewed.ID, ci: ci})
-			nRenewed++
-		} else if ci.usable {
-			toKeep = append(toKeep, ci)
-			nRenewed++
+			renewals = append(renewals, renewal{from: toRenew[i].contract.ID, to: renewed.ID, ci: toRenew[i]})
+		} else if toRenew[i].usable {
+			toKeep = append(toKeep, toRenew[i])
 		}
+
+		// break if we don't want to proceed
 		if !proceed {
+			rerr := c.ap.alerts.RegisterAlert(ctx, alerts.Alert{
+				ID:       alertRenewalFailedID,
+				Severity: alerts.SeverityCritical,
+				Message:  fmt.Sprintf("Contract renewals were interrupted due to latest error: %v", err),
+				Data: map[string]interface{}{
+					"contractID": toRenew[i].contract.ID.String(),
+					"hostKey":    toRenew[i].contract.HostKey.String(),
+				},
+				Timestamp: time.Now(),
+			})
+			if rerr != nil {
+				c.logger.Errorf("failed to register alert: err %v", rerr)
+			}
 			break
 		}
 	}
+
+	// loop through the remaining renewals and add them to the keep list if
+	// they're usable and we have 'limit' left
+	for j := i; j < len(toRenew); j++ {
+		if len(renewals)+len(toKeep) < limit && toRenew[j].usable {
+			toKeep = append(toKeep, toRenew[j])
+		}
+	}
+
 	return renewals, toKeep
 }
 
@@ -934,16 +1115,15 @@ func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, toRefre
 	}()
 
 	for _, ci := range toRefresh {
-		// TODO: keep track of consecutive failures and break at some point
-
-		// break if the autopilot is stopped
+		// check if the autopilot is stopped
 		if c.ap.isStopped() {
-			break
+			return
 		}
 
 		state := c.ap.state
 		var renewed api.ContractMetadata
 		var proceed bool
+		// refresh and add if it succeeds
 		if cfg.Enabled {
 			renewed, err = satellite.StaticSatellite.RenewContract(ctx, ci.contract.ID, ci.contract.EndHeight(), state.cfg.Contracts.Storage, state.cfg.Contracts.Upload, state.cfg.Contracts.Download)
 			proceed = true
@@ -954,6 +1134,8 @@ func (c *contractor) runContractRefreshes(ctx context.Context, w Worker, toRefre
 		if err == nil {
 			refreshed = append(refreshed, renewal{from: ci.contract.ID, to: renewed.ID, ci: ci})
 		}
+
+		// break if we don't want to proceed
 		if !proceed {
 			break
 		}
@@ -1090,23 +1272,31 @@ func (c *contractor) managedFindMinAllowedHostScores(ctx context.Context, w Work
 	// to match the allowance. The lowest scoring host of these new hosts will
 	// be used as a baseline for determining whether our existing contracts are
 	// worthwhile.
+	var lowestScores []float64
 	buffer := 50
-	candidates, scores, err := c.candidateHosts(ctx, w, hosts, make(map[types.PublicKey]struct{}), storedData, int(numContracts)+int(buffer), math.SmallestNonzeroFloat64) // avoid 0 score hosts
+	for i := 0; i < 5; i++ {
+		candidates, scores, err := c.candidateHosts(ctx, w, hosts, make(map[types.PublicKey]struct{}), storedData, int(numContracts)+int(buffer), math.SmallestNonzeroFloat64) // avoid 0 score hosts
+		if err != nil {
+			return 0, err
+		}
+		if len(candidates) == 0 {
+			c.logger.Warn("min host score is set to the smallest non-zero float because there are no candidate hosts")
+			return math.SmallestNonzeroFloat64, nil
+		}
+
+		// Find the minimum score that a host is allowed to have to be considered
+		// good for upload.
+		lowestScore := math.MaxFloat64
+		for _, score := range scores {
+			if score < lowestScore {
+				lowestScore = score
+			}
+		}
+		lowestScores = append(lowestScores, lowestScore)
+	}
+	lowestScore, err := stats.Float64Data(lowestScores).Median()
 	if err != nil {
 		return 0, err
-	}
-	if len(candidates) == 0 {
-		c.logger.Warn("min host score is set to the smallest non-zero float because there are no candidate hosts")
-		return math.SmallestNonzeroFloat64, nil
-	}
-
-	// Find the minimum score that a host is allowed to have to be considered
-	// good for upload.
-	lowestScore := math.MaxFloat64
-	for _, score := range scores {
-		if score < lowestScore {
-			lowestScore = score
-		}
 	}
 	minScore := lowestScore / minAllowedScoreLeeway
 	c.logger.Infow("finished computing minScore",
@@ -1262,6 +1452,7 @@ func (c *contractor) renewContract(ctx context.Context, w Worker, ci contractInf
 	// sanity check the endheight is not the same on renewals
 	endHeight := endHeight(cfg, state.period)
 	if endHeight <= rev.EndHeight() {
+		c.logger.Debugw("invalid renewal endheight", "oldEndheight", rev.EndHeight(), "newEndHeight", endHeight, "period", state.period, "bh", cs.BlockHeight)
 		return api.ContractMetadata{}, false, fmt.Errorf("renewal endheight should surpass the current contract endheight, %v <= %v", endHeight, rev.EndHeight())
 	}
 
@@ -1273,7 +1464,7 @@ func (c *contractor) renewContract(ctx context.Context, w Worker, ci contractInf
 	newRevision, _, err := w.RHPRenew(ctx, fcid, endHeight, hk, contract.SiamuxAddr, settings.Address, state.address, renterFunds, newCollateral, settings.WindowSize)
 	if err != nil {
 		c.logger.Errorw(fmt.Sprintf("renewal failed, err: %v", err), "hk", hk, "fcid", fcid)
-		if containsError(err, wallet.ErrInsufficientBalance) {
+		if strings.Contains(err.Error(), wallet.ErrInsufficientBalance.Error()) {
 			return api.ContractMetadata{}, false, err
 		}
 		return api.ContractMetadata{}, true, err
@@ -1361,7 +1552,7 @@ func (c *contractor) refreshContract(ctx context.Context, w Worker, ci contractI
 	newRevision, _, err := w.RHPRenew(ctx, contract.ID, contract.EndHeight(), hk, contract.SiamuxAddr, settings.Address, state.address, renterFunds, newCollateral, settings.WindowSize)
 	if err != nil {
 		c.logger.Errorw(fmt.Sprintf("refresh failed, err: %v", err), "hk", hk, "fcid", fcid)
-		if containsError(err, wallet.ErrInsufficientBalance) {
+		if strings.Contains(err.Error(), wallet.ErrInsufficientBalance.Error()) {
 			return api.ContractMetadata{}, false, err
 		}
 		return api.ContractMetadata{}, true, err
@@ -1433,7 +1624,7 @@ func (c *contractor) formContract(ctx context.Context, w Worker, host hostdb.Hos
 	if err != nil {
 		// TODO: keep track of consecutive failures and break at some point
 		c.logger.Errorw(fmt.Sprintf("contract formation failed, err: %v", err), "hk", hk)
-		if containsError(err, wallet.ErrInsufficientBalance) {
+		if strings.Contains(err.Error(), wallet.ErrInsufficientBalance.Error()) {
 			return api.ContractMetadata{}, false, err
 		}
 		return api.ContractMetadata{}, true, err

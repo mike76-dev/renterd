@@ -20,14 +20,26 @@ env:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        network: ["mainnet" , "testnet"]
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-go@v3
         with:
           go-version: 'stable'
-      - name: Install dependencies
+      - name: Setup
         run: |
-          sudo apt update && sudo apt install -y gcc-aarch64-linux-gnu
+          sudo apt update
+          sudo apt install -y gcc-aarch64-linux-gnu
+          go generate ./...
+      - name: Set build tag environment variable
+        run: |
+          if [[ "${{ matrix.network }}" == "testnet" ]]; then
+            echo "BUILD_TAGS=testnet netgo" >> $GITHUB_ENV
+          else
+            echo "BUILD_TAGS=netgo" >> $GITHUB_ENV
+          fi
       - name: Build amd64
         env:
           CGO_ENABLED: 1
@@ -35,8 +47,8 @@ jobs:
           GOARCH: amd64
         run: |
           mkdir -p release
-          ZIP_OUTPUT=release/renterd_${GOOS}_${GOARCH}.zip
-          go build -tags='netgo' -trimpath -o bin/ -a -ldflags '-s -w -linkmode external -extldflags "-static"' ./cmd/renterd
+          ZIP_OUTPUT=release/renterd_${{ matrix.network }}_${GOOS}_${GOARCH}.zip
+          go build -tags="$BUILD_TAGS" -trimpath -o bin/ -a -ldflags '-s -w -linkmode external -extldflags "-static"' ./cmd/renterd
           cp README.md LICENSE bin/
           zip -qj $ZIP_OUTPUT bin/*
       - name: Build arm64
@@ -47,8 +59,8 @@ jobs:
           CC: aarch64-linux-gnu-gcc
         run: |
           mkdir -p release
-          ZIP_OUTPUT=release/renterd_${GOOS}_${GOARCH}.zip
-          go build -tags='netgo' -trimpath -o bin/ -a -ldflags '-s -w -linkmode external -extldflags "-static"' ./cmd/renterd
+          ZIP_OUTPUT=release/renterd_${{ matrix.network }}_${GOOS}_${GOARCH}.zip
+          go build -tags="$BUILD_TAGS" -trimpath -o bin/ -a -ldflags '-s -w -linkmode external -extldflags "-static"' ./cmd/renterd
           cp README.md LICENSE bin/
           zip -qj $ZIP_OUTPUT bin/*
       - uses: actions/upload-artifact@v3
@@ -57,6 +69,9 @@ jobs:
           path: release/
   build-mac: 
     runs-on: macos-latest
+    strategy:
+      matrix:
+        network: ["mainnet" , "testnet"]
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-go@v3
@@ -68,9 +83,9 @@ jobs:
           GOOS: darwin
           GOARCH: amd64
         run: |
-          ZIP_OUTPUT=release/renterd_${GOOS}_${GOARCH}.zip
+          ZIP_OUTPUT=release/renterd_${{ matrix.network }}_${GOOS}_${GOARCH}.zip
           mkdir -p release
-          go build -tags='netgo' -trimpath -o bin/ -a -ldflags '-s -w' ./cmd/renterd
+          go build -tags="$BUILD_TAGS" -trimpath -o bin/ -a -ldflags '-s -w' ./cmd/renterd
           cp README.md LICENSE bin/
           ditto -ck bin $ZIP_OUTPUT
       - name: Build arm64
@@ -79,9 +94,9 @@ jobs:
           GOOS: darwin
           GOARCH: arm64
         run: |
-          ZIP_OUTPUT=release/renterd_${GOOS}_${GOARCH}.zip
+          ZIP_OUTPUT=release/renterd_${{ matrix.network }}_${GOOS}_${GOARCH}.zip
           mkdir -p release
-          go build -tags='netgo' -trimpath -o bin/ -a -ldflags '-s -w' ./cmd/renterd
+          go build -tags="$BUILD_TAGS" -trimpath -o bin/ -a -ldflags '-s -w' ./cmd/renterd
           cp README.md LICENSE bin/
           ditto -ck bin $ZIP_OUTPUT
       - uses: actions/upload-artifact@v3
@@ -90,11 +105,25 @@ jobs:
           path: release/
   build-windows: 
     runs-on: windows-latest
+    strategy:
+      matrix:
+        network: ["mainnet" , "testnet"]
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-go@v3
         with:
           go-version: 'stable'
+      - name: Set build tag environment variable
+        run: |
+          if ( "${{ matrix.network }}" -eq "testnet" ) {
+            echo "BUILD_TAGS=testnet netgo" >> $GITHUB_ENV
+          } else {
+            echo "BUILD_TAGS=netgo" >> $GITHUB_ENV
+          }
+      - name: Setup
+        shell: bash
+        run: |
+          go generate ./...
       - name: Build amd64
         env:
           CGO_ENABLED: 1
@@ -103,8 +132,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p release
-          ZIP_OUTPUT=release/renterd_${GOOS}_${GOARCH}.zip
-          go build -tags='netgo' -trimpath -o bin/ -a -ldflags '-s -w -linkmode external -extldflags "-static"' ./cmd/renterd
+          ZIP_OUTPUT=release/renterd_${{ matrix.network }}_${GOOS}_${GOARCH}.zip
+          go build -tags="$BUILD_TAGS" -trimpath -o bin/ -a -ldflags '-s -w -linkmode external -extldflags "-static"' ./cmd/renterd
           cp README.md LICENSE bin/
           7z a $ZIP_OUTPUT bin/*
       - uses: actions/upload-artifact@v3

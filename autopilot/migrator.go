@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/object"
@@ -17,7 +18,7 @@ import (
 )
 
 var (
-	alertMigrationID = frand.Entropy256() // constnt across restarts
+	alertMigrationID = frand.Entropy256() // constant until restarted
 )
 
 const (
@@ -126,10 +127,23 @@ func (m *migrator) performMigrations(p *workerPool) {
 						}
 						err = w.MigrateSlab(ctx, slab, ap.Config.Contracts.Set)
 						if err != nil {
-							m.logger.Errorf("%v: failed to migrate slab %d/%d, health: %v, err: %v", id, j.slabIdx+1, j.batchSize, j.Health, err)
+							errMsg := fmt.Sprintf("%v: failed to migrate slab %d/%d, health: %v, err: %v", id, j.slabIdx+1, j.batchSize, j.Health, err)
+							rerr := m.ap.alerts.RegisterAlert(ctx, alerts.Alert{
+								ID:       types.HashBytes([]byte(slab.Key.String())),
+								Severity: alerts.SeverityCritical,
+								Message:  errMsg,
+								Data: map[string]interface{}{
+									"slabKey": slab.Key.String(),
+								},
+								Timestamp: time.Now(),
+							})
+							if rerr != nil {
+								m.logger.Errorf("failed to register alert: err %v", rerr)
+							}
+							m.logger.Errorf(errMsg)
 							continue
 						}
-						m.logger.Debugf("%v: successfully migrated slab '%v' (health: %v) %d/%d", id, j.Key, j.Health, j.slabIdx+1, j.batchSize)
+						m.logger.Debugf("%v: successfully migrated slab (health: %v) %d/%d", id, j.Health, j.slabIdx+1, j.batchSize)
 					}
 				}(w)
 			}
@@ -151,6 +165,23 @@ OUTER:
 			m.logger.Error("could not perform migrations, no contract set configured")
 			return
 		}
+
+		// recompute health.
+		start := time.Now()
+		if err := b.RefreshHealth(ctx); err != nil {
+			rerr := m.ap.alerts.RegisterAlert(ctx, alerts.Alert{
+				ID:        frand.Entropy256(),
+				Severity:  alerts.SeverityCritical,
+				Message:   fmt.Sprintf("migrations interrupted - failed to refresh cached slab health: %v", err),
+				Timestamp: time.Now(),
+			})
+			if rerr != nil {
+				m.logger.Errorf("failed to register alert: err %v", rerr)
+			}
+			m.logger.Errorf("failed to recompute cached health before migration", err)
+			return
+		}
+		m.logger.Debugf("recomputed slab health in %v", time.Since(start))
 
 		// fetch slabs for migration
 		toMigrateNew, err := b.SlabsForMigration(ctx, m.healthCutoff, set, migratorBatchSize)
@@ -196,12 +227,15 @@ OUTER:
 		m.logger.Debugf("%d slabs to migrate", len(toMigrate))
 
 		// register an alert to notify users about ongoing migrations.
-		m.ap.alerts.Register(alerts.Alert{
+		err = m.ap.alerts.RegisterAlert(ctx, alerts.Alert{
 			ID:        alertMigrationID,
 			Severity:  alerts.SeverityInfo,
 			Message:   fmt.Sprintf("Migrating %d slabs", len(toMigrate)),
 			Timestamp: time.Now(),
 		})
+		if err != nil {
+			m.logger.Errorf("failed to register alert: err %v", err)
+		}
 
 		// return if there are no slabs to migrate
 		if len(toMigrate) == 0 {
