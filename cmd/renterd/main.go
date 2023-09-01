@@ -500,11 +500,11 @@ func main() {
 	}
 
 	// Satellite.
-	satAddr := *apiAddr + "/api/satellite"
-	satPassword := getAPIPassword()
-	autopilotAddr := *apiAddr + "/api/autopilot"
+	satAddr := cfg.HTTP.Address + "/api/satellite"
+	satPassword := cfg.HTTP.Password
+	autopilotAddr := cfg.HTTP.Address + "/api/autopilot"
 	ac := autopilot.NewClient(autopilotAddr, satPassword)
-	satellite, err := satellite.NewSatellite(ac, bc, *dir, getSeed(), logger, satAddr, satPassword)
+	satellite, err := satellite.NewSatellite(ac, bc, cfg.Directory, getSeed(), logger, satAddr, satPassword)
 	if err != nil {
 		log.Fatal("failed to create satellite, err: ", err)
 	}
