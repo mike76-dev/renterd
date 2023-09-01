@@ -34,7 +34,7 @@ type busClient interface {
 	Contracts(ctx context.Context) ([]api.ContractMetadata, error)
 	ContractSetContracts(ctx context.Context, set string) (contracts []api.ContractMetadata, err error)
 	GougingParams(ctx context.Context) (api.GougingParams, error)
-	Object(ctx context.Context, path, prefix string, offset, limit int) (object.Object, []api.ObjectMetadata, error)
+	Object(ctx context.Context, path string, options ...api.ObjectsOption) (api.Object, []api.ObjectMetadata, error)
 	RecordContractSpending(ctx context.Context, records []api.ContractSpendingRecord) error
 	SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) error
 }

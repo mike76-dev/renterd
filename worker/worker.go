@@ -1103,7 +1103,7 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 	if err == nil && cfg.Enabled {
 		rs, err := satellite.StaticSatellite.GetSettings(ctx)
 		if err == nil && rs.BackupFileMetadata {
-			object, _, err := w.bus.Object(ctx, jc.PathParam("path"), "", 0, 0)
+			object, _, err := w.bus.Object(ctx, jc.PathParam("path"))
 			if err == nil {
 				satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
 					Key:   object.Key,

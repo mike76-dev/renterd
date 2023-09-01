@@ -980,7 +980,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 
-	_, entries, err := s.bus.Object(ctx, "", "", 0, -1)
+	_, entries, err := s.bus.Object(ctx, "")
 	if jc.Check("couldn't requests present objects", err) != nil {
 		return
 	}
@@ -1035,7 +1035,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 				used[ss.Host] = h2c[ss.Host]
 			}
 		}
-		_, _, err := s.bus.Object(ctx, fm.Path, "", 0, -1)
+		_, _, err := s.bus.Object(ctx, fm.Path)
 		if err == nil {
 			continue // only add the object if it's not present already
 		}
