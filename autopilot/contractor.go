@@ -185,6 +185,9 @@ func (c *contractor) performContractMaintenance(ctx context.Context, w Worker) (
 		if rs.AutoRenewContracts {
 			satellite.StaticSatellite.RequestContracts(sctx)
 		}
+		if rs.AutoRepairFiles {
+			satellite.StaticSatellite.RequestMetadata(sctx, state.cfg.Contracts.Set)
+		}
 	}
 
 	// fetch current contract set
