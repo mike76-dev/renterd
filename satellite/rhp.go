@@ -1039,7 +1039,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 		if err == nil {
 			continue // only add the object if it's not present already
 		}
-		if err := s.bus.AddObject(ctx, fm.Path, set, obj, used); err != nil {
+		if err := s.bus.AddObject(ctx, "", fm.Path, set, obj, used); err != nil {
 			s.logger.Error(fmt.Sprintf("couldn't add object: %s", err))
 			continue
 		}
