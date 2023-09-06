@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -47,6 +48,19 @@ type RHPScanRequest struct {
 	HostKey types.PublicKey `json:"hostKey"`
 	HostIP  string          `json:"hostIP"`
 	Timeout time.Duration   `json:"timeout"`
+}
+
+// RHPPruneContractRequest is the request type for the /rhp/contract/:id/prune
+// endpoint.
+type RHPPruneContractRequest struct {
+	Timeout time.Duration `json:"timeout"`
+}
+
+// RHPPruneContractResponse is the response type for the /rhp/contract/:id/prune
+// endpoint.
+type RHPPruneContractResponse struct {
+	Pruned    uint64 `json:"pruned"`
+	Remaining uint64 `json:"remaining"`
 }
 
 // RHPPriceTableRequest is the request type for the /rhp/pricetable endpoint.
@@ -206,11 +220,30 @@ func UploadWithBucket(bucket string) UploadOption {
 	}
 }
 
+type DownloadRange struct {
+	Start  int64
+	Length int64
+}
+
+type GetObjectResponse struct {
+	Content     io.ReadCloser  `json:"content"`
+	ContentType string         `json:"contentType"`
+	ModTime     time.Time      `json:"modTime"`
+	Range       *DownloadRange `json:"range,omitempty"`
+	Size        int64          `json:"size"`
+}
+
 type DownloadObjectOption func(http.Header)
 
-func DownloadWithRange(offset, length uint64) DownloadObjectOption {
+func DownloadWithRange(offset, length int64) DownloadObjectOption {
 	return func(h http.Header) {
 		h.Set("Range", fmt.Sprintf("bytes=%v-%v", offset, offset+length-1))
+	}
+}
+
+func DownloadWithBucket(bucket string) DownloadObjectOption {
+	return func(h http.Header) {
+		h.Set("bucket", bucket)
 	}
 }
 

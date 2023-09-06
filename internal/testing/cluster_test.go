@@ -600,7 +600,7 @@ func TestUploadDownloadBasic(t *testing.T) {
 	}
 
 	// download again, 32 bytes at a time.
-	for i := uint64(0); i < 4; i++ {
+	for i := int64(0); i < 4; i++ {
 		offset := i * 32
 		var buffer bytes.Buffer
 		if err := w.DownloadObject(context.Background(), &buffer, name, api.DownloadWithRange(offset, 32)); err != nil {
@@ -1823,7 +1823,7 @@ func TestUploadPacking(t *testing.T) {
 	frand.Read(data3)
 
 	// declare helpers
-	download := func(name string, data []byte, offset, length uint64) {
+	download := func(name string, data []byte, offset, length int64) {
 		t.Helper()
 		var buffer bytes.Buffer
 		if err := w.DownloadObject(context.Background(), &buffer, name,
@@ -1839,7 +1839,7 @@ func TestUploadPacking(t *testing.T) {
 		if err := w.UploadObject(context.Background(), bytes.NewReader(data), name); err != nil {
 			t.Fatal(err)
 		}
-		download(name, data, 0, uint64(len(data)))
+		download(name, data, 0, int64(len(data)))
 		obj, _, err := b.Object(context.Background(), name)
 		if err != nil {
 			t.Fatal(err)
@@ -1870,7 +1870,7 @@ func TestUploadPacking(t *testing.T) {
 	uploadDownload("file1", data1)
 
 	// download it 32 bytes at a time.
-	for i := uint64(0); i < 4; i++ {
+	for i := int64(0); i < 4; i++ {
 		download("file1", data1, 32*i, 32)
 	}
 
@@ -1878,7 +1878,7 @@ func TestUploadPacking(t *testing.T) {
 	uploadDownload("file2", data2)
 
 	// file 1 should still be available.
-	for i := uint64(0); i < 4; i++ {
+	for i := int64(0); i < 4; i++ {
 		download("file1", data1, 32*i, 32)
 	}
 
@@ -1886,17 +1886,17 @@ func TestUploadPacking(t *testing.T) {
 	uploadDownload("file3", data3)
 
 	// file 1 should still be available.
-	for i := uint64(0); i < 4; i++ {
+	for i := int64(0); i < 4; i++ {
 		download("file1", data1, 32*i, 32)
 	}
 
 	// file 2 should still be available. Download each half separately.
-	download("file2", data2, 0, uint64(len(data2)))
-	download("file2", data2, 0, uint64(len(data2))/2)
-	download("file2", data2, uint64(len(data2))/2, uint64(len(data2))/2)
+	download("file2", data2, 0, int64(len(data2)))
+	download("file2", data2, 0, int64(len(data2))/2)
+	download("file2", data2, int64(len(data2))/2, int64(len(data2))/2)
 
 	// download file 3 32 bytes at a time as well.
-	for i := uint64(0); i < 4; i++ {
+	for i := int64(0); i < 4; i++ {
 		download("file3", data3, 32*i, 32)
 	}
 
@@ -1906,7 +1906,7 @@ func TestUploadPacking(t *testing.T) {
 	data5 := make([]byte, slabSize/2)
 	uploadDownload("file4", data4)
 	uploadDownload("file5", data5)
-	download("file4", data4, 0, uint64(len(data4)))
+	download("file4", data4, 0, int64(len(data4)))
 
 	// check the object stats
 	os, err := b.ObjectsStats()
@@ -2025,7 +2025,11 @@ func TestWallet(t *testing.T) {
 		// to the amount of money sent as well as the miner fees used.
 		spendableDiff := wallet.Spendable.Sub(updated.Spendable)
 		if updated.Unconfirmed.Cmp(spendableDiff) > 0 {
-			t.Fatalf("unconfirmed balance can't be greater than the difference in spendable balance here, confirmed %v->%v unconfirmed %v->%v spendable %v->%v fee %v", wallet.Confirmed, updated.Confirmed, wallet.Unconfirmed, updated.Unconfirmed, wallet.Spendable, updated.Spendable, minerFee)
+			t.Fatalf("unconfirmed balance can't be greater than the difference in spendable balance here: \nconfirmed %v (%v) - >%v (%v) \nunconfirmed %v (%v) -> %v (%v) \nspendable %v (%v) -> %v (%v) \nfee %v (%v)",
+				wallet.Confirmed, wallet.Confirmed.ExactString(), updated.Confirmed, updated.Confirmed.ExactString(),
+				wallet.Unconfirmed, wallet.Unconfirmed.ExactString(), updated.Unconfirmed, updated.Unconfirmed.ExactString(),
+				wallet.Spendable, wallet.Spendable.ExactString(), updated.Spendable, updated.Spendable.ExactString(),
+				minerFee, minerFee.ExactString())
 		}
 		withdrawnAmt := spendableDiff.Sub(updated.Unconfirmed)
 		expectedWithdrawnAmt := sendAmt.Add(minerFee)

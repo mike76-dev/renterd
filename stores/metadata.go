@@ -724,7 +724,6 @@ WHERE c.fcid = ?
 			roots = append(roots, *(*types.Hash256)(&r))
 		}
 	}
-
 	return
 }
 
@@ -792,7 +791,7 @@ func (s *SQLStore) ContractSize(ctx context.Context, id types.FileContractID) (a
 
 	if err := s.db.
 		Raw(`
-SELECT c.size, CASE WHEN c.size>(COUNT(cs.db_sector_id) * ?) THEN c.size-(COUNT(cs.db_sector_id) * ?) ELSE 0 END as prunable
+SELECT MAX(c.size) as size, CASE WHEN MAX(c.size)>(COUNT(cs.db_sector_id) * ?) THEN MAX(c.size)-(COUNT(cs.db_sector_id) * ?) ELSE 0 END as prunable
 FROM contracts c
 LEFT JOIN contract_sectors cs ON cs.db_contract_id = c.id
 WHERE c.fcid = ?
@@ -917,7 +916,7 @@ func (s *SQLStore) SearchObjects(ctx context.Context, bucket, substring string, 
 		Joins("INNER JOIN buckets b ON o.db_bucket_id = b.id AND b.name = ?", bucket).
 		Joins("LEFT JOIN slices sli ON o.id = sli.`db_object_id`").
 		Joins("LEFT JOIN slabs sla ON sli.db_slab_id = sla.`id`").
-		Where("INSTR(o.object_id, ?) > 0", substring).
+		Where("INSTR(o.object_id, ?) > 0 AND ?", substring, sqlWhereBucket("o", bucket)).
 		Group("o.object_id").
 		Offset(offset).
 		Limit(limit).
@@ -955,7 +954,7 @@ FROM (
 		INNER JOIN buckets b ON objects.db_bucket_id = b.id AND b.name = ?
 		LEFT JOIN slices ON objects.id = slices.db_object_id 
 		LEFT JOIN slabs ON slices.db_slab_id = slabs.id
-		WHERE SUBSTR(object_id, 1, ?) = ?
+		WHERE SUBSTR(object_id, 1, ?) = ? AND ?
 		GROUP BY object_id
 	) AS i
 ) AS m
@@ -971,6 +970,7 @@ LIMIT ? OFFSET ?`,
 		bucket,
 		utf8.RuneCountInString(path),
 		path,
+		sqlWhereBucket("objects", bucket),
 		utf8.RuneCountInString(path+prefix),
 		path+prefix,
 		path,
@@ -1537,7 +1537,7 @@ func (s *SQLStore) object(ctx context.Context, txn *gorm.DB, bucket string, path
 		Joins("LEFT JOIN slabs sla ON sli.db_slab_id = sla.`id`").
 		Joins("LEFT JOIN sectors sec ON sla.id = sec.`db_slab_id`").
 		Joins("LEFT JOIN buffered_slabs bs ON sla.db_buffered_slab_id = bs.`id`").
-		Where("o.object_id = ?", path).
+		Where("o.object_id = ? AND ?", path, sqlWhereBucket("o", bucket)).
 		Order("sli.id ASC").
 		Order("sec.id ASC").
 		Scan(&rows)
@@ -1862,7 +1862,7 @@ func deleteObjects(tx *gorm.DB, bucket string, path string) (numDeleted int64, _
 	if err := pruneSlabs(tx); err != nil {
 		return 0, err
 	}
-	return
+	return numDeleted, nil
 }
 
 func invalidateSlabHealthByFCID(tx *gorm.DB, fcids []fileContractID) error {

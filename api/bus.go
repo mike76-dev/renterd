@@ -71,6 +71,10 @@ var (
 	// from the database.
 	ErrContractSetNotFound = errors.New("couldn't find contract set")
 
+	// ErrHostNotFound is returned when a host can't be retrieved from the
+	// database.
+	ErrHostNotFound = errors.New("host doesn't exist in hostdb")
+
 	// ErrSettingNotFound is returned if a requested setting is not present in the
 	// database.
 	ErrSettingNotFound = errors.New("setting not found")
@@ -500,7 +504,7 @@ func (gs GougingSettings) Validate() error {
 }
 
 type Bucket struct {
-	CreatedAt time.Time `json:"creationDate"`
+	CreatedAt time.Time `json:"createdAt"`
 	Name      string    `json:"name"`
 }
 
