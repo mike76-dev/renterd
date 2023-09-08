@@ -590,6 +590,20 @@ func (w *worker) rhpBroadcastHandler(jc jape.Context) {
 	if jc.Check("could not fetch revision", err) != nil {
 		return
 	}
+
+	// Fetch satellite config.
+	cfg, err := satellite.StaticSatellite.Config()
+	if jc.Check("could not fetch satellite config", err) != nil {
+		return
+	}
+
+	// If enabled, send to the satellite instead of broadcasting.
+	if cfg.Enabled {
+		err := satellite.StaticSatellite.UpdateRevision(ctx, rev, api.ContractSpending{})
+		jc.Check("failed to send revision to the satellite", err)
+		return
+	}
+
 	// Create txn with revision.
 	txn := types.Transaction{
 		FileContractRevisions: []types.FileContractRevision{rev.Revision},
