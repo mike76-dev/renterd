@@ -214,7 +214,7 @@ func (c *contractor) performContractMaintenance(ctx context.Context, w Worker) (
 	c.logger.Debugf("fetched %d contracts from the worker, took %v", len(resp.Contracts), time.Since(start))
 
 	// run revision broadcast
-	if cfg.Enabled {
+	if !cfg.Enabled {
 		c.runRevisionBroadcast(ctx, w, contracts, isInCurrentSet)
 	}
 
