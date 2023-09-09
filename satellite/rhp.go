@@ -1020,7 +1020,6 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 	}
 
 	var objects []object.Object
-	fmt.Printf("DEBUG: %+v\n", rf.metadata) //TODO
 	for _, fm := range rf.metadata {
 		obj := object.Object{
 			Key:   fm.Key,
