@@ -320,13 +320,13 @@ func (fm *FileMetadata) EncodeTo(e *types.Encoder) {
 func (fm *FileMetadata) DecodeFrom(d *types.Decoder) {
 	var key types.Hash256
 	d.Read(key[:])
-	fm.Key.UnmarshalText(key[:])
+	fm.Key.UnmarshalText([]byte(strings.TrimPrefix(key.String(), "h:")))
 	fm.Path = d.ReadString()
 	fm.Slabs = make([]object.SlabSlice, d.ReadPrefix())
 	for i := 0; i < len(fm.Slabs); i++ {
 		var key types.Hash256
 		d.Read(key[:])
-		fm.Slabs[i].Key.UnmarshalText(key[:])
+		fm.Slabs[i].Key.UnmarshalText([]byte(strings.TrimPrefix(key.String(), "h:")))
 		fm.Slabs[i].MinShards = uint8(d.ReadUint64())
 		fm.Slabs[i].Offset = uint32(d.ReadUint64())
 		fm.Slabs[i].Length = uint32(d.ReadUint64())

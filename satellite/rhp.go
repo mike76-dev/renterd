@@ -1020,6 +1020,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 	}
 
 	var objects []object.Object
+	fmt.Printf("DEBUG: %+v\n", rf.metadata) //TODO
 	for _, fm := range rf.metadata {
 		obj := object.Object{
 			Key:   fm.Key,
@@ -1037,9 +1038,13 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 		}
 		_, _, err := s.bus.Object(ctx, fm.Path)
 		if err == nil {
-			continue // only add the object if it's not present already
+			err = s.bus.DeleteObject(ctx, api.DefaultBucketName, fm.Path, false)
+			if err != nil {
+				s.logger.Error(fmt.Sprintf("couldn't delete object: %s", err))
+				continue
+			}
 		}
-		if err := s.bus.AddObject(ctx, "", fm.Path, set, obj, used); err != nil {
+		if err := s.bus.AddObject(ctx, api.DefaultBucketName, fm.Path, set, obj, used); err != nil {
 			s.logger.Error(fmt.Sprintf("couldn't add object: %s", err))
 			continue
 		}
