@@ -24,6 +24,12 @@ func (c *Client) RequestContracts(ctx context.Context) ([]api.ContractMetadata, 
 	return resp, err
 }
 
+// ShareContracts sends the contract set to the satellite.
+func (c *Client) ShareContracts(ctx context.Context) error {
+	err := c.c.WithContext(ctx).POST("/contracts", nil, nil)
+	return err
+}
+
 // FormContracts requests the satellite to form the specified number
 // of contracts with the hosts and adds them to the contract set.
 func (c *Client) FormContracts(ctx context.Context, hosts uint64, period uint64, renewWindow uint64, storage uint64, upload uint64, download uint64) ([]api.ContractMetadata, error) {

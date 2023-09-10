@@ -25,6 +25,7 @@ var (
 	specifierSaveMetadata     = types.NewSpecifier("SaveMetadata")
 	specifierRequestMetadata  = types.NewSpecifier("RequestMetadata")
 	specifierUpdateSlab       = types.NewSpecifier("UpdateSlab")
+	specifierShareContracts   = types.NewSpecifier("ShareContracts")
 )
 
 // requestRequest is used to request existing contracts.
@@ -219,6 +220,13 @@ type requestMetadataRequest struct {
 type updateSlabRequest struct {
 	PubKey    types.PublicKey
 	Slab      object.SlabSlice
+	Signature types.Signature
+}
+
+// shareRequest is used to send a set of contracts to the satellite.
+type shareRequest struct {
+	PubKey    types.PublicKey
+	Contracts []api.ContractMetadata
 	Signature types.Signature
 }
 
@@ -1102,5 +1110,50 @@ func (s *Satellite) updateSlabHandler(jc jape.Context) {
 
 	if jc.Check("couldn't update slab", err) != nil {
 		s.logger.Error(fmt.Sprintf("couldn't update slab: %s", err))
+	}
+}
+
+// shareContractsHandler handles the POST /contracts requests.
+func (s *Satellite) shareContractsHandler(jc jape.Context) {
+	cfg := s.store.getConfig()
+	if !cfg.Enabled {
+		return
+	}
+	ctx := jc.Request.Context()
+
+	pk, sk := generateKeyPair(cfg.RenterSeed)
+
+	contracts, err := s.bus.Contracts(ctx)
+
+	sr := shareRequest{
+		PubKey:    pk,
+		Contracts: contracts,
+	}
+
+	h := types.NewHasher()
+	sr.EncodeToWithoutSignature(h.E)
+	sr.Signature = sk.SignHash(h.Sum())
+
+	err = s.withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
+		err = t.WriteRequest(specifierShareContracts, &sr)
+		if err != nil {
+			return
+		}
+
+		var resp rhpv2.RPCError
+		err = t.ReadResponse(&resp, 1024)
+		if jc.Check("could not read response", err) != nil {
+			return
+		}
+
+		if resp.Description != "" {
+			return errors.New(resp.Description)
+		}
+
+		return nil
+	})
+
+	if jc.Check("couldn't send contracts", err) != nil {
+		s.logger.Error(fmt.Sprintf("couldn't send contracts: %s", err))
 	}
 }

@@ -420,3 +420,31 @@ func (usr *updateSlabRequest) EncodeToWithoutSignature(e *types.Encoder) {
 func (usr *updateSlabRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
 }
+
+// EncodeTo implements types.ProtocolObject.
+func (sr *shareRequest) EncodeTo(e *types.Encoder) {
+	sr.EncodeToWithoutSignature(e)
+	sr.Signature.EncodeTo(e)
+}
+
+// EncodeToWithoutSignature does the same as EncodeTo but
+// leaves the signature out.
+func (sr *shareRequest) EncodeToWithoutSignature(e *types.Encoder) {
+	e.Write(sr.PubKey[:])
+	e.WritePrefix(len(sr.Contracts))
+	for _, contract := range sr.Contracts {
+		e.Write(contract.ID[:])
+		e.Write(contract.HostKey[:])
+		e.WriteUint64(contract.StartHeight)
+		e.Write(contract.RenewedFrom[:])
+		contract.Spending.Uploads.EncodeTo(e)
+		contract.Spending.Downloads.EncodeTo(e)
+		contract.Spending.FundAccount.EncodeTo(e)
+		contract.TotalCost.EncodeTo(e)
+	}
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (sr *shareRequest) DecodeFrom(d *types.Decoder) {
+	// Nothing to do here.
+}

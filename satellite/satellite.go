@@ -215,6 +215,7 @@ func (s *Satellite) satellitesHandlerGET(jc jape.Context) {
 func (s *Satellite) Handler() http.Handler {
 	return jape.Mux(map[string]jape.Handler{
 		"GET    /request":       s.requestContractsHandler,
+		"POST   /contracts":     s.shareContractsHandler,
 		"POST   /form":          s.formContractsHandler,
 		"POST   /renew":         s.renewContractsHandler,
 		"POST   /update":        s.updateRevisionHandler,
