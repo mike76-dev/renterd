@@ -176,6 +176,8 @@ github.com/mattn/go-sqlite3 v1.14.17 h1:mCRHCLDUBXgpKAqIKsaAaAsrAlbkeomtRFKXh2L6
 github.com/mattn/go-sqlite3 v1.14.17/go.mod h1:2eHXhiwb8IkHr+BDWZGa96P6+rkvnG63S2DGjv9HUNg=
 github.com/matttproud/golang_protobuf_extensions v1.0.1/go.mod h1:D8He9yQNgCq6Z5Ld7szi9bcBfOoFv/3dc6xSMkL2PC0=
 github.com/microsoft/go-mssqldb v0.21.0 h1:p2rpHIL7TlSv1QrbXJUAcbyRKnIT0C9rRkH2E4OjLn8=
+github.com/mike76-dev/renterd-satellite v0.1.11 h1:NGhZUA2mSHwo91DH8QOEYYxZCu9VLq79MJAiA/62Ap8=
+github.com/mike76-dev/renterd-satellite v0.1.11/go.mod h1:SWZOizj//w0McHuqxZhKQZQ3WfE4k64YYeuwGyF6il0=
 github.com/mike76-dev/sia-web v0.0.0-20230901082429-66c26e5b192b h1:k1QirAGgtoG9+6UTB3dW8oBPDQUNV/LkXEw+AwvgdZE=
 github.com/mike76-dev/sia-web v0.0.0-20230901082429-66c26e5b192b/go.mod h1:NFIW61hZYM56qpBiEnoUkTeTZtWCX+SS99wjWBmIfb0=
 github.com/mike76-dev/sia-web/renterd v0.1.12 h1:Euil0nfEH7TA1+58qbZb2Pfa9lfwgdeyN8hUzs7tsPc=
