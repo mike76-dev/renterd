@@ -128,9 +128,18 @@ func (s *Satellite) configHandlerPUT(jc jape.Context) {
 	if jc.Decode(&sc) != nil {
 		return
 	}
+
+	// Opt out of all features before disabling or changing satellite.
+	cfg := s.store.getConfig()
+	if cfg.Enabled && (!sc.Enabled || cfg.PublicKey != sc.PublicKey) {
+		ctx := jc.Request.Context()
+		StaticSatellite.UpdateSettings(ctx, RenterSettings{})
+	}
+
 	if jc.Check("failed to set config", s.store.setConfig(sc)) != nil {
 		return
 	}
+
 	if sc.Enabled {
 		s.requestContractsHandler(jc)
 	}
