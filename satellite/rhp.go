@@ -920,7 +920,29 @@ func (s *Satellite) settingsHandlerPOST(jc jape.Context) {
 		return t.WriteRequest(specifierUpdateSettings, &usr)
 	})
 
-	jc.Check("couldn't update settings", err)
+	if jc.Check("couldn't update settings", err) != nil {
+		return
+	}
+
+	// Transfer all file metadata if auto-repairs are enabled.
+	if settings.AutoRepairFiles {
+		_, entries, err := s.bus.Object(ctx, "")
+		if err != nil {
+			return
+		}
+		for _, entry := range entries {
+			obj, _, err := s.bus.Object(ctx, entry.Name)
+			if err != nil {
+				s.logger.Error(fmt.Sprintf("couldn't find object %s: %s", entry.Name, err))
+				continue
+			}
+			StaticSatellite.SaveMetadata(ctx, FileMetadata{
+				Key:   obj.Key,
+				Path:  entry.Name,
+				Slabs: obj.Slabs,
+			})
+		}
+	}
 }
 
 // saveMetadataHandler handles the POST /metadata requests.
