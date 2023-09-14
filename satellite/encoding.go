@@ -441,6 +441,7 @@ func (sr *shareRequest) EncodeToWithoutSignature(e *types.Encoder) {
 		contract.Spending.Downloads.EncodeTo(e)
 		contract.Spending.FundAccount.EncodeTo(e)
 		contract.TotalCost.EncodeTo(e)
+		contract.Revision.EncodeTo(e)
 	}
 }
 

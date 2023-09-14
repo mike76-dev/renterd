@@ -149,8 +149,12 @@ func (s *Satellite) configHandlerPUT(jc jape.Context) {
 	}
 
 	if sc.Enabled {
-		s.shareContractsHandler(jc)
-		s.requestContractsHandler(jc)
+		go func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			StaticSatellite.ShareContracts(ctx)
+			StaticSatellite.RequestContracts(ctx)
+		}()
 	}
 }
 
