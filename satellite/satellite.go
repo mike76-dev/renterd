@@ -148,7 +148,8 @@ func (s *Satellite) configHandlerPUT(jc jape.Context) {
 		return
 	}
 
-	if sc.Enabled {
+	// Exchange contracts with the satellite if it was enabled or changed.
+	if sc.Enabled && (!cfg.Enabled || cfg.PublicKey != sc.PublicKey) {
 		go func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
