@@ -556,19 +556,12 @@ func (s *Satellite) updateRevisionHandler(jc jape.Context) {
 		return
 	}
 
-	fcid := sur.Revision.ID()
-	spk, exists := s.store.satellite(fcid)
-	if !exists {
+	cfg := s.store.getConfig()
+	if !cfg.Enabled {
 		return
 	}
 
-	satellite, exists := s.store.getSatellite(spk)
-	if !exists {
-		jc.Check("ERROR", errors.New("unknown satellite"))
-		return
-	}
-
-	pk, sk := generateKeyPair(satellite.RenterSeed)
+	pk, sk := generateKeyPair(cfg.RenterSeed)
 
 	ur := updateRequest{
 		PubKey:      pk,
@@ -582,8 +575,8 @@ func (s *Satellite) updateRevisionHandler(jc jape.Context) {
 	ur.EncodeToWithoutSignature(h.E)
 	ur.Signature = sk.SignHash(h.Sum())
 
-	conn, err := dial(ctx, satellite.Address, satellite.PublicKey)
-	if jc.Check("could not connect to the host", err) != nil {
+	conn, err := dial(ctx, cfg.Address, cfg.PublicKey)
+	if jc.Check("could not connect to the satellite", err) != nil {
 		return
 	}
 
@@ -603,7 +596,7 @@ func (s *Satellite) updateRevisionHandler(jc jape.Context) {
 		}
 	}()
 
-	t, err := rhpv2.NewRenterTransport(conn, satellite.PublicKey)
+	t, err := rhpv2.NewRenterTransport(conn, cfg.PublicKey)
 	if jc.Check("could not create transport", err) != nil {
 		return
 	}
