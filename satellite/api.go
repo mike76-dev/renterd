@@ -48,10 +48,8 @@ type ContractsAllResponse struct {
 
 // Config contains the satellite configuration parameters.
 type Config struct {
-	Enabled    bool            `json:"enabled"`
-	Address    string          `json:"address"`
-	PublicKey  types.PublicKey `json:"publicKey"`
-	RenterSeed []byte          `json:"renterSeed"`
+	Enabled bool `json:"enabled"`
+	SatelliteInfo
 }
 
 // SatelliteInfo contains the information about the satellite.
