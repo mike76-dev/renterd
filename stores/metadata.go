@@ -101,7 +101,8 @@ type (
 
 	dbSlice struct {
 		Model
-		DBObjectID uint `gorm:"index"`
+		DBObjectID        *uint `gorm:"index"`
+		DBMultipartPartID *uint `gorm:"index"`
 
 		// Slice related fields.
 		DBSlabID uint `gorm:"index"`
@@ -576,7 +577,7 @@ func (s *SQLStore) Contracts(ctx context.Context) ([]api.ContractMetadata, error
 	var dbContracts []dbContract
 	err := s.db.
 		Model(&dbContract{}).
-		Preload("Host").
+		Joins("Host").
 		Find(&dbContracts).
 		Error
 	if err != nil {
@@ -596,7 +597,6 @@ func (s *SQLStore) Contracts(ctx context.Context) ([]api.ContractMetadata, error
 // to each other through the RenewedFrom and RenewedTo fields respectively.
 func (s *SQLStore) AddRenewedContract(ctx context.Context, c rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, renewedFrom types.FileContractID) (_ api.ContractMetadata, err error) {
 	var renewed dbContract
-
 	if err := s.retryTransaction(func(tx *gorm.DB) error {
 		// Fetch contract we renew from.
 		oldContract, err := contract(tx, fileContractID(renewedFrom))
@@ -619,6 +619,7 @@ func (s *SQLStore) AddRenewedContract(ctx context.Context, c rhpv2.ContractRevis
 		// Overwrite the old contract with the new one.
 		newContract := newContract(oldContract.HostID, c.ID(), renewedFrom, totalCost, startHeight, c.Revision.WindowStart, c.Revision.WindowEnd, oldContract.Size)
 		newContract.Model = oldContract.Model
+		newContract.CreatedAt = time.Now()
 		err = tx.Save(&newContract).Error
 		if err != nil {
 			return err
@@ -892,7 +893,7 @@ func (s *SQLStore) RenewedContract(ctx context.Context, renewedFrom types.FileCo
 
 	err = s.db.
 		Where(&dbContract{ContractCommon: ContractCommon{RenewedFrom: fileContractID(renewedFrom)}}).
-		Preload("Host").
+		Joins("Host").
 		Take(&contract).
 		Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -928,61 +929,95 @@ func (s *SQLStore) SearchObjects(ctx context.Context, bucket, substring string, 
 	return objects, nil
 }
 
-func (s *SQLStore) ObjectEntries(ctx context.Context, bucket, path, prefix string, offset, limit int) ([]api.ObjectMetadata, error) {
+func (s *SQLStore) ObjectEntries(ctx context.Context, bucket, path, prefix, marker string, offset, limit int) (metadata []api.ObjectMetadata, hasMore bool, err error) {
+	// convenience variables
+	usingMarker := marker != ""
+	usingOffset := offset > 0
+
 	// sanity check we are passing a directory
 	if !strings.HasSuffix(path, "/") {
 		panic("path must end in /")
 	}
 
+	// sanity check we are passing sane paging parameters
+	if usingMarker && usingOffset {
+		return nil, false, errors.New("fetching entries using a marker and an offset is not supported at the same time")
+	}
+
+	// ensure marker is '/' prefixed
+	if usingMarker && !strings.HasPrefix(marker, "/") {
+		marker = fmt.Sprintf("/%s", marker)
+	}
+
+	// ensure limits are out of play
 	if limit <= -1 {
 		limit = math.MaxInt
 	}
 
-	query := s.db.Raw(fmt.Sprintf(`
-SELECT
-	SUM(size) AS size,
-	CASE slashindex
-	WHEN 0 THEN %s
-	ELSE %s
-	END AS name,
-	MIN(health) as health
-FROM (
-	SELECT size, health, trimmed, INSTR(trimmed, "/") AS slashindex
+	// figure out the HAVING CLAUSE and its parameters
+	havingClause := "1 = 1"
+	var havingParams []interface{}
+	if usingMarker {
+		havingClause = "name > ?"
+		havingParams = append(havingParams, marker)
+
+		offset = 0 // disable offset
+	}
+
+	// fetch one more to see if there are more entries
+	if limit != math.MaxInt {
+		limit += 1
+	}
+
+	query := fmt.Sprintf(`
+	SELECT
+		CASE slashindex WHEN 0 THEN %s ELSE %s END AS name,
+		SUM(size) AS size,
+		MIN(health) as health
 	FROM (
-		SELECT MAX(size) AS size, MIN(slabs.health) as health, SUBSTR(object_id, ?) AS trimmed
+		SELECT MAX(size) AS size, MIN(slabs.health) as health, SUBSTR(object_id, ?) AS trimmed , INSTR(SUBSTR(object_id, ?), "/") AS slashindex
 		FROM objects
 		INNER JOIN buckets b ON objects.db_bucket_id = b.id AND b.name = ?
 		LEFT JOIN slices ON objects.id = slices.db_object_id 
 		LEFT JOIN slabs ON slices.db_slab_id = slabs.id
 		WHERE SUBSTR(object_id, 1, ?) = ? AND ?
 		GROUP BY object_id
-	) AS i
-) AS m
-GROUP BY name
-HAVING SUBSTR(name, 1, ?) = ? AND name != ?
-ORDER BY name ASC
-LIMIT ? OFFSET ?`,
+	) AS m
+	GROUP BY name
+	HAVING SUBSTR(name, 1, ?) = ? AND name != ? AND %s
+	ORDER BY name ASC
+	LIMIT ?
+	OFFSET ?`,
 		sqlConcat(s.db, "?", "trimmed"),
-		sqlConcat(s.db, "?", "substr(trimmed, 1, slashindex)")),
-		path,
-		path,
-		utf8.RuneCountInString(path)+1,
-		bucket,
-		utf8.RuneCountInString(path),
-		path,
-		sqlWhereBucket("objects", bucket),
-		utf8.RuneCountInString(path+prefix),
-		path+prefix,
-		path,
-		limit,
-		offset)
+		sqlConcat(s.db, "?", "substr(trimmed, 1, slashindex)"),
+		havingClause)
 
-	var metadata []api.ObjectMetadata
-	err := query.Scan(&metadata).Error
-	if err != nil {
-		return nil, err
+	parameters := append(append([]interface{}{
+		path, // sqlConcat(s.db, "?", "trimmed"),
+		path, // sqlConcat(s.db, "?", "substr(trimmed, 1, slashindex)")
+
+		utf8.RuneCountInString(path) + 1, // SUBSTR(object_id, ?)
+		utf8.RuneCountInString(path) + 1, // INSTR(SUBSTR(object_id, ?), "/")
+		bucket,                           // b.name = ?
+
+		utf8.RuneCountInString(path),      // WHERE SUBSTR(object_id, 1, ?) = ? AND ?
+		path,                              // WHERE SUBSTR(object_id, 1, ?) = ? AND ?
+		sqlWhereBucket("objects", bucket), // WHERE SUBSTR(object_id, 1, ?) = ? AND ?
+
+		utf8.RuneCountInString(path + prefix), // HAVING SUBSTR(name, 1, ?) = ? AND name != ?
+		path + prefix,                         // HAVING SUBSTR(name, 1, ?) = ? AND name != ?
+		path,                                  // HAVING SUBSTR(name, 1, ?) = ? AND name != ?
+	}, havingParams...), limit, offset)
+
+	if err = s.db.
+		Raw(query, parameters...).
+		Scan(&metadata).
+		Error; err == nil && len(metadata) == limit {
+		metadata = metadata[:len(metadata)-1] // remove last element
+		hasMore = true
 	}
-	return metadata, nil
+
+	return
 }
 
 func (s *SQLStore) Object(ctx context.Context, bucket, path string) (api.Object, error) {
@@ -1076,21 +1111,20 @@ func pruneSlabs(tx *gorm.DB) error {
 
 func fetchUsedContracts(tx *gorm.DB, usedContracts map[types.PublicKey]types.FileContractID) (map[types.PublicKey]dbContract, error) {
 	fcids := make([]fileContractID, 0, len(usedContracts))
-	hostForFCID := make(map[types.FileContractID]types.PublicKey, len(usedContracts))
-	for hk, fcid := range usedContracts {
+	for _, fcid := range usedContracts {
 		fcids = append(fcids, fileContractID(fcid))
-		hostForFCID[fcid] = hk
 	}
 	var contracts []dbContract
 	err := tx.Model(&dbContract{}).
-		Where("fcid IN (?)", fcids).
+		Joins("Host").
+		Where("fcid IN (?) OR renewed_from IN (?)", fcids, fcids).
 		Find(&contracts).Error
 	if err != nil {
 		return nil, err
 	}
 	fetchedContracts := make(map[types.PublicKey]dbContract, len(contracts))
 	for _, c := range contracts {
-		fetchedContracts[hostForFCID[types.FileContractID(c.FCID)]] = c
+		fetchedContracts[types.PublicKey(c.Host.PublicKey)] = c
 	}
 	return fetchedContracts, nil
 }
@@ -1130,6 +1164,50 @@ func (s *SQLStore) AddPartialSlab(ctx context.Context, data []byte, minShards, t
 	return s.slabBufferMgr.AddPartialSlab(ctx, data, minShards, totalShards, contractSetID)
 }
 
+func (s *SQLStore) CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath, dstPath string) error {
+	return s.retryTransaction(func(tx *gorm.DB) error {
+		var srcObj dbObject
+		err := tx.Where("objects.object_id = ? AND DBBucket.name = ?", srcPath, srcBucket).
+			Joins("DBBucket").
+			Take(&srcObj).
+			Error
+		if err != nil {
+			return fmt.Errorf("failed to fetch src object: %w", err)
+		}
+
+		var srcSlices []dbSlice
+		err = tx.Where("db_object_id = ?", srcObj.ID).
+			Find(&srcSlices).
+			Error
+		if err != nil {
+			return fmt.Errorf("failed to fetch src slices: %w", err)
+		}
+		for i := range srcSlices {
+			srcSlices[i].Model = Model{}  // clear model
+			srcSlices[i].DBObjectID = nil // clear object id
+		}
+
+		var bucket dbBucket
+		err = tx.Where("name = ?", dstBucket).
+			Take(&bucket).
+			Error
+		if err != nil {
+			return fmt.Errorf("failed to fetch dst bucket: %w", err)
+		}
+
+		dstObj := srcObj
+		dstObj.Model = Model{}        // clear model
+		dstObj.DBBucket = bucket      // set dst bucket
+		dstObj.ObjectID = dstPath     // set dst path
+		dstObj.DBBucketID = bucket.ID // set dst bucket id
+		dstObj.Slabs = srcSlices      // set slices
+		if err := tx.Create(&dstObj).Error; err != nil {
+			return fmt.Errorf("failed to create copy of object: %w", err)
+		}
+		return nil
+	})
+}
+
 func (s *SQLStore) UpdateObject(ctx context.Context, bucket, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID) error {
 	s.objectsMu.Lock()
 	defer s.objectsMu.Unlock()
@@ -1140,7 +1218,7 @@ func (s *SQLStore) UpdateObject(ctx context.Context, bucket, path, contractSet s
 			// Verify that all hosts have a contract.
 			_, exists := usedContracts[shard.Host]
 			if !exists {
-				return fmt.Errorf("missing contract for host %v", shard.Host)
+				return fmt.Errorf("missing contract for host %v: %w", shard.Host, api.ErrContractNotFound)
 			}
 		}
 	}
@@ -1190,92 +1268,9 @@ func (s *SQLStore) UpdateObject(ctx context.Context, bucket, path, contractSet s
 			return fmt.Errorf("failed to fetch used contracts: %w", err)
 		}
 
-		for i, ss := range o.Slabs {
-			// Create Slab if it doesn't exist yet.
-			slabKey, err := ss.Key.MarshalText()
-			if err != nil {
-				return fmt.Errorf("failed to marshal slab key: %w", err)
-			}
-			slab := &dbSlab{
-				Key:         slabKey,
-				MinShards:   ss.MinShards,
-				TotalShards: uint8(len(ss.Shards)),
-			}
-			err = tx.Where(dbSlab{Key: slabKey}).
-				Assign(dbSlab{
-					DBContractSetID: cs.ID,
-				}).
-				FirstOrCreate(&slab).Error
-			if err != nil {
-				return fmt.Errorf("failed to create slab %v/%v: %w", i+1, len(o.Slabs), err)
-			}
-
-			// Create Slice.
-			slice := dbSlice{
-				DBSlabID:   slab.ID,
-				DBObjectID: obj.ID,
-				Offset:     ss.Offset,
-				Length:     ss.Length,
-			}
-			err = tx.Create(&slice).Error
-			if err != nil {
-				return fmt.Errorf("failed to create slice %v/%v: %w", i+1, len(o.Slabs), err)
-			}
-
-			for j, shard := range ss.Shards {
-				// Create sector if it doesn't exist yet.
-				var sector dbSector
-				err := tx.
-					Where(dbSector{Root: shard.Root[:]}).
-					Assign(dbSector{
-						DBSlabID:   slab.ID,
-						LatestHost: publicKey(shard.Host),
-					}).
-					FirstOrCreate(&sector).
-					Error
-				if err != nil {
-					return fmt.Errorf("failed to create sector %v/%v: %w", j+1, len(ss.Shards), err)
-				}
-
-				// Add contract and host to join tables.
-				contract, contractFound := contracts[shard.Host]
-				if contractFound {
-					err = tx.Model(&sector).Association("Contracts").Append(&contract)
-					if err != nil {
-						return fmt.Errorf("failed to append to Contracts association: %w", err)
-					}
-				}
-			}
-		}
-
-		// Handle partial slabs. We create a slice for each partial slab.
-		partialSlabs := o.PartialSlabs
-		if len(partialSlabs) == 0 {
-			return nil
-		}
-
-		for _, partialSlab := range partialSlabs {
-			key, err := partialSlab.Key.MarshalText()
-			if err != nil {
-				return err
-			}
-			var buffer dbBufferedSlab
-			err = tx.Joins("DBSlab").
-				Take(&buffer, "DBSlab.key = ?", key).
-				Error
-			if err != nil {
-				return fmt.Errorf("failed to fetch buffered slab: %w", err)
-			}
-
-			err = tx.Create(&dbSlice{
-				DBObjectID: obj.ID,
-				DBSlabID:   buffer.DBSlab.ID,
-				Offset:     partialSlab.Offset,
-				Length:     partialSlab.Length,
-			}).Error
-			if err != nil {
-				return fmt.Errorf("failed to create slice for partial slab: %w", err)
-			}
+		// Create all slices. This also creates any missing slabs or sectors.
+		if err := s.createSlices(tx, &obj.ID, nil, cs.ID, contracts, o.Slabs, o.PartialSlabs); err != nil {
+			return fmt.Errorf("failed to create slices: %w", err)
 		}
 		return nil
 	})
@@ -1521,6 +1516,104 @@ func (s *SQLStore) UnhealthySlabs(ctx context.Context, healthCutoff float64, set
 	return slabs, nil
 }
 
+func (s *SQLStore) createSlices(tx *gorm.DB, objID, multiPartID *uint, contractSetID uint, contracts map[types.PublicKey]dbContract, slices []object.SlabSlice, partialSlabs []object.PartialSlab) error {
+	if (objID == nil && multiPartID == nil) || (objID != nil && multiPartID != nil) {
+		return fmt.Errorf("either objID or multiPartID must be set")
+	}
+
+	var dbSlices []dbSlice
+	for i, ss := range slices {
+		// Create Slab if it doesn't exist yet.
+		slabKey, err := ss.Key.MarshalText()
+		if err != nil {
+			return fmt.Errorf("failed to marshal slab key: %w", err)
+		}
+		slab := &dbSlab{
+			Key:         slabKey,
+			MinShards:   ss.MinShards,
+			TotalShards: uint8(len(ss.Shards)),
+		}
+		err = tx.Where(dbSlab{Key: slabKey}).
+			Assign(dbSlab{
+				DBContractSetID: contractSetID,
+			}).
+			FirstOrCreate(&slab).Error
+		if err != nil {
+			return fmt.Errorf("failed to create slab %v/%v: %w", i+1, len(slices), err)
+		}
+
+		// Create Slice.
+		slice := dbSlice{
+			DBSlabID:          slab.ID,
+			DBObjectID:        objID,
+			DBMultipartPartID: multiPartID,
+			Offset:            ss.Offset,
+			Length:            ss.Length,
+		}
+		err = tx.Create(&slice).Error
+		if err != nil {
+			return fmt.Errorf("failed to create slice %v/%v: %w", i+1, len(slices), err)
+		}
+		dbSlices = append(dbSlices, slice)
+
+		for j, shard := range ss.Shards {
+			// Create sector if it doesn't exist yet.
+			var sector dbSector
+			err := tx.
+				Where(dbSector{Root: shard.Root[:]}).
+				Assign(dbSector{
+					DBSlabID:   slab.ID,
+					LatestHost: publicKey(shard.Host),
+				}).
+				FirstOrCreate(&sector).
+				Error
+			if err != nil {
+				return fmt.Errorf("failed to create sector %v/%v: %w", j+1, len(ss.Shards), err)
+			}
+
+			// Add contract and host to join tables.
+			contract, contractFound := contracts[shard.Host]
+			if contractFound {
+				err = tx.Model(&sector).Association("Contracts").Append(&contract)
+				if err != nil {
+					return fmt.Errorf("failed to append to Contracts association: %w", err)
+				}
+			}
+		}
+	}
+
+	// Handle partial slabs. We create a slice for each partial slab.
+	if len(partialSlabs) == 0 {
+		return nil
+	}
+
+	for _, partialSlab := range partialSlabs {
+		key, err := partialSlab.Key.MarshalText()
+		if err != nil {
+			return err
+		}
+		var buffer dbBufferedSlab
+		err = tx.Joins("DBSlab").
+			Take(&buffer, "DBSlab.key = ?", key).
+			Error
+		if err != nil {
+			return fmt.Errorf("failed to fetch buffered slab: %w", err)
+		}
+
+		err = tx.Create(&dbSlice{
+			DBObjectID:        objID,
+			DBMultipartPartID: multiPartID,
+			DBSlabID:          buffer.DBSlab.ID,
+			Offset:            partialSlab.Offset,
+			Length:            partialSlab.Length,
+		}).Error
+		if err != nil {
+			return fmt.Errorf("failed to create slice for partial slab: %w", err)
+		}
+	}
+	return nil
+}
+
 // object retrieves a raw object from the store.
 func (s *SQLStore) object(ctx context.Context, txn *gorm.DB, bucket string, path string) (rawObject, error) {
 	// NOTE: we LEFT JOIN here because empty objects are valid and need to be
@@ -1637,7 +1730,7 @@ func (s *SQLStore) MarkPackedSlabsUploaded(ctx context.Context, slabs []api.Uplo
 			return err
 		}
 		for _, slab := range slabs {
-			fileName, err = markPackedSlabUploaded(tx, slab, contracts)
+			fileName, err = s.markPackedSlabUploaded(tx, slab, contracts)
 			if err != nil {
 				return err
 			}
@@ -1653,7 +1746,7 @@ func (s *SQLStore) MarkPackedSlabsUploaded(ctx context.Context, slabs []api.Uplo
 	return nil
 }
 
-func markPackedSlabUploaded(tx *gorm.DB, slab api.UploadedPackedSlab, contracts map[types.PublicKey]dbContract) (string, error) {
+func (s *SQLStore) markPackedSlabUploaded(tx *gorm.DB, slab api.UploadedPackedSlab, contracts map[types.PublicKey]dbContract) (string, error) {
 	// find the slab
 	var sla dbSlab
 	if err := tx.Where("db_buffered_slab_id", slab.BufferID).
@@ -1685,16 +1778,19 @@ func markPackedSlabUploaded(tx *gorm.DB, slab api.UploadedPackedSlab, contracts 
 	// add the shards to the slab
 	var shards []dbSector
 	for i := range slab.Shards {
-		contract, exists := contracts[slab.Shards[i].Host]
-		if !exists {
-			return "", fmt.Errorf("missing contract for host %v", slab.Shards[i].Host)
-		}
-		shards = append(shards, dbSector{
+		sector := dbSector{
 			DBSlabID:   sla.ID,
 			LatestHost: publicKey(slab.Shards[i].Host),
 			Root:       slab.Shards[i].Root[:],
-			Contracts:  []dbContract{contract},
-		})
+		}
+		contract, exists := contracts[slab.Shards[i].Host]
+		if !exists {
+			s.logger.Warnw("missing contract for host", "host", slab.Shards[i].Host)
+		} else {
+			// Add contract to sector.
+			sector.Contracts = []dbContract{contract}
+		}
+		shards = append(shards, sector)
 	}
 	return fileName, tx.Create(shards).Error
 }
@@ -1703,7 +1799,7 @@ func markPackedSlabUploaded(tx *gorm.DB, slab api.UploadedPackedSlab, contracts 
 func contract(tx *gorm.DB, id fileContractID) (contract dbContract, err error) {
 	err = tx.
 		Where(&dbContract{ContractCommon: ContractCommon{FCID: id}}).
-		Preload("Host").
+		Joins("Host").
 		Take(&contract).
 		Error
 
@@ -1724,7 +1820,7 @@ func contracts(tx *gorm.DB, ids []types.FileContractID) (dbContracts []dbContrac
 	err = tx.
 		Model(&dbContract{}).
 		Where("fcid IN (?)", fcids).
-		Preload("Host").
+		Joins("Host").
 		Find(&dbContracts).
 		Error
 	return
@@ -1734,7 +1830,7 @@ func contracts(tx *gorm.DB, ids []types.FileContractID) (dbContracts []dbContrac
 func contractsForHost(tx *gorm.DB, host dbHost) (contracts []dbContract, err error) {
 	err = tx.
 		Where(&dbContract{HostID: host.ID}).
-		Preload("Host").
+		Joins("Host").
 		Find(&contracts).
 		Error
 	return

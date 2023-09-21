@@ -164,9 +164,11 @@ type Bus interface {
 	GougingParams(ctx context.Context) (api.GougingParams, error)
 	UploadParams(ctx context.Context) (api.UploadParams, error)
 
-	Object(ctx context.Context, path string, opts ...api.ObjectsOption) (api.Object, []api.ObjectMetadata, error)
+	Object(ctx context.Context, path string, opts ...api.ObjectsOption) (api.ObjectsResponse, error)
 	AddObject(ctx context.Context, bucket string, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID) error
 	DeleteObject(ctx context.Context, bucket, path string, batch bool) error
+
+	AddMultipartPart(ctx context.Context, bucket, path, contractSet, uploadID string, partNumber int, slices []object.SlabSlice, partialSlabs []object.PartialSlab, etag string, usedContracts map[types.PublicKey]types.FileContractID) (err error)
 
 	AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) (slabs []object.PartialSlab, err error)
 	FetchPartialSlab(ctx context.Context, key object.EncryptionKey, offset, length uint32) ([]byte, error)
@@ -400,9 +402,10 @@ func (w *worker) rhpScanHandler(jc jape.Context) {
 	// TODO: record metric
 
 	jc.Encode(api.RHPScanResponse{
-		Ping:      api.ParamDuration(elapsed),
-		ScanError: errStr,
-		Settings:  settings,
+		Ping:       api.ParamDuration(elapsed),
+		PriceTable: priceTable,
+		ScanError:  errStr,
+		Settings:   settings,
 	})
 }
 
@@ -919,26 +922,19 @@ func (w *worker) slabMigrateHandler(jc jape.Context) {
 		return
 	}
 
-	err = migrateSlab(ctx, w.downloadManager, w.uploadManager, &slab, dlContracts, ulContracts, up.CurrentHeight, w.logger)
+	// migrate the slab
+	used, err := migrateSlab(ctx, w.downloadManager, w.uploadManager, &slab, dlContracts, ulContracts, up.CurrentHeight, w.logger)
 	if jc.Check("couldn't migrate slabs", err) != nil {
 		return
 	}
 
-	usedContracts := make(map[types.PublicKey]types.FileContractID)
-	for _, ss := range slab.Shards {
-		if _, exists := usedContracts[ss.Host]; exists {
-			continue
-		}
-
-		for _, c := range ulContracts {
-			if c.HostKey == ss.Host {
-				usedContracts[ss.Host] = c.ID
-				break
-			}
-		}
+	// no migration took place, return early
+	if used == nil {
+		return
 	}
 
-	if jc.Check("couldn't update slab", w.bus.UpdateSlab(ctx, slab, up.ContractSet, usedContracts)) != nil {
+	// update the slab
+	if jc.Check("couldn't update slab", w.bus.UpdateSlab(ctx, slab, up.ContractSet, used)) != nil {
 		return
 	}
 
@@ -1017,6 +1013,18 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 	ctx := jc.Request.Context()
 	jc.Custom(nil, []api.ObjectMetadata{})
 
+	bucket := api.DefaultBucketName
+	if jc.DecodeForm("bucket", &bucket) != nil {
+		return
+	}
+	var prefix string
+	if jc.DecodeForm("prefix", &prefix) != nil {
+		return
+	}
+	var marker string
+	if jc.DecodeForm("marker", &marker) != nil {
+		return
+	}
 	var off int
 	if jc.DecodeForm("offset", &off) != nil {
 		return
@@ -1025,29 +1033,30 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 	if jc.DecodeForm("limit", &limit) != nil {
 		return
 	}
-	var prefix string
-	if jc.DecodeForm("prefix", &prefix) != nil {
-		return
-	}
-	bucket := api.DefaultBucketName
-	if jc.DecodeForm("bucket", &bucket) != nil {
-		return
+
+	opts := []api.ObjectsOption{
+		api.ObjectsWithBucket(bucket),
+		api.ObjectsWithPrefix(prefix),
+		api.ObjectsWithMarker(marker),
+		api.ObjectsWithOffset(off),
+		api.ObjectsWithLimit(limit),
 	}
 
 	path := jc.PathParam("path")
-	obj, entries, err := w.bus.Object(ctx, path, api.ObjectsWithPrefix(prefix), api.ObjectsWithOffset(off), api.ObjectsWithLimit(limit), api.ObjectsWithBucket(bucket))
+	res, err := w.bus.Object(ctx, path, opts...)
 	if err != nil && strings.Contains(err.Error(), api.ErrObjectNotFound.Error()) {
 		jc.Error(err, http.StatusNotFound)
 		return
 	} else if jc.Check("couldn't get object or entries", err) != nil {
 		return
 	}
+	jc.ResponseWriter.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat)) // TODO: update this when object has a ModTime
 
 	if path == "" || strings.HasSuffix(path, "/") {
-		jc.Encode(entries)
+		jc.Encode(res.Entries)
 		return
 	}
-	if len(obj.Slabs) == 0 && len(obj.PartialSlabs) == 0 {
+	if len(res.Object.Slabs) == 0 && len(res.Object.PartialSlabs) == 0 {
 		return
 	}
 
@@ -1065,19 +1074,19 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 	// Read call. We can improve on this to some degree by buffering, but
 	// without knowing the exact ranges being requested, this will always be
 	// suboptimal. Thus, sadly, we have to roll our own range support.
-	ranges, err := http_range.ParseRange(jc.Request.Header.Get("Range"), obj.Size)
+	ranges, err := http_range.ParseRange(jc.Request.Header.Get("Range"), res.Object.Size)
 	if err != nil {
 		jc.Error(err, http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
 	var offset int64
-	length := obj.Size
+	length := res.Object.Size
 	status := http.StatusOK
 	if len(ranges) > 0 {
 		status = http.StatusPartialContent
-		jc.ResponseWriter.Header().Set("Content-Range", ranges[0].ContentRange(obj.Size))
+		jc.ResponseWriter.Header().Set("Content-Range", ranges[0].ContentRange(res.Object.Size))
 		offset, length = ranges[0].Start, ranges[0].Length
-		if offset < 0 || length < 0 || offset+length > obj.Size {
+		if offset < 0 || length < 0 || offset+length > res.Object.Size {
 			jc.Error(fmt.Errorf("invalid range: %v %v", offset, length), http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
@@ -1089,7 +1098,6 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 			jc.ResponseWriter.Header().Set("Content-Type", mimeType)
 		}
 	}
-	jc.ResponseWriter.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat)) // TODO: update this when object has a ModTime
 	rw := rangedResponseWriter{rw: jc.ResponseWriter, defaultStatusCode: status}
 
 	// fetch all contracts
@@ -1100,7 +1108,7 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 	}
 
 	// download the object
-	if jc.Check(fmt.Sprintf("couldn't download object '%v'", path), w.downloadManager.DownloadObject(ctx, &rw, obj.Object, uint64(offset), uint64(length), contracts)) != nil {
+	if jc.Check(fmt.Sprintf("couldn't download object '%v'", path), w.downloadManager.DownloadObject(ctx, &rw, res.Object.Object, uint64(offset), uint64(length), contracts)) != nil {
 		return
 	}
 }
@@ -1157,28 +1165,16 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 	// attach gouging checker to the context
 	ctx = WithGougingChecker(ctx, w.bus, up.GougingParams)
 
-	// update uploader contracts
+	// fetch contract set contracts
 	contracts, err := w.bus.ContractSetContracts(ctx, up.ContractSet)
 	if jc.Check("couldn't fetch contracts from bus", err) != nil {
 		return
 	}
 
 	// upload the object
-	obj, partialSlabData, err := w.uploadManager.Upload(ctx, jc.Request.Body, rs, contracts, up.CurrentHeight, up.UploadPacking)
+	obj, used, partialSlabData, _, err := w.uploadManager.Upload(ctx, jc.Request.Body, rs, contracts, up.CurrentHeight, up.UploadPacking)
 	if jc.Check("couldn't upload object", err) != nil {
 		return
-	}
-
-	// build used contracts map
-	h2c := make(map[types.PublicKey]types.FileContractID)
-	for _, c := range contracts {
-		h2c[c.HostKey] = c.ID
-	}
-	used := make(map[types.PublicKey]types.FileContractID)
-	for _, s := range obj.Slabs {
-		for _, ss := range s.Shards {
-			used[ss.Host] = h2c[ss.Host]
-		}
 	}
 
 	if len(partialSlabData) > 0 {
@@ -1223,19 +1219,161 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 	for _, ps := range packedSlabs {
 		// upload packed slab.
 		shards := encryptPartialSlab(ps.Data, ps.Key, uint8(rs.MinShards), uint8(rs.TotalShards))
-		sectors, err := w.uploadManager.Migrate(ctx, shards, contracts, up.CurrentHeight)
+		sectors, used, err := w.uploadManager.Migrate(ctx, shards, contracts, up.CurrentHeight)
 		if jc.Check("couldn't upload packed slab", err) != nil {
 			return
 		}
 
-		// build used contracts map
-		h2c := make(map[types.PublicKey]types.FileContractID)
-		for _, c := range contracts {
-			h2c[c.HostKey] = c.ID
+		// mark packed slab as uploaded.
+		err = w.bus.MarkPackedSlabsUploaded(jc.Request.Context(), []api.UploadedPackedSlab{
+			{
+				BufferID: ps.BufferID,
+				Shards:   sectors,
+			},
+		}, used)
+		if jc.Check("couldn't mark packed slabs uploaded", err) != nil {
+			return
 		}
-		used := make(map[types.PublicKey]types.FileContractID)
-		for _, s := range sectors {
-			used[s.Host] = h2c[s.Host]
+	}
+}
+
+func (w *worker) multipartUploadHandlerPUT(jc jape.Context) {
+	jc.Custom((*[]byte)(nil), nil)
+	ctx := jc.Request.Context()
+
+	// fetch the upload parameters
+	up, err := w.bus.UploadParams(ctx)
+	if jc.Check("couldn't fetch upload parameters from bus", err) != nil {
+		return
+	}
+
+	// cancel the upload if no contract set is specified
+	if up.ContractSet == "" {
+		jc.Error(api.ErrContractSetNotSpecified, http.StatusBadRequest)
+		return
+	}
+
+	// cancel the upload if consensus is not synced
+	if !up.ConsensusState.Synced {
+		w.logger.Errorf("upload cancelled, err: %v", api.ErrConsensusNotSynced)
+		jc.Error(api.ErrConsensusNotSynced, http.StatusServiceUnavailable)
+		return
+	}
+
+	// decode the contract set from the query string
+	var contractset string
+	if jc.DecodeForm("contractset", &contractset) != nil {
+		return
+	} else if contractset != "" {
+		up.ContractSet = contractset
+	}
+
+	// decode the bucket from the query string
+	bucket := api.DefaultBucketName
+	if jc.DecodeForm("bucket", &bucket) != nil {
+		return
+	}
+
+	// decode the upload id
+	var uploadID string
+	if jc.DecodeForm("uploadid", &uploadID) != nil {
+		return
+	} else if uploadID == "" {
+		jc.Error(errors.New("upload id not specified"), http.StatusBadRequest)
+		return
+	}
+
+	// decode the part number
+	var partNumber int
+	if jc.DecodeForm("partnumber", &partNumber) != nil {
+		return
+	}
+
+	// allow overriding the redundancy settings
+	rs := up.RedundancySettings
+	if jc.DecodeForm("minshards", &rs.MinShards) != nil {
+		return
+	}
+	if jc.DecodeForm("totalshards", &rs.TotalShards) != nil {
+		return
+	}
+	if jc.Check("invalid redundancy settings", rs.Validate()) != nil {
+		return
+	}
+
+	var opts []UploadOption
+
+	// make sure only one of the following is set
+	var disablePreshardingEncryption bool
+	if jc.DecodeForm("disablepreshardingencryption", &disablePreshardingEncryption) != nil {
+		return
+	}
+	if !disablePreshardingEncryption {
+		jc.Error(errors.New("presharding encryption is not yet supported for multipart uploads"), http.StatusNotImplemented)
+		return
+	}
+	if !disablePreshardingEncryption && jc.Request.FormValue("offset") == "" {
+		jc.Error(errors.New("if presharding encryption isn't disabled, the offset needs to be set"), http.StatusBadRequest)
+		return
+	}
+	var offset uint64
+	if jc.DecodeForm("offset", &offset) != nil {
+		return
+	}
+	if disablePreshardingEncryption {
+		opts = append(opts, WithCustomKey(object.NoOpKey))
+	} else {
+		opts = append(opts, WithCustomEncryptionOffset(offset))
+	}
+
+	// attach gouging checker to the context
+	ctx = WithGougingChecker(ctx, w.bus, up.GougingParams)
+
+	// fetch contract set contracts
+	contracts, err := w.bus.ContractSetContracts(ctx, up.ContractSet)
+	if jc.Check("couldn't fetch contracts from bus", err) != nil {
+		return
+	}
+
+	// upload the part
+	obj, used, partialSlabData, etag, err := w.uploadManager.Upload(ctx, jc.Request.Body, rs, contracts, up.CurrentHeight, up.UploadPacking, opts...)
+	if jc.Check("couldn't upload object", err) != nil {
+		return
+	}
+
+	if len(partialSlabData) > 0 {
+		partialSlabs, err := w.bus.AddPartialSlab(jc.Request.Context(), partialSlabData, uint8(rs.MinShards), uint8(rs.TotalShards), up.ContractSet)
+		if jc.Check("couldn't add partial slabs to bus", err) != nil {
+			return
+		}
+		obj.PartialSlabs = partialSlabs
+	}
+
+	// persist the part
+	if jc.Check("couldn't add part", w.bus.AddMultipartPart(ctx, bucket, jc.PathParam("path"), up.ContractSet, uploadID, partNumber, obj.Slabs, obj.PartialSlabs, etag, used)) != nil {
+		return
+	}
+
+	// set etag in header response.
+	jc.ResponseWriter.Header().Set("ETag", api.FormatEtag(etag))
+
+	// if partial uploads are not enabled we are done.
+	if !up.UploadPacking {
+		return
+	}
+
+	// if partial uploads are enabled, check whether we have a full slab now
+	packedSlabs, err := w.bus.PackedSlabsForUpload(jc.Request.Context(), 5*time.Minute, uint8(rs.MinShards), uint8(rs.TotalShards), up.ContractSet, 2)
+	if jc.Check("couldn't fetch packed slabs from bus", err) != nil {
+		return
+	}
+
+	for _, ps := range packedSlabs {
+		// upload packed slab.
+		shards := encryptPartialSlab(ps.Data, ps.Key, uint8(rs.MinShards), uint8(rs.TotalShards))
+		sectors, used, err := w.uploadManager.Migrate(ctx, shards, contracts, up.CurrentHeight)
+		if jc.Check("couldn't upload packed slab", err) != nil {
+			return
 		}
 
 		// mark packed slab as uploaded.
@@ -1402,6 +1540,8 @@ func (w *worker) Handler() http.Handler {
 		"GET    /objects/*path": w.objectsHandlerGET,
 		"PUT    /objects/*path": w.objectsHandlerPUT,
 		"DELETE /objects/*path": w.objectsHandlerDELETE,
+
+		"PUT    /multipart/*path": w.multipartUploadHandlerPUT,
 
 		"GET    /state": w.stateHandlerGET,
 	}))

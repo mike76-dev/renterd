@@ -640,20 +640,15 @@ func (c *Client) SearchObjects(ctx context.Context, bucket, key string, offset, 
 	return
 }
 
-func (c *Client) Object(ctx context.Context, path string, opts ...api.ObjectsOption) (o api.Object, entries []api.ObjectMetadata, err error) {
+func (c *Client) Object(ctx context.Context, path string, opts ...api.ObjectsOption) (res api.ObjectsResponse, err error) {
 	path = strings.TrimPrefix(path, "/")
 	values := url.Values{}
 	for _, opt := range opts {
 		opt(values)
 	}
 	path += "?" + values.Encode()
-	var or api.ObjectsResponse
-	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/objects/%s", path), &or)
-	if or.Object != nil {
-		o = *or.Object
-	} else {
-		entries = or.Entries
-	}
+
+	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/objects/%s", path), &res)
 	return
 }
 
@@ -667,6 +662,17 @@ func (c *Client) AddObject(ctx context.Context, bucket, path, contractSet string
 		UsedContracts: usedContract,
 	})
 	return
+}
+
+// CopyObject copies the object from the source bucket and path to the
+// destination bucket and path.
+func (c *Client) CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath, dstPath string) error {
+	return c.c.WithContext(ctx).POST("/objects/copy", api.ObjectsCopyRequest{
+		SourceBucket:      srcBucket,
+		DestinationBucket: dstBucket,
+		SourcePath:        srcPath,
+		DestinationPath:   dstPath,
+	}, nil)
 }
 
 // DeleteObject either deletes the object at the given path or if batch=true
@@ -934,6 +940,71 @@ func (c *Client) renameObjects(ctx context.Context, bucket, from, to, mode strin
 		To:     to,
 		Mode:   mode,
 	}, nil)
+	return
+}
+
+func (c *Client) CreateMultipartUpload(ctx context.Context, bucket, path string, ec object.EncryptionKey) (resp api.MultipartCreateResponse, err error) {
+	err = c.c.WithContext(ctx).POST("/multipart/create", api.MultipartCreateRequest{
+		Bucket: bucket,
+		Key:    ec,
+		Path:   path,
+	}, &resp)
+	return
+}
+
+func (c *Client) AddMultipartPart(ctx context.Context, bucket, path, contractSet, uploadID string, partNumber int, slices []object.SlabSlice, partialSlab []object.PartialSlab, etag string, usedContracts map[types.PublicKey]types.FileContractID) (err error) {
+	err = c.c.WithContext(ctx).PUT("/multipart/part", api.MultipartAddPartRequest{
+		Bucket:        bucket,
+		Etag:          etag,
+		Path:          path,
+		ContractSet:   contractSet,
+		UploadID:      uploadID,
+		PartNumber:    partNumber,
+		Slices:        slices,
+		PartialSlabs:  partialSlab,
+		UsedContracts: usedContracts,
+	})
+	return
+}
+
+func (c *Client) AbortMultipartUpload(ctx context.Context, bucket, path string, uploadID string) (err error) {
+	err = c.c.WithContext(ctx).POST("/multipart/abort", api.MultipartAbortRequest{
+		Bucket:   bucket,
+		Path:     path,
+		UploadID: uploadID,
+	}, nil)
+	return
+}
+
+func (c *Client) CompleteMultipartUpload(ctx context.Context, bucket, path string, uploadID string, parts []api.MultipartCompletedPart) (resp api.MultipartCompleteResponse, err error) {
+	err = c.c.WithContext(ctx).POST("/multipart/complete", api.MultipartCompleteRequest{
+		Bucket:   bucket,
+		Path:     path,
+		UploadID: uploadID,
+		Parts:    parts,
+	}, &resp)
+	return
+}
+
+func (c *Client) MultipartUploads(ctx context.Context, bucket, prefix, keyMarker, uploadIDMarker string, maxUploads int) (resp api.MultipartListUploadsResponse, err error) {
+	err = c.c.WithContext(ctx).POST("/multipart/listuploads", api.MultipartListUploadsRequest{
+		Bucket:         bucket,
+		Prefix:         prefix,
+		KeyMarker:      keyMarker,
+		UploadIDMarker: uploadIDMarker,
+		Limit:          maxUploads,
+	}, &resp)
+	return
+}
+
+func (c *Client) MultipartUploadParts(ctx context.Context, bucket, object string, uploadID string, marker int, limit int64) (resp api.MultipartListPartsResponse, err error) {
+	err = c.c.WithContext(ctx).POST("/multipart/listparts", api.MultipartListPartsRequest{
+		Bucket:           bucket,
+		Path:             object,
+		UploadID:         uploadID,
+		PartNumberMarker: marker,
+		Limit:            limit,
+	}, &resp)
 	return
 }
 

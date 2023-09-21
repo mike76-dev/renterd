@@ -3,7 +3,7 @@ module go.sia.tech/renterd
 go 1.20
 
 require (
-	github.com/Mikubill/gofakes3 v0.0.3-0.20230622102024-284c0f988700
+	github.com/SiaFoundation/gofakes3 v0.0.0-20230919115219-af470842bcfa
 	github.com/go-gormigrate/gormigrate/v2 v2.1.0
 	github.com/google/go-cmp v0.5.9
 	github.com/gotd/contrib v0.19.0
@@ -29,7 +29,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.5.1
 	gorm.io/driver/sqlite v1.5.3
-	gorm.io/gorm v1.25.3
+	gorm.io/gorm v1.25.4
 	lukechampine.com/frand v1.4.2
 )
 

@@ -411,12 +411,14 @@ func (s *SQLStore) retryTransaction(fc func(tx *gorm.DB) error, opts ...*sql.TxO
 	abortRetry := func(err error) bool {
 		if err == nil ||
 			errors.Is(err, gorm.ErrRecordNotFound) ||
+			errors.Is(err, api.ErrContractNotFound) ||
 			errors.Is(err, api.ErrObjectNotFound) ||
 			errors.Is(err, api.ErrObjectCorrupted) ||
 			errors.Is(err, api.ErrBucketExists) ||
 			errors.Is(err, api.ErrBucketNotFound) ||
 			errors.Is(err, api.ErrBucketNotEmpty) ||
-			errors.Is(err, api.ErrContractNotFound) {
+			errors.Is(err, api.ErrContractNotFound) ||
+			errors.Is(err, api.ErrPartNotFound) {
 			return true
 		}
 		return false
