@@ -940,20 +940,20 @@ func (s *Satellite) settingsHandlerPOST(jc jape.Context) {
 
 // transferMetadata sends all file metadata to the satellite.
 func (s *Satellite) transferMetadata(ctx context.Context) {
-	_, entries, err := s.bus.Object(ctx, "")
+	resp, err := s.bus.Object(ctx, "")
 	if err != nil {
 		return
 	}
-	for _, entry := range entries {
-		obj, _, err := s.bus.Object(ctx, entry.Name)
+	for _, entry := range resp.Entries {
+		resp, err := s.bus.Object(ctx, entry.Name)
 		if err != nil {
 			s.logger.Error(fmt.Sprintf("couldn't find object %s: %s", entry.Name, err))
 			continue
 		}
 		StaticSatellite.SaveMetadata(ctx, FileMetadata{
-			Key:   obj.Key,
+			Key:   resp.Object.Key,
 			Path:  entry.Name,
-			Slabs: obj.Slabs,
+			Slabs: resp.Object.Slabs,
 		})
 	}
 }
@@ -1023,7 +1023,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 
-	_, entries, err := s.bus.Object(ctx, "")
+	resp, err := s.bus.Object(ctx, "")
 	if jc.Check("couldn't requests present objects", err) != nil {
 		return
 	}
@@ -1031,7 +1031,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 	rmr := requestMetadataRequest{
 		PubKey: pk,
 	}
-	for _, entry := range entries {
+	for _, entry := range resp.Entries {
 		rmr.PresentObjects = append(rmr.PresentObjects, entry.Name)
 	}
 
@@ -1078,7 +1078,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 				used[ss.Host] = h2c[ss.Host]
 			}
 		}
-		_, _, err := s.bus.Object(ctx, fm.Path)
+		_, err := s.bus.Object(ctx, fm.Path)
 		if err == nil {
 			err = s.bus.DeleteObject(ctx, api.DefaultBucketName, fm.Path, false)
 			if err != nil {
