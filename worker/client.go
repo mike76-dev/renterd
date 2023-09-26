@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gotd/contrib/http_range"
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	rhpv3 "go.sia.tech/core/rhp/v3"
 	"go.sia.tech/core/types"
@@ -41,7 +40,7 @@ func (c *Client) RHPBroadcast(ctx context.Context, fcid types.FileContractID) (e
 func (c *Client) RHPPruneContract(ctx context.Context, fcid types.FileContractID, timeout time.Duration) (pruned, remaining uint64, err error) {
 	var res api.RHPPruneContractResponse
 	err = c.c.WithContext(ctx).POST(fmt.Sprintf("/rhp/contract/%s/prune", fcid), api.RHPPruneContractRequest{
-		Timeout: timeout,
+		Timeout: api.DurationMS(timeout),
 	}, &res)
 	pruned = res.Pruned
 	remaining = res.Remaining
@@ -59,7 +58,7 @@ func (c *Client) RHPScan(ctx context.Context, hostKey types.PublicKey, hostIP st
 	err = c.c.WithContext(ctx).POST("/rhp/scan", api.RHPScanRequest{
 		HostKey: hostKey,
 		HostIP:  hostIP,
-		Timeout: timeout,
+		Timeout: api.DurationMS(timeout),
 	}, &resp)
 	return
 }
@@ -126,7 +125,7 @@ func (c *Client) RHPPriceTable(ctx context.Context, hostKey types.PublicKey, sia
 	req := api.RHPPriceTableRequest{
 		HostKey:    hostKey,
 		SiamuxAddr: siamuxAddr,
-		Timeout:    timeout,
+		Timeout:    api.DurationMS(timeout),
 	}
 	err = c.c.WithContext(ctx).POST("/rhp/pricetable", req, &pt)
 	return
@@ -162,11 +161,11 @@ func (c *Client) State() (state api.WorkerStateResponse, err error) {
 }
 
 // MigrateSlab migrates the specified slab.
-func (c *Client) MigrateSlab(ctx context.Context, slab object.Slab, set string) error {
+func (c *Client) MigrateSlab(ctx context.Context, slab object.Slab, set string) (res api.MigrateSlabResponse, err error) {
 	values := make(url.Values)
 	values.Set("contractset", set)
-
-	return c.c.WithContext(ctx).POST("/slab/migrate?"+values.Encode(), slab, nil)
+	err = c.c.WithContext(ctx).POST("/slab/migrate?"+values.Encode(), slab, &res)
+	return
 }
 
 // DownloadStats returns the upload stats.
@@ -244,7 +243,7 @@ func (c *Client) UploadMultipartUploadPart(ctx context.Context, r io.Reader, pat
 		err, _ := io.ReadAll(resp.Body)
 		return "", errors.New(string(err))
 	}
-	return resp.Header.Get("ETag"), nil
+	return strings.Trim(resp.Header.Get("ETag"), "\""), nil
 }
 
 func (c *Client) object(ctx context.Context, bucket, path, prefix string, offset, limit int, opts ...api.DownloadObjectOption) (_ io.ReadCloser, _ http.Header, err error) {
@@ -331,15 +330,12 @@ func (c *Client) GetObject(ctx context.Context, bucket, path string, opts ...api
 		return api.GetObjectResponse{}, err
 	}
 	var r *api.DownloadRange
-	ranges, err := http_range.ParseRange(header.Get("Content-Range"), size)
-	if err != nil {
-		return api.GetObjectResponse{}, err
-	}
-	if len(ranges) > 0 {
-		r = &api.DownloadRange{
-			Start:  ranges[0].Start,
-			Length: ranges[0].Length,
+	if cr := header.Get("Content-Range"); cr != "" {
+		dr, err := api.ParseDownloadRange(cr)
+		if err != nil {
+			return api.GetObjectResponse{}, err
 		}
+		r = &dr
 	}
 	// Parse Last-Modified
 	modTime, err := time.Parse(http.TimeFormat, header.Get("Last-Modified"))
@@ -350,7 +346,7 @@ func (c *Client) GetObject(ctx context.Context, bucket, path string, opts ...api
 	return api.GetObjectResponse{
 		Content:     body,
 		ContentType: header.Get("Content-Type"),
-		ModTime:     modTime,
+		ModTime:     modTime.UTC(),
 		Range:       r,
 		Size:        size,
 	}, nil
@@ -368,7 +364,7 @@ func (c *Client) DeleteObject(ctx context.Context, path string, batch bool) (err
 // Contracts returns all contracts from the worker. These contracts decorate a
 // bus contract with the contract's latest revision.
 func (c *Client) Contracts(ctx context.Context, hostTimeout time.Duration) (resp api.ContractsResponse, err error) {
-	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/rhp/contracts?hosttimeout=%s", api.ParamDuration(hostTimeout)), &resp)
+	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/rhp/contracts?hosttimeout=%s", api.DurationMS(hostTimeout)), &resp)
 	return
 }
 

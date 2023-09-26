@@ -114,11 +114,12 @@ type (
 		DeleteBucket(_ context.Context, bucket string) error
 		ListBuckets(_ context.Context) ([]api.Bucket, error)
 
+		ListObjects(ctx context.Context, bucket, prefix, marker string, limit int) (api.ObjectsListResponse, error)
 		Object(ctx context.Context, bucket, path string) (api.Object, error)
 		ObjectEntries(ctx context.Context, bucket, path, prefix, marker string, offset, limit int) ([]api.ObjectMetadata, bool, error)
 		ObjectsBySlabKey(ctx context.Context, bucket string, slabKey object.EncryptionKey) ([]api.ObjectMetadata, error)
 		SearchObjects(ctx context.Context, bucket, substring string, offset, limit int) ([]api.ObjectMetadata, error)
-		CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath, dstPath string) error
+		CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath, dstPath string) (api.ObjectMetadata, error)
 		UpdateObject(ctx context.Context, bucket, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID) error
 		RemoveObject(ctx context.Context, bucket, path string) error
 		RemoveObjects(ctx context.Context, bucket, prefix string) error
@@ -329,8 +330,8 @@ func (b *bus) walletTransactionsHandler(jc jape.Context) {
 	var before, since time.Time
 	offset := 0
 	limit := -1
-	if jc.DecodeForm("before", (*api.ParamTime)(&before)) != nil ||
-		jc.DecodeForm("since", (*api.ParamTime)(&since)) != nil ||
+	if jc.DecodeForm("before", (*api.TimeRFC3339)(&before)) != nil ||
+		jc.DecodeForm("since", (*api.TimeRFC3339)(&since)) != nil ||
 		jc.DecodeForm("offset", &offset) != nil ||
 		jc.DecodeForm("limit", &limit) != nil {
 		return
@@ -589,7 +590,7 @@ func (b *bus) hostsScanningHandlerGET(jc jape.Context) {
 	offset := 0
 	limit := -1
 	maxLastScan := time.Now()
-	if jc.DecodeForm("offset", &offset) != nil || jc.DecodeForm("limit", &limit) != nil || jc.DecodeForm("lastScan", (*api.ParamTime)(&maxLastScan)) != nil {
+	if jc.DecodeForm("offset", &offset) != nil || jc.DecodeForm("limit", &limit) != nil || jc.DecodeForm("lastScan", (*api.TimeRFC3339)(&maxLastScan)) != nil {
 		return
 	}
 	hosts, err := b.hdb.HostsForScanning(jc.Request.Context(), maxLastScan, offset, limit)
@@ -965,8 +966,12 @@ func (b *bus) searchObjectsHandlerGET(jc jape.Context) {
 }
 
 func (b *bus) objectsHandlerGET(jc jape.Context) {
+	var ignoreDelim bool
+	if jc.DecodeForm("ignoreDelim", &ignoreDelim) != nil {
+		return
+	}
 	path := jc.PathParam("path")
-	if strings.HasSuffix(path, "/") {
+	if strings.HasSuffix(path, "/") && !ignoreDelim {
 		b.objectEntriesHandlerGET(jc, path)
 		return
 	}
@@ -1035,9 +1040,26 @@ func (b *bus) objectsCopyHandlerPOST(jc jape.Context) {
 	if jc.Decode(&orr) != nil {
 		return
 	}
-	if jc.Check("couldn't copy object", b.ms.CopyObject(jc.Request.Context(), orr.SourceBucket, orr.DestinationBucket, orr.SourcePath, orr.DestinationPath)) != nil {
+
+	om, err := b.ms.CopyObject(jc.Request.Context(), orr.SourceBucket, orr.DestinationBucket, orr.SourcePath, orr.DestinationPath)
+	if jc.Check("couldn't copy object", err) != nil {
 		return
 	}
+	jc.Encode(om)
+}
+
+func (b *bus) objectsListHandlerPOST(jc jape.Context) {
+	var req api.ObjectsListRequest
+	if jc.Decode(&req) != nil {
+		return
+	} else if req.Bucket == "" {
+		req.Bucket = api.DefaultBucketName
+	}
+	resp, err := b.ms.ListObjects(jc.Request.Context(), req.Bucket, req.Prefix, req.Marker, req.Limit)
+	if jc.Check("couldn't list objects", err) != nil {
+		return
+	}
+	jc.Encode(resp)
 }
 
 func (b *bus) objectsRenameHandlerPOST(jc jape.Context) {
@@ -1890,7 +1912,7 @@ func (b *bus) multipartHandlerListUploadsPOST(jc jape.Context) {
 	if jc.Decode(&req) != nil {
 		return
 	}
-	resp, err := b.ms.MultipartUploads(jc.Request.Context(), req.Bucket, req.Prefix, req.KeyMarker, req.UploadIDMarker, req.Limit)
+	resp, err := b.ms.MultipartUploads(jc.Request.Context(), req.Bucket, req.Prefix, req.PathMarker, req.UploadIDMarker, req.Limit)
 	if jc.Check("failed to list multipart uploads", err) != nil {
 		return
 	}
@@ -1996,6 +2018,7 @@ func (b *bus) Handler() http.Handler {
 		"DELETE /objects/*path":  b.objectsHandlerDELETE,
 		"POST   /objects/copy":   b.objectsCopyHandlerPOST,
 		"POST   /objects/rename": b.objectsRenameHandlerPOST,
+		"POST   /objects/list":   b.objectsListHandlerPOST,
 
 		"GET    /params/upload":  b.paramsHandlerUploadGET,
 		"GET    /params/gouging": b.paramsHandlerGougingGET,

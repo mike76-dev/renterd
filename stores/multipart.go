@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/api"
@@ -181,9 +182,9 @@ func (s *SQLStore) MultipartUploadParts(ctx context.Context, bucket, object stri
 		}
 		// Check if there are more parts beyond 'limit'.
 		if limitUsed && len(dbParts) == int(limit) {
-			resp.IsTruncated = true
-			resp.NextMarker = dbParts[len(dbParts)-1].PartNumber
+			resp.HasMore = true
 			dbParts = dbParts[:len(dbParts)-1]
+			resp.NextMarker = dbParts[len(dbParts)-1].PartNumber
 		}
 		for _, part := range dbParts {
 			resp.Parts = append(resp.Parts, api.MultipartListPartItem{
@@ -274,7 +275,7 @@ func (s *SQLStore) CompleteMultipartUpload(ctx context.Context, bucket, path str
 				} else if mu.Parts[j].PartNumber > part.PartNumber {
 					// missing part
 					return api.ErrPartNotFound
-				} else if mu.Parts[j].PartNumber == part.PartNumber && mu.Parts[j].Etag == part.ETag {
+				} else if mu.Parts[j].PartNumber == part.PartNumber && mu.Parts[j].Etag == strings.Trim(part.ETag, "\"") {
 					// found a match
 					dbParts = append(dbParts, mu.Parts[j])
 					size += mu.Parts[j].Size

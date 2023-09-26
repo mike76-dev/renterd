@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	rhpv2 "go.sia.tech/core/rhp/v2"
@@ -25,7 +26,7 @@ var ErrContractSetNotSpecified = errors.New("contract set is not specified")
 type AccountsLockHandlerRequest struct {
 	HostKey   types.PublicKey `json:"hostKey"`
 	Exclusive bool            `json:"exclusive"`
-	Duration  ParamDuration   `json:"duration"`
+	Duration  DurationMS      `json:"duration"`
 }
 
 type AccountsLockHandlerResponse struct {
@@ -43,17 +44,22 @@ type ContractsResponse struct {
 	Error     string     `json:"error,omitempty"`
 }
 
+// MigrateSlabResponse is the response type for the /slab/migrate endpoint.
+type MigrateSlabResponse struct {
+	NumShardsMigrated int `json:"numShardsMigrated"`
+}
+
 // RHPScanRequest is the request type for the /rhp/scan endpoint.
 type RHPScanRequest struct {
 	HostKey types.PublicKey `json:"hostKey"`
 	HostIP  string          `json:"hostIP"`
-	Timeout time.Duration   `json:"timeout"`
+	Timeout DurationMS      `json:"timeout"`
 }
 
 // RHPPruneContractRequest is the request type for the /rhp/contract/:id/prune
 // endpoint.
 type RHPPruneContractRequest struct {
-	Timeout time.Duration `json:"timeout"`
+	Timeout DurationMS `json:"timeout"`
 }
 
 // RHPPruneContractResponse is the response type for the /rhp/contract/:id/prune
@@ -67,12 +73,12 @@ type RHPPruneContractResponse struct {
 type RHPPriceTableRequest struct {
 	HostKey    types.PublicKey `json:"hostKey"`
 	SiamuxAddr string          `json:"siamuxAddr"`
-	Timeout    time.Duration   `json:"timeout"`
+	Timeout    DurationMS      `json:"timeout"`
 }
 
 // RHPScanResponse is the response type for the /rhp/scan endpoint.
 type RHPScanResponse struct {
-	Ping       ParamDuration        `json:"ping"`
+	Ping       DurationMS           `json:"ping"`
 	ScanError  string               `json:"scanError,omitempty"`
 	Settings   rhpv2.HostSettings   `json:"settings,omitempty"`
 	PriceTable rhpv3.HostPriceTable `json:"priceTable,omitempty"`
@@ -246,7 +252,11 @@ type DownloadObjectOption func(http.Header)
 
 func DownloadWithRange(offset, length int64) DownloadObjectOption {
 	return func(h http.Header) {
-		h.Set("Range", fmt.Sprintf("bytes=%v-%v", offset, offset+length-1))
+		if length == -1 {
+			h.Set("Range", fmt.Sprintf("bytes=%v-", offset))
+		} else {
+			h.Set("Range", fmt.Sprintf("bytes=%v-%v", offset, offset+length-1))
+		}
 	}
 }
 
@@ -282,8 +292,42 @@ func ObjectsWithBucket(bucket string) ObjectsOption {
 	}
 }
 
+func ObjectsWithIgnoreDelim(ignore bool) ObjectsOption {
+	return func(v url.Values) {
+		v.Set("ignoreDelim", fmt.Sprint(ignore))
+	}
+}
+
 func ObjectsWithMarker(marker string) ObjectsOption {
 	return func(v url.Values) {
 		v.Set("marker", marker)
 	}
+}
+
+func ParseDownloadRange(contentRange string) (DownloadRange, error) {
+	parts := strings.Split(contentRange, " ")
+	if len(parts) != 2 || parts[0] != "bytes" {
+		return DownloadRange{}, errors.New("missing 'bytes' prefix in range header")
+	}
+	parts = strings.Split(parts[1], "/")
+	if len(parts) != 2 {
+		return DownloadRange{}, fmt.Errorf("invalid Content-Range header: %s", contentRange)
+	}
+	rangeStr := parts[0]
+	rangeParts := strings.Split(rangeStr, "-")
+	if len(rangeParts) != 2 {
+		return DownloadRange{}, errors.New("invalid Content-Range header")
+	}
+	start, err := strconv.ParseInt(rangeParts[0], 10, 64)
+	if err != nil {
+		return DownloadRange{}, err
+	}
+	end, err := strconv.ParseInt(rangeParts[1], 10, 64)
+	if err != nil {
+		return DownloadRange{}, err
+	}
+	return DownloadRange{
+		Start:  start,
+		Length: end - start + 1,
+	}, nil
 }

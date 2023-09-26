@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"net/url"
 	"time"
 
@@ -152,13 +153,13 @@ type ContractRootsResponse struct {
 // ContractAcquireRequest is the request type for the /contract/acquire
 // endpoint.
 type ContractAcquireRequest struct {
-	Duration ParamDuration `json:"duration"`
-	Priority int           `json:"priority"`
+	Duration DurationMS `json:"duration"`
+	Priority int        `json:"priority"`
 }
 
 type ContractKeepaliveRequest struct {
-	Duration ParamDuration `json:"duration"`
-	LockID   uint64        `json:"lockID"`
+	Duration DurationMS `json:"duration"`
+	LockID   uint64     `json:"lockID"`
 }
 
 // ContractAcquireRequest is the request type for the /contract/:id/release
@@ -196,8 +197,8 @@ type HostsPriceTablesRequest struct {
 
 // HostsRemoveRequest is the request type for the /hosts/remove endpoint.
 type HostsRemoveRequest struct {
-	MaxDowntimeHours      ParamDurationHour `json:"maxDowntimeHours"`
-	MinRecentScanFailures uint64            `json:"minRecentScanFailures"`
+	MaxDowntimeHours      DurationH `json:"maxDowntimeHours"`
+	MinRecentScanFailures uint64    `json:"minRecentScanFailures"`
 }
 
 // Object wraps an object.Object with its metadata.
@@ -208,9 +209,16 @@ type Object struct {
 
 // ObjectMetadata contains various metadata about an object.
 type ObjectMetadata struct {
-	Name   string  `json:"name"`
-	Size   int64   `json:"size"`
-	Health float64 `json:"health"`
+	Health  float64   `json:"health"`
+	ModTime time.Time `json:"modTime"`
+	Name    string    `json:"name"`
+	Size    int64     `json:"size"`
+}
+
+// LastModified returns the object's ModTime formatted for use in the
+// 'Last-Modified' header
+func (o *Object) LastModified() string {
+	return o.ModTime.UTC().Format(http.TimeFormat)
 }
 
 // ObjectAddRequest is the request type for the /object/*key endpoint.
@@ -418,11 +426,24 @@ type AccountsAddBalanceRequest struct {
 }
 
 type PackedSlabsRequestGET struct {
-	LockingDuration ParamDuration `json:"lockingDuration"`
-	MinShards       uint8         `json:"minShards"`
-	TotalShards     uint8         `json:"totalShards"`
-	ContractSet     string        `json:"contractSet"`
-	Limit           int           `json:"limit"`
+	LockingDuration DurationMS `json:"lockingDuration"`
+	MinShards       uint8      `json:"minShards"`
+	TotalShards     uint8      `json:"totalShards"`
+	ContractSet     string     `json:"contractSet"`
+	Limit           int        `json:"limit"`
+}
+
+type ObjectsListRequest struct {
+	Bucket string `json:"bucket"`
+	Limit  int    `json:"limit"`
+	Prefix string `json:"prefix"`
+	Marker string `json:"marker"`
+}
+
+type ObjectsListResponse struct {
+	HasMore    bool             `json:"hasMore"`
+	NextMarker string           `json:"nextMarker"`
+	Objects    []ObjectMetadata `json:"objects"`
 }
 
 type PackedSlabsRequestPOST struct {
@@ -533,7 +554,7 @@ type (
 	MultipartListUploadsRequest struct {
 		Bucket         string `json:"bucket"`
 		Prefix         string `json:"prefix"`
-		KeyMarker      string `json:"keyMarker"`
+		PathMarker     string `json:"pathMarker"`
 		UploadIDMarker string `json:"uploadIDMarker"`
 		Limit          int    `json:"limit"`
 	}
@@ -553,9 +574,9 @@ type (
 		Limit            int64  `json:"limit"`
 	}
 	MultipartListPartsResponse struct {
-		IsTruncated bool                    `json:"isTruncated"`
-		NextMarker  int                     `json:"nextMarker"`
-		Parts       []MultipartListPartItem `json:"parts"`
+		HasMore    bool                    `json:"hasMore"`
+		NextMarker int                     `json:"nextMarker"`
+		Parts      []MultipartListPartItem `json:"parts"`
 	}
 	MultipartListPartItem struct {
 		PartNumber   int       `json:"partNumber"`

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -1330,6 +1331,20 @@ func TestObjectHealth(t *testing.T) {
 		t.Fatal("wrong health", obj.Health)
 	}
 
+	// assert (raw) object and object health methods
+	raw, err := db.object(context.Background(), db.db, api.DefaultBucketName, "/foo")
+	if err != nil {
+		t.Fatal(err)
+	} else if len(raw) == 0 {
+		t.Fatal("object not found")
+	}
+	health, err := db.objectHealth(context.Background(), db.db, raw[0].ObjectID)
+	if err != nil {
+		t.Fatal(err)
+	} else if health != expectedHealth {
+		t.Fatal("wrong health", health)
+	}
+
 	// assert health is returned correctly by ObjectEntries
 	entries, _, err := db.ObjectEntries(context.Background(), api.DefaultBucketName, "/", "", "", 0, -1)
 	if err != nil {
@@ -1422,6 +1437,17 @@ func TestObjectEntries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
+	// assert mod time & clear it afterwards so we can compare
+	assertModTime := func(entries []api.ObjectMetadata) {
+		for i := range entries {
+			if !strings.HasSuffix(entries[i].Name, "/") && entries[i].ModTime.IsZero() {
+				t.Fatal("mod time should be set")
+			}
+			entries[i].ModTime = time.Time{}
+		}
+	}
+
 	tests := []struct {
 		path   string
 		prefix string
@@ -1444,6 +1470,10 @@ func TestObjectEntries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		// assert mod time & clear it afterwards so we can compare
+		assertModTime(got)
+
 		if !(len(got) == 0 && len(test.want) == 0) && !reflect.DeepEqual(got, test.want) {
 			t.Errorf("\nlist: %v\nprefix: %v\ngot: %v\nwant: %v", test.path, test.prefix, got, test.want)
 		}
@@ -1452,6 +1482,10 @@ func TestObjectEntries(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
+			// assert mod time & clear it afterwards so we can compare
+			assertModTime(got)
+
 			if len(got) != 1 || got[0] != test.want[offset] {
 				t.Errorf("\nlist: %v\nprefix: %v\ngot: %v\nwant: %v", test.path, test.prefix, got, test.want[offset])
 			}
@@ -1470,6 +1504,10 @@ func TestObjectEntries(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
+			// assert mod time & clear it afterwards so we can compare
+			assertModTime(got)
+
 			if len(got) != 1 || got[0] != test.want[offset+1] {
 				t.Errorf("\nlist: %v\nprefix: %v\nmarker: %v\ngot: %v\nwant: %v", test.path, test.prefix, test.want[offset].Name, got, test.want[offset+1])
 			}
@@ -3383,7 +3421,7 @@ func TestCopyObject(t *testing.T) {
 	}
 
 	// Copy it within the same bucket.
-	if err := os.CopyObject(ctx, "src", "src", "/foo", "/bar"); err != nil {
+	if om, err := os.CopyObject(ctx, "src", "src", "/foo", "/bar"); err != nil {
 		t.Fatal(err)
 	} else if entries, _, err := os.ObjectEntries(ctx, "src", "/", "", "", 0, -1); err != nil {
 		t.Fatal(err)
@@ -3391,10 +3429,12 @@ func TestCopyObject(t *testing.T) {
 		t.Fatal("expected 2 entries", len(entries))
 	} else if entries[0].Name != "/bar" || entries[1].Name != "/foo" {
 		t.Fatal("unexpected names", entries[0].Name, entries[1].Name)
+	} else if om.ModTime.IsZero() {
+		t.Fatal("expected mod time to be set")
 	}
 
 	// Copy it cross buckets.
-	if err := os.CopyObject(ctx, "src", "dst", "/foo", "/bar"); err != nil {
+	if om, err := os.CopyObject(ctx, "src", "dst", "/foo", "/bar"); err != nil {
 		t.Fatal(err)
 	} else if entries, _, err := os.ObjectEntries(ctx, "dst", "/", "", "", 0, -1); err != nil {
 		t.Fatal(err)
@@ -3402,6 +3442,8 @@ func TestCopyObject(t *testing.T) {
 		t.Fatal("expected 1 entry", len(entries))
 	} else if entries[0].Name != "/bar" {
 		t.Fatal("unexpected names", entries[0].Name, entries[1].Name)
+	} else if om.ModTime.IsZero() {
+		t.Fatal("expected mod time to be set")
 	}
 }
 
@@ -3484,5 +3526,87 @@ func TestMarkSlabUploadedAfterRenew(t *testing.T) {
 		t.Fatal(err)
 	} else if count != 1 {
 		t.Fatal("expected 1 sector", count)
+	}
+}
+
+func TestListObjects(t *testing.T) {
+	os, _, _, err := newTestSQLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := []struct {
+		path string
+		size int64
+	}{
+		{"/foo/bar", 1},
+		{"/foo/bat", 2},
+		{"/foo/baz/quux", 3},
+		{"/foo/baz/quuz", 4},
+		{"/gab/guub", 5},
+		{"/FOO/bar", 6}, // test case sensitivity
+	}
+
+	// assert mod time & clear it afterwards so we can compare
+	assertModTime := func(entries []api.ObjectMetadata) {
+		for i := range entries {
+			if !strings.HasSuffix(entries[i].Name, "/") && entries[i].ModTime.IsZero() {
+				t.Fatal("mod time should be set")
+			}
+			entries[i].ModTime = time.Time{}
+		}
+	}
+
+	ctx := context.Background()
+	for _, o := range objects {
+		obj, ucs := newTestObject(frand.Intn(9) + 1)
+		obj.Slabs = obj.Slabs[:1]
+		obj.Slabs[0].Length = uint32(o.size)
+		if err := os.UpdateObject(ctx, api.DefaultBucketName, o.path, testContractSet, obj, ucs); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		prefix string
+		marker string
+		want   []api.ObjectMetadata
+	}{
+		{"/", "", []api.ObjectMetadata{{Name: "/FOO/bar", Size: 6, Health: 1}, {Name: "/foo/bar", Size: 1, Health: 1}, {Name: "/foo/bat", Size: 2, Health: 1}, {Name: "/foo/baz/quux", Size: 3, Health: 1}, {Name: "/foo/baz/quuz", Size: 4, Health: 1}, {Name: "/gab/guub", Size: 5, Health: 1}}},
+		{"/foo/b", "", []api.ObjectMetadata{{Name: "/foo/bar", Size: 1, Health: 1}, {Name: "/foo/bat", Size: 2, Health: 1}, {Name: "/foo/baz/quux", Size: 3, Health: 1}, {Name: "/foo/baz/quuz", Size: 4, Health: 1}}},
+		{"o/baz/quu", "", []api.ObjectMetadata{}},
+		{"/foo", "", []api.ObjectMetadata{{Name: "/foo/bar", Size: 1, Health: 1}, {Name: "/foo/bat", Size: 2, Health: 1}, {Name: "/foo/baz/quux", Size: 3, Health: 1}, {Name: "/foo/baz/quuz", Size: 4, Health: 1}}},
+	}
+	for _, test := range tests {
+		res, err := os.ListObjects(ctx, api.DefaultBucketName, test.prefix, "", -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// assert mod time & clear it afterwards so we can compare
+		assertModTime(res.Objects)
+
+		got := res.Objects
+		if !(len(got) == 0 && len(test.want) == 0) && !reflect.DeepEqual(got, test.want) {
+			t.Errorf("\nkey: %v\ngot: %v\nwant: %v", test.prefix, got, test.want)
+		}
+		if len(res.Objects) > 0 {
+			marker := ""
+			for offset := 0; offset < len(test.want); offset++ {
+				res, err := os.ListObjects(ctx, api.DefaultBucketName, test.prefix, marker, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				// assert mod time & clear it afterwards so we can compare
+				assertModTime(res.Objects)
+
+				got := res.Objects
+				if len(got) != 1 {
+					t.Errorf("expected 1 object, got %v", len(got))
+				} else if got[0].Name != test.want[offset].Name {
+					t.Errorf("expected %v, got %v", test.want[offset].Name, got[0].Name)
+				}
+				marker = res.NextMarker
+			}
+		}
 	}
 }
