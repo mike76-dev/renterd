@@ -707,11 +707,6 @@ func readSectorCost(pt rhpv3.HostPriceTable, length uint64) (types.Currency, err
 // uploadSectorCost returns an overestimate for the cost of uploading a sector
 // to a host
 func uploadSectorCost(pt rhpv3.HostPriceTable, windowEnd uint64) (cost, collateral, storage types.Currency, _ error) {
-	/*cfg, err := satellite.StaticSatellite.Config()
-	if err != nil {
-		return types.ZeroCurrency, types.ZeroCurrency, types.ZeroCurrency, err
-	}*/
-
 	rc := pt.BaseCost()
 	rc = rc.Add(pt.AppendSectorCost(windowEnd - pt.HostBlockHeight))
 	rc = padBandwidth(pt, rc)
