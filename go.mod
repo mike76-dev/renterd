@@ -8,7 +8,7 @@ require (
 	github.com/google/go-cmp v0.5.9
 	github.com/gotd/contrib v0.19.0
 	github.com/klauspost/reedsolomon v1.11.8
-	github.com/mike76-dev/sia-web/renterd v0.1.13
+	github.com/mike76-dev/sia-web/renterd v0.1.15
 	github.com/minio/minio-go/v7 v7.0.63
 	github.com/montanaflynn/stats v0.7.1
 	gitlab.com/NebulousLabs/encoding v0.0.0-20200604091946-456c3dc907fe
