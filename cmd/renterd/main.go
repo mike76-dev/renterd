@@ -319,8 +319,8 @@ func main() {
 
 	flag.Parse()
 
-	log.Println("renterd v0.5.0-satellite")
-	log.Println("Compatible with Satellite v0.4.0-beta")
+	log.Println("renterd v0.6.0-satellite")
+	log.Println("Compatible with Satellite v0.5.0")
 	log.Println("Network", build.NetworkName())
 	if flag.Arg(0) == "version" {
 		log.Println("Commit:", githash)
