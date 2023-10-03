@@ -124,7 +124,6 @@ type ContractsIDAddRequest struct {
 	Contract    rhpv2.ContractRevision `json:"contract"`
 	StartHeight uint64                 `json:"startHeight"`
 	TotalCost   types.Currency         `json:"totalCost"`
-	PublicKey   types.PublicKey        `json:"publicKey"`
 }
 
 // UploadSectorRequest is the request type for the /upload/:id/sector endpoint.
@@ -140,7 +139,6 @@ type ContractsIDRenewedRequest struct {
 	RenewedFrom types.FileContractID   `json:"renewedFrom"`
 	StartHeight uint64                 `json:"startHeight"`
 	TotalCost   types.Currency         `json:"totalCost"`
-	PublicKey   types.PublicKey        `json:"publicKey"`
 }
 
 // ContractRootsResponse is the response type for the /contract/:id/roots

@@ -28,10 +28,6 @@ import (
 	"go.sia.tech/renterd/wallet"
 	"go.sia.tech/renterd/webhooks"
 	"go.uber.org/zap"
-
-	// Satellite
-	satellite "github.com/mike76-dev/renterd-satellite"
-	//"go.sia.tech/renterd/satellite"
 )
 
 type (
@@ -885,11 +881,6 @@ func (b *bus) contractIDHandlerPOST(jc jape.Context) {
 	if jc.Check("couldn't store contract", err) == nil {
 		jc.Encode(a)
 	}
-
-	if (req.PublicKey != types.PublicKey{}) {
-		err := satellite.StaticSatellite.AddContract(id, req.PublicKey)
-		jc.Check("couldn't store contract ID", err)
-	}
 }
 
 func (b *bus) contractIDRenewedHandlerPOST(jc jape.Context) {
@@ -906,11 +897,6 @@ func (b *bus) contractIDRenewedHandlerPOST(jc jape.Context) {
 	r, err := b.ms.AddRenewedContract(jc.Request.Context(), req.Contract, req.TotalCost, req.StartHeight, req.RenewedFrom)
 	if jc.Check("couldn't store contract", err) == nil {
 		jc.Encode(r)
-	}
-
-	if (req.PublicKey != types.PublicKey{}) {
-		err := satellite.StaticSatellite.AddContract(id, req.PublicKey)
-		jc.Check("couldn't store contract ID", err)
 	}
 }
 
@@ -934,17 +920,11 @@ func (b *bus) contractIDHandlerDELETE(jc jape.Context) {
 	if jc.DecodeParam("id", &id) != nil {
 		return
 	}
-	if jc.Check("couldn't remove contract", b.ms.ArchiveContract(jc.Request.Context(), id, api.ContractArchivalReasonRemoved)) != nil {
-		return
-	}
-	jc.Check("couldn't delete contract ID", satellite.StaticSatellite.DeleteContract(id))
+	jc.Check("couldn't remove contract", b.ms.ArchiveContract(jc.Request.Context(), id, api.ContractArchivalReasonRemoved))
 }
 
 func (b *bus) contractsAllHandlerDELETE(jc jape.Context) {
-	if jc.Check("couldn't remove contracts", b.ms.ArchiveAllContracts(jc.Request.Context(), api.ContractArchivalReasonRemoved)) != nil {
-		return
-	}
-	jc.Check("couldn't delete contract IDs", satellite.StaticSatellite.DeleteContracts())
+	jc.Check("couldn't remove contracts", b.ms.ArchiveAllContracts(jc.Request.Context(), api.ContractArchivalReasonRemoved))
 }
 
 func (b *bus) searchObjectsHandlerGET(jc jape.Context) {
