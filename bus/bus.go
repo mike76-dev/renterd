@@ -28,6 +28,9 @@ import (
 	"go.sia.tech/renterd/wallet"
 	"go.sia.tech/renterd/webhooks"
 	"go.uber.org/zap"
+
+	// Satellite.
+	satellite "github.com/mike76-dev/renterd-satellite"
 )
 
 type (
@@ -1336,7 +1339,25 @@ func (b *bus) settingKeyHandlerPUT(jc jape.Context) {
 		}
 	}
 
-	jc.Check("could not update setting", b.ss.UpdateSetting(jc.Request.Context(), key, string(data)))
+	if err := b.ss.UpdateSetting(jc.Request.Context(), key, string(data)); err != nil {
+		jc.Error(fmt.Errorf("could not update setting, error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Update the satellite if the settings have changed.
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		jc.Error(fmt.Errorf("couldn't fetch satellite config: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if cfg.Enabled {
+		rs, err := satellite.StaticSatellite.GetSettings(jc.Request.Context())
+		if err != nil {
+			jc.Error(fmt.Errorf("couldn't get renter settings: %v", err), http.StatusInternalServerError)
+			return
+		}
+		jc.Check("couldn't update renter settings", satellite.StaticSatellite.UpdateSettings(jc.Request.Context(), rs))
+	}
 }
 
 func (b *bus) settingKeyHandlerDELETE(jc jape.Context) {

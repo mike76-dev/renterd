@@ -560,8 +560,27 @@ func (ap *Autopilot) configHandlerPUT(jc jape.Context) {
 	}
 
 	// update the autopilot and interrupt migrations if necessary
-	if err := jc.Check("failed to update autopilot config", ap.bus.UpdateAutopilot(jc.Request.Context(), autopilot)); err == nil && contractSetChanged {
+	err = ap.bus.UpdateAutopilot(jc.Request.Context(), autopilot)
+	if jc.Check("failed to update autopilot config", err) != nil {
+		return
+	}
+	if contractSetChanged {
 		ap.m.SignalMaintenanceFinished()
+	}
+
+	// update the satellite if the config has changed
+	sCfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		jc.Error(fmt.Errorf("couldn't fetch satellite config: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if sCfg.Enabled {
+		rs, err := satellite.StaticSatellite.GetSettings(jc.Request.Context())
+		if err != nil {
+			jc.Error(fmt.Errorf("couldn't get renter settings: %v", err), http.StatusInternalServerError)
+			return
+		}
+		jc.Check("couldn't update renter settings", satellite.StaticSatellite.UpdateSettings(jc.Request.Context(), rs))
 	}
 }
 
