@@ -3,6 +3,8 @@ package stores
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strings"
 
 	"github.com/go-gormigrate/gormigrate/v2"
 	"go.sia.tech/renterd/api"
@@ -229,6 +231,36 @@ func performMigrations(db *gorm.DB, logger *zap.SugaredLogger) error {
 				return performMigration00015_multipartUploads(tx, logger)
 			},
 		},
+		{
+			ID: "00016_bucketPolicy",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00016_bucketPolicy(tx, logger)
+			},
+		},
+		{
+			ID: "00017_mimetype",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00017_mimetype(tx, logger)
+			},
+		},
+		{
+			ID: "00018_etags",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00018_etags(tx, logger)
+			},
+		},
+		{
+			ID: "00019_accounts_shutdown",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00019_accountsShutdown(tx, logger)
+			},
+		},
+		{
+			ID: "00020_missingIndices",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00020_missingIndices(tx, logger)
+			},
+		},
 	}
 	// Create migrator.
 	m := gormigrate.New(db, gormigrate.DefaultOptions, migrations)
@@ -283,6 +315,31 @@ func initSchema(tx *gorm.DB) error {
 	return tx.Create(&dbBucket{
 		Name: api.DefaultBucketName,
 	}).Error
+}
+
+func detectMissingIndicesOnType(tx *gorm.DB, table interface{}, t reflect.Type, f func(dst interface{}, name string)) {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if field.Anonymous {
+			detectMissingIndicesOnType(tx, table, field.Type, f)
+			continue
+		}
+		if !strings.Contains(field.Tag.Get("gorm"), "index") {
+			continue // no index tag
+		}
+		if !tx.Migrator().HasIndex(table, field.Name) {
+			f(table, field.Name)
+		}
+	}
+}
+
+func detectMissingIndices(tx *gorm.DB, f func(dst interface{}, name string)) {
+	for _, table := range tables {
+		detectMissingIndicesOnType(tx, table, reflect.TypeOf(table), f)
+	}
 }
 
 func setupJoinTables(tx *gorm.DB) error {
@@ -808,5 +865,76 @@ func performMigration00015_multipartUploads(txn *gorm.DB, logger *zap.SugaredLog
 		}
 	}
 	logger.Info("migration 00015_multipartUploads complete")
+	return nil
+}
+
+func performMigration00016_bucketPolicy(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info("performing migration 00016_bucketPolicy")
+	if err := txn.Migrator().AutoMigrate(&dbBucket{}); err != nil {
+		return err
+	}
+	logger.Info("migration 00016_bucketPolicy complete")
+	return nil
+}
+
+func performMigration00017_mimetype(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info("performing migration 00017_mimetype")
+	if !txn.Migrator().HasColumn(&dbObject{}, "MimeType") {
+		if err := txn.Migrator().AddColumn(&dbObject{}, "MimeType"); err != nil {
+			return err
+		}
+	}
+	if !txn.Migrator().HasColumn(&dbMultipartUpload{}, "MimeType") {
+		if err := txn.Migrator().AddColumn(&dbMultipartUpload{}, "MimeType"); err != nil {
+			return err
+		}
+	}
+	logger.Info("migration 00017_mimetype complete")
+	return nil
+}
+
+func performMigration00018_etags(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info("performing migration 00018_etags")
+	if !txn.Migrator().HasColumn(&dbObject{}, "etag") {
+		if err := txn.Migrator().AddColumn(&dbObject{}, "etag"); err != nil {
+			return err
+		}
+	}
+	logger.Info("migration 00018_etags complete")
+	return nil
+}
+
+func performMigration00019_accountsShutdown(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info("performing migration 00019_accounts_shutdown")
+	if err := txn.Migrator().AutoMigrate(&dbAccount{}); err != nil {
+		return err
+	}
+	if err := txn.Model(&dbAccount{}).
+		Where("TRUE").
+		Updates(map[string]interface{}{
+			"clean_shutdown": false,
+			"requires_sync":  true,
+			"drift":          "0",
+		}).
+		Error; err != nil {
+		return fmt.Errorf("failed to update accounts: %w", err)
+	}
+	logger.Info("migration 00019_accounts_shutdown complete")
+	return nil
+}
+
+func performMigration00020_missingIndices(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info("performing migration 00020_missingIndices")
+	var err error
+	detectMissingIndices(txn, func(dst interface{}, name string) {
+		if err != nil {
+			return
+		}
+		err = txn.Migrator().CreateIndex(dst, name)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create missing indices: %w", err)
+	}
+	logger.Info("migration 00020_missingIndices complete")
 	return nil
 }

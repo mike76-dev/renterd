@@ -13,33 +13,53 @@ import (
 	"strings"
 	"time"
 
-	"github.com/SiaFoundation/gofakes3"
 	"go.sia.tech/core/consensus"
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	rhpv3 "go.sia.tech/core/rhp/v3"
 	"go.sia.tech/core/types"
+	"go.sia.tech/gofakes3"
 	"go.sia.tech/jape"
 	"go.sia.tech/renterd/alerts"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/build"
+	"go.sia.tech/renterd/bus/client"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
 	"go.sia.tech/renterd/tracing"
 	"go.sia.tech/renterd/wallet"
 	"go.sia.tech/renterd/webhooks"
+	"go.sia.tech/siad/modules"
 	"go.uber.org/zap"
 
 	// Satellite.
 	satellite "github.com/mike76-dev/renterd-satellite"
 )
 
+// Client re-exports the client from the client package.
+type Client struct {
+	*client.Client
+}
+
+// NewClient returns a new bus client.
+func NewClient(addr, password string) *Client {
+	return &Client{
+		client.New(
+			addr,
+			password,
+		),
+	}
+}
+
 type (
 	// A ChainManager manages blockchain state.
 	ChainManager interface {
-		AcceptBlock(context.Context, types.Block) error
+		AcceptBlock(types.Block) error
+		BlockAtHeight(height uint64) (types.Block, bool)
+		IndexAtHeight(height uint64) (types.ChainIndex, error)
 		LastBlockTime() time.Time
-		Synced(ctx context.Context) bool
-		TipState(ctx context.Context) consensus.State
+		Subscribe(s modules.ConsensusSetSubscriber, ccID modules.ConsensusChangeID, cancel <-chan struct{}) error
+		Synced() bool
+		TipState() consensus.State
 	}
 
 	// A Syncer can connect to other peers and synchronize the blockchain.
@@ -52,9 +72,11 @@ type (
 
 	// A TransactionPool can validate and relay unconfirmed transactions.
 	TransactionPool interface {
+		AcceptTransactionSet(txns []types.Transaction) error
+		Close() error
 		RecommendedFee() types.Currency
+		Subscribe(subscriber modules.TransactionPoolSubscriber)
 		Transactions() []types.Transaction
-		AddTransactionSet(txns []types.Transaction) error
 		UnconfirmedParents(txn types.Transaction) ([]types.Transaction, error)
 	}
 
@@ -108,37 +130,41 @@ type (
 		ContractSizes(ctx context.Context) (map[types.FileContractID]api.ContractSize, error)
 		ContractSize(ctx context.Context, id types.FileContractID) (api.ContractSize, error)
 
-		Bucket(_ context.Context, bucket string) (api.Bucket, error)
-		CreateBucket(_ context.Context, bucket string) error
-		DeleteBucket(_ context.Context, bucket string) error
+		Bucket(_ context.Context, bucketName string) (api.Bucket, error)
+		CreateBucket(_ context.Context, bucketName string, policy api.BucketPolicy) error
+		DeleteBucket(_ context.Context, bucketName string) error
 		ListBuckets(_ context.Context) ([]api.Bucket, error)
+		UpdateBucketPolicy(ctx context.Context, bucketName string, policy api.BucketPolicy) error
 
-		ListObjects(ctx context.Context, bucket, prefix, marker string, limit int) (api.ObjectsListResponse, error)
-		Object(ctx context.Context, bucket, path string) (api.Object, error)
-		ObjectEntries(ctx context.Context, bucket, path, prefix, marker string, offset, limit int) ([]api.ObjectMetadata, bool, error)
-		ObjectsBySlabKey(ctx context.Context, bucket string, slabKey object.EncryptionKey) ([]api.ObjectMetadata, error)
-		SearchObjects(ctx context.Context, bucket, substring string, offset, limit int) ([]api.ObjectMetadata, error)
-		CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath, dstPath string) (api.ObjectMetadata, error)
-		UpdateObject(ctx context.Context, bucket, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID) error
-		RemoveObject(ctx context.Context, bucket, path string) error
-		RemoveObjects(ctx context.Context, bucket, prefix string) error
-		RenameObject(ctx context.Context, bucket, from, to string) error
-		RenameObjects(ctx context.Context, bucket, from, to string) error
+		ListObjects(ctx context.Context, bucketName, prefix, marker string, limit int) (api.ObjectsListResponse, error)
+		Object(ctx context.Context, bucketName, path string) (api.Object, error)
+		ObjectEntries(ctx context.Context, bucketName, path, prefix, marker string, offset, limit int) ([]api.ObjectMetadata, bool, error)
+		ObjectsBySlabKey(ctx context.Context, bucketName string, slabKey object.EncryptionKey) ([]api.ObjectMetadata, error)
+		SearchObjects(ctx context.Context, bucketName, substring string, offset, limit int) ([]api.ObjectMetadata, error)
+		CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath, dstPath, mimeType string) (api.ObjectMetadata, error)
+		UpdateObject(ctx context.Context, bucketName, path, contractSet, ETag, mimeType string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID) error
+		RemoveObject(ctx context.Context, bucketName, path string) error
+		RemoveObjects(ctx context.Context, bucketName, prefix string) error
+		RenameObject(ctx context.Context, bucketName, from, to string) error
+		RenameObjects(ctx context.Context, bucketName, from, to string) error
 
-		AbortMultipartUpload(ctx context.Context, bucket, path string, uploadID string) (err error)
-		AddMultipartPart(ctx context.Context, bucket, path, contractSet, uploadID string, partNumber int, slices []object.SlabSlice, partialSlab []object.PartialSlab, etag string, usedContracts map[types.PublicKey]types.FileContractID) (err error)
-		CompleteMultipartUpload(ctx context.Context, bucket, path string, uploadID string, parts []api.MultipartCompletedPart) (_ api.MultipartCompleteResponse, err error)
-		CreateMultipartUpload(ctx context.Context, bucket, path string, ec object.EncryptionKey) (api.MultipartCreateResponse, error)
-		MultipartUploads(ctx context.Context, bucket, prefix, keyMarker, uploadIDMarker string, maxUploads int) (resp api.MultipartListUploadsResponse, _ error)
-		MultipartUploadParts(ctx context.Context, bucket, object string, uploadID string, marker int, limit int64) (resp api.MultipartListPartsResponse, _ error)
+		AbortMultipartUpload(ctx context.Context, bucketName, path string, uploadID string) (err error)
+		AddMultipartPart(ctx context.Context, bucketName, path, contractSet, eTag, uploadID string, partNumber int, slices []object.SlabSlice, partialSlab []object.PartialSlab, usedContracts map[types.PublicKey]types.FileContractID) (err error)
+		CompleteMultipartUpload(ctx context.Context, bucketName, path, uploadID string, parts []api.MultipartCompletedPart) (_ api.MultipartCompleteResponse, err error)
+		CreateMultipartUpload(ctx context.Context, bucketName, path string, ec object.EncryptionKey, mimeType string) (api.MultipartCreateResponse, error)
+		MultipartUpload(ctx context.Context, uploadID string) (resp api.MultipartUpload, _ error)
+		MultipartUploads(ctx context.Context, bucketName, prefix, keyMarker, uploadIDMarker string, maxUploads int) (resp api.MultipartListUploadsResponse, _ error)
+		MultipartUploadParts(ctx context.Context, bucketName, object string, uploadID string, marker int, limit int64) (resp api.MultipartListPartsResponse, _ error)
 
 		MarkPackedSlabsUploaded(ctx context.Context, slabs []api.UploadedPackedSlab, usedContracts map[types.PublicKey]types.FileContractID) error
 		PackedSlabsForUpload(ctx context.Context, lockingDuration time.Duration, minShards, totalShards uint8, set string, limit int) ([]api.PackedSlab, error)
 		SlabBuffers(ctx context.Context) ([]api.SlabBuffer, error)
 
+		DeleteHostSector(ctx context.Context, hk types.PublicKey, root types.Hash256) error
+
 		ObjectsStats(ctx context.Context) (api.ObjectsStatsResponse, error)
 
-		AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) (slabs []object.PartialSlab, err error)
+		AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) (slabs []object.PartialSlab, bufferSize int64, err error)
 		FetchPartialSlab(ctx context.Context, key object.EncryptionKey, offset, length uint32) ([]byte, error)
 		Slab(ctx context.Context, key object.EncryptionKey) (object.Slab, error)
 		RefreshHealth(ctx context.Context) error
@@ -167,6 +193,7 @@ type (
 	EphemeralAccountStore interface {
 		Accounts(context.Context) ([]api.Account, error)
 		SaveAccounts(context.Context, []api.Account) error
+		SetUncleanShutdown() error
 	}
 )
 
@@ -198,7 +225,7 @@ func (b *bus) consensusAcceptBlock(jc jape.Context) {
 	if jc.Decode(&block) != nil {
 		return
 	}
-	if jc.Check("failed to accept block", b.cm.AcceptBlock(jc.Request.Context(), block)) != nil {
+	if jc.Check("failed to accept block", b.cm.AcceptBlock(block)) != nil {
 		return
 	}
 }
@@ -223,12 +250,12 @@ func (b *bus) syncerConnectHandler(jc jape.Context) {
 }
 
 func (b *bus) consensusStateHandler(jc jape.Context) {
-	jc.Encode(b.consensusState(jc.Request.Context()))
+	jc.Encode(b.consensusState())
 }
 
 func (b *bus) consensusNetworkHandler(jc jape.Context) {
 	jc.Encode(api.ConsensusNetwork{
-		Name: b.cm.TipState(jc.Request.Context()).Network.Name,
+		Name: b.cm.TipState().Network.Name,
 	})
 }
 
@@ -244,7 +271,7 @@ func (b *bus) txpoolTransactionsHandler(jc jape.Context) {
 func (b *bus) txpoolBroadcastHandler(jc jape.Context) {
 	var txnSet []types.Transaction
 	if jc.Decode(&txnSet) == nil {
-		jc.Check("couldn't broadcast transaction set", b.tp.AddTransactionSet(txnSet))
+		jc.Check("couldn't broadcast transaction set", b.tp.AcceptTransactionSet(txnSet))
 	}
 }
 
@@ -257,13 +284,25 @@ func (b *bus) bucketsHandlerGET(jc jape.Context) {
 }
 
 func (b *bus) bucketsHandlerPOST(jc jape.Context) {
-	var bucket api.Bucket
+	var bucket api.BucketCreateRequest
 	if jc.Decode(&bucket) != nil {
 		return
 	} else if bucket.Name == "" {
 		jc.Error(errors.New("no name provided"), http.StatusBadRequest)
 		return
-	} else if jc.Check("failed to create bucket", b.ms.CreateBucket(jc.Request.Context(), bucket.Name)) != nil {
+	} else if jc.Check("failed to create bucket", b.ms.CreateBucket(jc.Request.Context(), bucket.Name, bucket.Policy)) != nil {
+		return
+	}
+}
+
+func (b *bus) bucketsHandlerPolicyPUT(jc jape.Context) {
+	var req api.BucketUpdatePolicyRequest
+	if jc.Decode(&req) != nil {
+		return
+	} else if bucket := jc.PathParam("name"); bucket == "" {
+		jc.Error(errors.New("no bucket name provided"), http.StatusBadRequest)
+		return
+	} else if jc.Check("failed to create bucket", b.ms.UpdateBucketPolicy(jc.Request.Context(), bucket, req.Policy)) != nil {
 		return
 	}
 }
@@ -313,18 +352,6 @@ func (b *bus) walletHandler(jc jape.Context) {
 	})
 }
 
-func (b *bus) walletBalanceHandler(jc jape.Context) {
-	_, balance, _, err := b.w.Balance()
-	if jc.Check("couldn't fetch wallet balance", err) != nil {
-		return
-	}
-	jc.Encode(balance)
-}
-
-func (b *bus) walletAddressHandler(jc jape.Context) {
-	jc.Encode(b.w.Address())
-}
-
 func (b *bus) walletTransactionsHandler(jc jape.Context) {
 	var before, since time.Time
 	offset := 0
@@ -356,10 +383,10 @@ func (b *bus) walletFundHandler(jc jape.Context) {
 	txn := wfr.Transaction
 	if len(txn.MinerFees) == 0 {
 		// if no fees are specified, we add some
-		fee := b.tp.RecommendedFee().Mul64(uint64(types.EncodedLen(txn)))
+		fee := b.tp.RecommendedFee().Mul64(b.cm.TipState().TransactionWeight(txn))
 		txn.MinerFees = []types.Currency{fee}
 	}
-	toSign, err := b.w.FundTransaction(b.cm.TipState(jc.Request.Context()), &txn, wfr.Amount.Add(txn.MinerFees[0]), b.tp.Transactions())
+	toSign, err := b.w.FundTransaction(b.cm.TipState(), &txn, wfr.Amount.Add(txn.MinerFees[0]), b.tp.Transactions())
 	if jc.Check("couldn't fund transaction", err) != nil {
 		return
 	}
@@ -380,7 +407,7 @@ func (b *bus) walletSignHandler(jc jape.Context) {
 	if jc.Decode(&wsr) != nil {
 		return
 	}
-	err := b.w.SignTransaction(b.cm.TipState(jc.Request.Context()), &wsr.Transaction, wsr.ToSign, wsr.CoveredFields)
+	err := b.w.SignTransaction(b.cm.TipState(), &wsr.Transaction, wsr.ToSign, wsr.CoveredFields)
 	if jc.Check("couldn't sign transaction", err) == nil {
 		jc.Encode(wsr.Transaction)
 	}
@@ -396,7 +423,7 @@ func (b *bus) walletRedistributeHandler(jc jape.Context) {
 		return
 	}
 
-	cs := b.cm.TipState(jc.Request.Context())
+	cs := b.cm.TipState()
 	txn, toSign, err := b.w.Redistribute(cs, wfr.Outputs, wfr.Amount, b.tp.RecommendedFee(), b.tp.Transactions())
 	if jc.Check("couldn't redistribute money in the wallet into the desired outputs", err) != nil {
 		return
@@ -407,7 +434,7 @@ func (b *bus) walletRedistributeHandler(jc jape.Context) {
 		return
 	}
 
-	if jc.Check("couldn't broadcast the transaction", b.tp.AddTransactionSet([]types.Transaction{txn})) != nil {
+	if jc.Check("couldn't broadcast the transaction", b.tp.AcceptTransactionSet([]types.Transaction{txn})) != nil {
 		b.w.ReleaseInputs(txn)
 		return
 	}
@@ -423,7 +450,6 @@ func (b *bus) walletDiscardHandler(jc jape.Context) {
 }
 
 func (b *bus) walletPrepareFormHandler(jc jape.Context) {
-	ctx := jc.Request.Context()
 	var wpfr api.WalletPrepareFormRequest
 	if jc.Decode(&wpfr) != nil {
 		return
@@ -436,14 +462,14 @@ func (b *bus) walletPrepareFormHandler(jc jape.Context) {
 		jc.Error(errors.New("no renter key provided"), http.StatusBadRequest)
 		return
 	}
-	cs := b.cm.TipState(ctx)
+	cs := b.cm.TipState()
 
 	fc := rhpv2.PrepareContractFormation(wpfr.RenterKey, wpfr.HostKey, wpfr.RenterFunds, wpfr.HostCollateral, wpfr.EndHeight, wpfr.HostSettings, wpfr.RenterAddress)
 	cost := rhpv2.ContractFormationCost(cs, fc, wpfr.HostSettings.ContractPrice)
 	txn := types.Transaction{
 		FileContracts: []types.FileContract{fc},
 	}
-	txn.MinerFees = []types.Currency{b.tp.RecommendedFee().Mul64(uint64(types.EncodedLen(txn)))}
+	txn.MinerFees = []types.Currency{b.tp.RecommendedFee().Mul64(cs.TransactionWeight(txn))}
 	toSign, err := b.w.FundTransaction(cs, &txn, cost.Add(txn.MinerFees[0]), b.tp.Transactions())
 	if jc.Check("couldn't fund transaction", err) != nil {
 		return
@@ -467,15 +493,11 @@ func (b *bus) walletPrepareRenewHandler(jc jape.Context) {
 	if jc.Decode(&wprr) != nil {
 		return
 	}
-	if wprr.HostKey == (types.PublicKey{}) {
-		jc.Error(errors.New("no host key provided"), http.StatusBadRequest)
-		return
-	}
 	if wprr.RenterKey == nil {
 		jc.Error(errors.New("no renter key provided"), http.StatusBadRequest)
 		return
 	}
-	cs := b.cm.TipState(jc.Request.Context())
+	cs := b.cm.TipState()
 
 	// Create the final revision from the provided revision.
 	finalRevision := wprr.Revision
@@ -485,7 +507,7 @@ func (b *bus) walletPrepareRenewHandler(jc jape.Context) {
 	finalRevision.RevisionNumber = math.MaxUint64
 
 	// Prepare the new contract.
-	fc, basePrice := rhpv3.PrepareContractRenewal(wprr.Revision, wprr.HostAddress, wprr.RenterAddress, wprr.RenterFunds, wprr.NewCollateral, wprr.HostKey, wprr.PriceTable, wprr.EndHeight)
+	fc, basePrice := rhpv3.PrepareContractRenewal(wprr.Revision, wprr.HostAddress, wprr.RenterAddress, wprr.RenterFunds, wprr.NewCollateral, wprr.PriceTable, wprr.EndHeight)
 
 	// Create the transaction containing both the final revision and new
 	// contract.
@@ -879,6 +901,10 @@ func (b *bus) contractIDHandlerPOST(jc jape.Context) {
 		http.Error(jc.ResponseWriter, "contract ID mismatch", http.StatusBadRequest)
 		return
 	}
+	if req.TotalCost.IsZero() {
+		http.Error(jc.ResponseWriter, "TotalCost can not be zero", http.StatusBadRequest)
+		return
+	}
 
 	a, err := b.ms.AddContract(jc.Request.Context(), req.Contract, req.TotalCost, req.StartHeight)
 	if jc.Check("couldn't store contract", err) == nil {
@@ -894,6 +920,10 @@ func (b *bus) contractIDRenewedHandlerPOST(jc jape.Context) {
 	}
 	if req.Contract.ID() != id {
 		http.Error(jc.ResponseWriter, "contract ID mismatch", http.StatusBadRequest)
+		return
+	}
+	if req.TotalCost.IsZero() {
+		http.Error(jc.ResponseWriter, "TotalCost can not be zero", http.StatusBadRequest)
 		return
 	}
 
@@ -1015,7 +1045,7 @@ func (b *bus) objectsHandlerPUT(jc jape.Context) {
 	} else if aor.Bucket == "" {
 		aor.Bucket = api.DefaultBucketName
 	}
-	jc.Check("couldn't store object", b.ms.UpdateObject(jc.Request.Context(), aor.Bucket, jc.PathParam("path"), aor.ContractSet, aor.Object, aor.UsedContracts))
+	jc.Check("couldn't store object", b.ms.UpdateObject(jc.Request.Context(), aor.Bucket, jc.PathParam("path"), aor.ContractSet, aor.ETag, aor.MimeType, aor.Object, aor.UsedContracts))
 }
 
 func (b *bus) objectsCopyHandlerPOST(jc jape.Context) {
@@ -1024,10 +1054,13 @@ func (b *bus) objectsCopyHandlerPOST(jc jape.Context) {
 		return
 	}
 
-	om, err := b.ms.CopyObject(jc.Request.Context(), orr.SourceBucket, orr.DestinationBucket, orr.SourcePath, orr.DestinationPath)
+	om, err := b.ms.CopyObject(jc.Request.Context(), orr.SourceBucket, orr.DestinationBucket, orr.SourcePath, orr.DestinationPath, orr.MimeType)
 	if jc.Check("couldn't copy object", err) != nil {
 		return
 	}
+
+	jc.ResponseWriter.Header().Set("Last-Modified", om.LastModified())
+	jc.ResponseWriter.Header().Set("ETag", api.FormatETag(om.ETag))
 	jc.Encode(om)
 }
 
@@ -1145,6 +1178,20 @@ func (b *bus) packedSlabsHandlerDonePOST(jc jape.Context) {
 	jc.Check("failed to mark packed slab(s) as uploaded", b.ms.MarkPackedSlabsUploaded(jc.Request.Context(), psrp.Slabs, psrp.UsedContracts))
 }
 
+func (b *bus) sectorsHostRootHandlerDELETE(jc jape.Context) {
+	var hk types.PublicKey
+	var root types.Hash256
+	if jc.DecodeParam("hk", &hk) != nil {
+		return
+	} else if jc.DecodeParam("root", &root) != nil {
+		return
+	}
+	err := b.ms.DeleteHostSector(jc.Request.Context(), hk, root)
+	if jc.Check("failed to mark sector as lost", err) != nil {
+		return
+	}
+}
+
 func (b *bus) slabObjectsHandlerGET(jc jape.Context) {
 	var key object.EncryptionKey
 	if jc.DecodeParam("key", &key) != nil {
@@ -1258,12 +1305,18 @@ func (b *bus) slabsPartialHandlerPOST(jc jape.Context) {
 	if jc.Check("failed to read request body", err) != nil {
 		return
 	}
-	slabs, err := b.ms.AddPartialSlab(jc.Request.Context(), data, uint8(minShards), uint8(totalShards), contractSet)
+	slabs, bufferSize, err := b.ms.AddPartialSlab(jc.Request.Context(), data, uint8(minShards), uint8(totalShards), contractSet)
 	if jc.Check("failed to add partial slab", err) != nil {
 		return
 	}
+	var pus api.UploadPackingSettings
+	if err := b.fetchSetting(jc.Request.Context(), api.SettingUploadPacking, &pus); err != nil && !errors.Is(err, api.ErrSettingNotFound) {
+		jc.Error(fmt.Errorf("could not get upload packing settings: %w", err), http.StatusInternalServerError)
+		return
+	}
 	jc.Encode(api.AddPartialSlabResponse{
-		Slabs: slabs,
+		Slabs:                        slabs,
+		SlabBufferMaxSizeSoftReached: bufferSize >= pus.SlabBufferMaxSizeSoft,
 	})
 }
 
@@ -1411,17 +1464,17 @@ func (b *bus) paramsHandlerUploadGET(jc jape.Context) {
 
 	jc.Encode(api.UploadParams{
 		ContractSet:   contractSet,
-		CurrentHeight: b.cm.TipState(jc.Request.Context()).Index.Height,
+		CurrentHeight: b.cm.TipState().Index.Height,
 		GougingParams: gp,
 		UploadPacking: uploadPacking,
 	})
 }
 
-func (b *bus) consensusState(ctx context.Context) api.ConsensusState {
+func (b *bus) consensusState() api.ConsensusState {
 	return api.ConsensusState{
-		BlockHeight:   b.cm.TipState(ctx).Index.Height,
+		BlockHeight:   b.cm.TipState().Index.Height,
 		LastBlockTime: b.cm.LastBlockTime(),
-		Synced:        b.cm.Synced(ctx),
+		Synced:        b.cm.Synced(),
 	}
 }
 
@@ -1448,7 +1501,7 @@ func (b *bus) gougingParams(ctx context.Context) (api.GougingParams, error) {
 		b.logger.Panicf("failed to unmarshal redundancy settings '%s': %v", rss, err)
 	}
 
-	cs := b.consensusState(ctx)
+	cs := b.consensusState()
 
 	return api.GougingParams{
 		ConsensusState:     cs,
@@ -1660,7 +1713,7 @@ func (b *bus) contractTaxHandlerGET(jc jape.Context) {
 	if jc.DecodeParam("payout", (*api.ParamCurrency)(&payout)) != nil {
 		return
 	}
-	cs := b.cm.TipState(jc.Request.Context())
+	cs := b.cm.TipState()
 	jc.Encode(cs.FileContractTax(types.FileContract{Payout: payout}))
 }
 
@@ -1844,6 +1897,12 @@ func New(s Syncer, am *alerts.Manager, hm *webhooks.Manager, cm ChainManager, tp
 		return nil, err
 	}
 	b.accounts = newAccounts(accounts, b.logger)
+
+	// Mark the shutdown as unclean. This will be overwritten when/if the
+	// accounts are saved on shutdown.
+	if err := eas.SetUncleanShutdown(); err != nil {
+		return nil, fmt.Errorf("failed to mark account shutdown as unclean: %w", err)
+	}
 	return b, nil
 }
 
@@ -1852,7 +1911,13 @@ func (b *bus) multipartHandlerCreatePOST(jc jape.Context) {
 	if jc.Decode(&req) != nil {
 		return
 	}
-	resp, err := b.ms.CreateMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, req.Key)
+
+	key := req.Key
+	if key == (object.EncryptionKey{}) {
+		key = object.NoOpKey
+	}
+
+	resp, err := b.ms.CreateMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, key, req.MimeType)
 	if jc.Check("failed to create multipart upload", err) != nil {
 		return
 	}
@@ -1892,7 +1957,7 @@ func (b *bus) multipartHandlerUploadPartPUT(jc jape.Context) {
 	} else if req.ContractSet == "" {
 		jc.Error(errors.New("contract_set must be non-empty"), http.StatusBadRequest)
 		return
-	} else if req.Etag == "" {
+	} else if req.ETag == "" {
 		jc.Error(errors.New("etag must be non-empty"), http.StatusBadRequest)
 		return
 	} else if req.PartNumber <= 0 || req.PartNumber > gofakes3.MaxUploadPartNumber {
@@ -1902,10 +1967,18 @@ func (b *bus) multipartHandlerUploadPartPUT(jc jape.Context) {
 		jc.Error(errors.New("upload_id must be non-empty"), http.StatusBadRequest)
 		return
 	}
-	err := b.ms.AddMultipartPart(jc.Request.Context(), req.Bucket, req.Path, req.ContractSet, req.UploadID, req.PartNumber, req.Slices, req.PartialSlabs, req.Etag, req.UsedContracts)
+	err := b.ms.AddMultipartPart(jc.Request.Context(), req.Bucket, req.Path, req.ContractSet, req.ETag, req.UploadID, req.PartNumber, req.Slices, req.PartialSlabs, req.UsedContracts)
 	if jc.Check("failed to upload part", err) != nil {
 		return
 	}
+}
+
+func (b *bus) multipartHandlerUploadGET(jc jape.Context) {
+	resp, err := b.ms.MultipartUpload(jc.Request.Context(), jc.PathParam("id"))
+	if jc.Check("failed to get multipart upload", err) != nil {
+		return
+	}
+	jc.Encode(resp)
 }
 
 func (b *bus) multipartHandlerListUploadsPOST(jc jape.Context) {
@@ -1965,8 +2038,6 @@ func (b *bus) Handler() http.Handler {
 		"POST   /txpool/broadcast":      b.txpoolBroadcastHandler,
 
 		"GET    /wallet":               b.walletHandler,
-		"GET    /wallet/balance":       b.walletBalanceHandler, // deprecated
-		"GET    /wallet/address":       b.walletAddressHandler, // deprecated
 		"GET    /wallet/transactions":  b.walletTransactionsHandler,
 		"GET    /wallet/outputs":       b.walletOutputsHandler,
 		"POST   /wallet/fund":          b.walletFundHandler,
@@ -2009,10 +2080,11 @@ func (b *bus) Handler() http.Handler {
 		"GET    /contract/:id/size":      b.contractSizeHandlerGET,
 		"DELETE /contract/:id":           b.contractIDHandlerDELETE,
 
-		"GET    /buckets":       b.bucketsHandlerGET,
-		"POST   /buckets":       b.bucketsHandlerPOST,
-		"DELETE /buckets/:name": b.bucketHandlerDELETE,
-		"GET    /buckets/:name": b.bucketHandlerGET,
+		"GET    /buckets":              b.bucketsHandlerGET,
+		"POST   /buckets":              b.bucketsHandlerPOST,
+		"PUT    /buckets/:name/policy": b.bucketsHandlerPolicyPUT,
+		"DELETE /buckets/:name":        b.bucketHandlerDELETE,
+		"GET    /buckets/:name":        b.bucketHandlerGET,
 
 		"GET    /objects/*path":  b.objectsHandlerGET,
 		"PUT    /objects/*path":  b.objectsHandlerPUT,
@@ -2027,6 +2099,8 @@ func (b *bus) Handler() http.Handler {
 		"GET    /slabbuffers":      b.slabbuffersHandlerGET,
 		"POST   /slabbuffer/fetch": b.packedSlabsHandlerFetchPOST,
 		"POST   /slabbuffer/done":  b.packedSlabsHandlerDonePOST,
+
+		"DELETE /sectors/:hk/:root": b.sectorsHostRootHandlerDELETE,
 
 		"POST   /slabs/migration":     b.slabsMigrationHandlerPOST,
 		"GET    /slabs/partial/:key":  b.slabsPartialHandlerGET,
@@ -2055,6 +2129,7 @@ func (b *bus) Handler() http.Handler {
 		"POST   /multipart/abort":       b.multipartHandlerAbortPOST,
 		"POST   /multipart/complete":    b.multipartHandlerCompletePOST,
 		"PUT    /multipart/part":        b.multipartHandlerUploadPartPUT,
+		"GET    /multipart/upload/:id":  b.multipartHandlerUploadGET,
 		"POST   /multipart/listuploads": b.multipartHandlerListUploadsPOST,
 		"POST   /multipart/listparts":   b.multipartHandlerListPartsPOST,
 

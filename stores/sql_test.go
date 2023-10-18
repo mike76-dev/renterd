@@ -22,20 +22,87 @@ import (
 const (
 	testPersistInterval = time.Second
 	testContractSet     = "test"
+	testMimeType        = "application/octet-stream"
+	testETag            = "d34db33f"
 )
 
+type testSQLStore struct {
+	t *testing.T
+	*SQLStore
+
+	dbName        string
+	dbMetricsName string
+	dir           string
+	ccid          modules.ConsensusChangeID
+}
+
+type testSQLStoreConfig struct {
+	dbName          string
+	dbMetricsName   string
+	dir             string
+	skipMigrate     bool
+	skipContractSet bool
+}
+
+var defaultTestSQLStoreConfig = testSQLStoreConfig{}
+
 // newTestSQLStore creates a new SQLStore for testing.
-func newTestSQLStore(dir string) (*SQLStore, string, modules.ConsensusChangeID, error) {
-	dbName := hex.EncodeToString(frand.Bytes(32)) // random name for db
+func newTestSQLStore(t *testing.T, cfg testSQLStoreConfig) *testSQLStore {
+	t.Helper()
+	dir := cfg.dir
+	if dir == "" {
+		dir = t.TempDir()
+	}
+	dbName := cfg.dbName
+	if dbName == "" {
+		dbName = hex.EncodeToString(frand.Bytes(32)) // random name for db
+	}
+	dbMetricsName := cfg.dbMetricsName
+	if dbMetricsName == "" {
+		dbMetricsName = hex.EncodeToString(frand.Bytes(32)) // random name for metrics db
+	}
 	conn := NewEphemeralSQLiteConnection(dbName)
 	walletAddrs := types.Address(frand.Entropy256())
 	alerts := alerts.WithOrigin(alerts.NewManager(), "test")
-	sqlStore, ccid, err := NewSQLStore(conn, alerts, dir, true, time.Second, walletAddrs, 0, zap.NewNop().Sugar(), newTestLogger())
+	sqlStore, ccid, err := NewSQLStore(conn, alerts, dir, !cfg.skipMigrate, time.Hour, time.Second, walletAddrs, 0, zap.NewNop().Sugar(), newTestLogger())
 	if err != nil {
-		return nil, "", modules.ConsensusChangeID{}, err
+		t.Fatal("failed to create SQLStore", err)
 	}
-	err = sqlStore.SetContractSet(context.Background(), testContractSet, []types.FileContractID{})
-	return sqlStore, dbName, ccid, err
+	detectMissingIndices(sqlStore.db, func(dst interface{}, name string) {
+		panic("no index can be missing")
+	})
+	if !cfg.skipContractSet {
+		err = sqlStore.SetContractSet(context.Background(), testContractSet, []types.FileContractID{})
+		if err != nil {
+			t.Fatal("failed to set contract set", err)
+		}
+	}
+	return &testSQLStore{
+		SQLStore:      sqlStore,
+		dbName:        dbName,
+		dbMetricsName: dbMetricsName,
+		dir:           dir,
+		ccid:          ccid,
+		t:             t,
+	}
+}
+
+func (s *testSQLStore) Close() error {
+	if err := s.SQLStore.Close(); err != nil {
+		s.t.Error(err)
+	}
+	return nil
+}
+
+func (s *testSQLStore) Reopen() *testSQLStore {
+	s.t.Helper()
+	cfg := defaultTestSQLStoreConfig
+	cfg.dir = s.dir
+	cfg.dbName = s.dbName
+	cfg.dbMetricsName = s.dbMetricsName
+	cfg.skipContractSet = true
+	cfg.skipMigrate = true
+	return newTestSQLStore(s.t, cfg)
 }
 
 // newTestLogger creates a console logger used for testing.
@@ -60,44 +127,42 @@ func newTestLogger() logger.Interface {
 
 // TestConsensusReset is a unit test for ResetConsensusSubscription.
 func TestConsensusReset(t *testing.T) {
-	db, _, ccid, err := newTestSQLStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ccid != modules.ConsensusChangeBeginning {
-		t.Fatal("wrong ccid", ccid, modules.ConsensusChangeBeginning)
+	ss := newTestSQLStore(t, defaultTestSQLStoreConfig)
+	defer ss.Close()
+	if ss.ccid != modules.ConsensusChangeBeginning {
+		t.Fatal("wrong ccid", ss.ccid, modules.ConsensusChangeBeginning)
 	}
 
 	// Manually insert into the consenus_infos, the transactions and siacoin_elements tables.
 	ccid2 := modules.ConsensusChangeID{1}
-	db.db.Create(&dbConsensusInfo{
+	ss.db.Create(&dbConsensusInfo{
 		CCID: ccid2[:],
 	})
-	db.db.Create(&dbSiacoinElement{
+	ss.db.Create(&dbSiacoinElement{
 		OutputID: hash256{2},
 	})
-	db.db.Create(&dbTransaction{
+	ss.db.Create(&dbTransaction{
 		TransactionID: hash256{3},
 	})
 
 	// Reset the consensus.
-	if err := db.ResetConsensusSubscription(); err != nil {
+	if err := ss.ResetConsensusSubscription(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Check tables.
 	var count int64
-	if err := db.db.Model(&dbConsensusInfo{}).Count(&count).Error; err != nil || count != 1 {
+	if err := ss.db.Model(&dbConsensusInfo{}).Count(&count).Error; err != nil || count != 1 {
 		t.Fatal("table should have 1 entry", err, count)
-	} else if err = db.db.Model(&dbTransaction{}).Count(&count).Error; err != nil || count > 0 {
+	} else if err = ss.db.Model(&dbTransaction{}).Count(&count).Error; err != nil || count > 0 {
 		t.Fatal("table not empty", err)
-	} else if err = db.db.Model(&dbSiacoinElement{}).Count(&count).Error; err != nil || count > 0 {
+	} else if err = ss.db.Model(&dbSiacoinElement{}).Count(&count).Error; err != nil || count > 0 {
 		t.Fatal("table not empty", err)
 	}
 
 	// Check consensus info.
 	var ci dbConsensusInfo
-	if err := db.db.Take(&ci).Error; err != nil {
+	if err := ss.db.Take(&ci).Error; err != nil {
 		t.Fatal(err)
 	} else if !bytes.Equal(ci.CCID, modules.ConsensusChangeBeginning[:]) {
 		t.Fatal("wrong ccid", ci.CCID, modules.ConsensusChangeBeginning)
@@ -106,10 +171,10 @@ func TestConsensusReset(t *testing.T) {
 	}
 
 	// Check SQLStore.
-	if db.chainIndex.Height != 0 {
-		t.Fatal("wrong height", db.chainIndex.Height, 0)
-	} else if db.chainIndex.ID != (types.BlockID{}) {
-		t.Fatal("wrong id", db.chainIndex.ID, types.BlockID{})
+	if ss.chainIndex.Height != 0 {
+		t.Fatal("wrong height", ss.chainIndex.Height, 0)
+	} else if ss.chainIndex.ID != (types.BlockID{}) {
+		t.Fatal("wrong id", ss.chainIndex.ID, types.BlockID{})
 	}
 }
 
@@ -121,10 +186,8 @@ type queryPlanExplain struct {
 }
 
 func TestQueryPlan(t *testing.T) {
-	db, _, _, err := newTestSQLStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	ss := newTestSQLStore(t, defaultTestSQLStoreConfig)
+	defer ss.Close()
 
 	queries := []string{
 		// allow_list
@@ -143,11 +206,20 @@ func TestQueryPlan(t *testing.T) {
 		// contract_set_contracts
 		"SELECT * FROM contract_set_contracts WHERE db_contract_id = 1",
 		"SELECT * FROM contract_set_contracts WHERE db_contract_set_id = 1",
+
+		// slabs
+		"SELECT * FROM slabs WHERE health_valid = 1",
+		"SELECT * FROM slabs WHERE health > 0",
+		"SELECT * FROM slabs WHERE db_buffered_slab_id = 1",
+
+		// objects
+		"SELECT * FROM objects WHERE db_bucket_id = 1",
+		"SELECT * FROM objects WHERE etag = ''",
 	}
 
 	for _, query := range queries {
 		var explain queryPlanExplain
-		err = db.db.Raw(fmt.Sprintf("EXPLAIN QUERY PLAN %s;", query)).Scan(&explain).Error
+		err := ss.db.Raw(fmt.Sprintf("EXPLAIN QUERY PLAN %s;", query)).Scan(&explain).Error
 		if err != nil {
 			t.Fatal(err)
 		}

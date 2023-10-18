@@ -49,6 +49,7 @@ type (
 
 	// Bus contains the configuration for a bus.
 	Bus struct {
+		AnnouncementMaxAgeHours       uint64        `yaml:"announcementMaxAgeHours"`
 		Bootstrap                     bool          `yaml:"bootstrap"`
 		GatewayAddr                   string        `yaml:"gatewayAddr"`
 		RemoteAddr                    string        `yaml:"remoteAddr"`
@@ -78,10 +79,11 @@ type (
 	}
 
 	S3 struct {
-		Address     string            `yaml:"address"`
-		DisableAuth bool              `yaml:"disableAuth"`
-		Enabled     bool              `yaml:"enabled"`
-		KeypairsV4  map[string]string `yaml:"keypairsV4"`
+		Address           string            `yaml:"address"`
+		DisableAuth       bool              `yaml:"disableAuth"`
+		Enabled           bool              `yaml:"enabled"`
+		KeypairsV4        map[string]string `yaml:"keypairsV4"`
+		HostBucketEnabled bool              `yaml:"hostBucketEnabled"`
 	}
 
 	// Worker contains the configuration for a worker.

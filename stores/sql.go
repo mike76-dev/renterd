@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"sync"
 	"time"
 
@@ -54,6 +55,9 @@ type (
 		unappliedProofs        map[types.FileContractID]uint64
 		unappliedOutputChanges []outputChange
 		unappliedTxnChanges    []txnChange
+
+		// HostDB related fields
+		announcementMaxAge time.Duration
 
 		// SettingsDB related fields.
 		settingsMu sync.Mutex
@@ -126,7 +130,12 @@ func DBConfigFromEnv() (uri, user, password, dbName string) {
 // NewSQLStore uses a given Dialector to connect to a SQL database.  NOTE: Only
 // pass migrate=true for the first instance of SQLHostDB if you connect via the
 // same Dialector multiple times.
-func NewSQLStore(conn gorm.Dialector, alerts alerts.Alerter, partialSlabDir string, migrate bool, persistInterval time.Duration, walletAddress types.Address, slabBufferCompletionThreshold int64, logger *zap.SugaredLogger, gormLogger glogger.Interface) (*SQLStore, modules.ConsensusChangeID, error) {
+func NewSQLStore(conn gorm.Dialector, alerts alerts.Alerter, partialSlabDir string, migrate bool, announcementMaxAge, persistInterval time.Duration, walletAddress types.Address, slabBufferCompletionThreshold int64, logger *zap.SugaredLogger, gormLogger glogger.Interface) (*SQLStore, modules.ConsensusChangeID, error) {
+	// Sanity check announcement max age.
+	if announcementMaxAge == 0 {
+		return nil, modules.ConsensusChangeID{}, errors.New("announcementMaxAge must be non-zero")
+	}
+
 	if err := os.MkdirAll(partialSlabDir, 0700); err != nil {
 		return nil, modules.ConsensusChangeID{}, fmt.Errorf("failed to create partial slab dir: %v", err)
 	}
@@ -144,6 +153,15 @@ func NewSQLStore(conn gorm.Dialector, alerts alerts.Alerter, partialSlabDir stri
 			return nil, modules.ConsensusChangeID{}, fmt.Errorf("failed to perform migrations: %v", err)
 		}
 	}
+
+	// Check if any indices are missing after migrations.
+	detectMissingIndices(db, func(dst interface{}, name string) {
+		t := reflect.TypeOf(dst)
+		if t.Kind() == reflect.Ptr {
+			t = t.Elem()
+		}
+		logger.Warnw("missing index", "table", t.Name(), "field", name)
+	})
 
 	// Get latest consensus change ID or init db.
 	ci, ccid, err := initConsensusInfo(db)
@@ -191,6 +209,8 @@ func NewSQLStore(conn gorm.Dialector, alerts alerts.Alerter, partialSlabDir stri
 		unappliedHostKeys:  make(map[types.PublicKey]struct{}),
 		unappliedRevisions: make(map[types.FileContractID]revisionUpdate),
 		unappliedProofs:    make(map[types.FileContractID]uint64),
+
+		announcementMaxAge: announcementMaxAge,
 
 		walletAddress: walletAddress,
 		chainIndex: types.ChainIndex{
@@ -418,6 +438,7 @@ func (s *SQLStore) retryTransaction(fc func(tx *gorm.DB) error, opts ...*sql.TxO
 			errors.Is(err, api.ErrBucketNotFound) ||
 			errors.Is(err, api.ErrBucketNotEmpty) ||
 			errors.Is(err, api.ErrContractNotFound) ||
+			errors.Is(err, api.ErrMultipartUploadNotFound) ||
 			errors.Is(err, api.ErrPartNotFound) {
 			return true
 		}

@@ -77,6 +77,7 @@ var (
 			Level: "warn",
 		},
 		Bus: config.Bus{
+			AnnouncementMaxAgeHours:       24 * 7 * 52, // 1 year
 			Bootstrap:                     true,
 			GatewayAddr:                   build.DefaultGatewayAddress,
 			PersistInterval:               time.Minute,
@@ -111,7 +112,7 @@ var (
 		},
 		S3: config.S3{
 			Address:     build.DefaultS3Address,
-			Enabled:     false,
+			Enabled:     true,
 			DisableAuth: false,
 			KeypairsV4:  nil,
 		},
@@ -281,6 +282,7 @@ func main() {
 	flag.DurationVar(&cfg.Database.Log.SlowThreshold, "db.logger.slowThreshold", cfg.Database.Log.SlowThreshold, "slow threshold for logger - can be overwritten using RENTERD_DB_LOGGER_SLOW_THRESHOLD environment variable")
 
 	// bus
+	flag.Uint64Var(&cfg.Bus.AnnouncementMaxAgeHours, "bus.announcementMaxAgeHours", cfg.Bus.AnnouncementMaxAgeHours, "announcements older than this are ignored")
 	flag.BoolVar(&cfg.Bus.Bootstrap, "bus.bootstrap", cfg.Bus.Bootstrap, "bootstrap the gateway and consensus modules")
 	flag.StringVar(&cfg.Bus.GatewayAddr, "bus.gatewayAddr", cfg.Bus.GatewayAddr, "address to listen on for Sia peer connections - can be overwritten using RENTERD_BUS_GATEWAY_ADDR environment variable")
 	flag.DurationVar(&cfg.Bus.PersistInterval, "bus.persistInterval", cfg.Bus.PersistInterval, "interval at which to persist the consensus updates")
@@ -315,6 +317,7 @@ func main() {
 	flag.StringVar(&cfg.S3.Address, "s3.address", cfg.S3.Address, "address to serve S3 API on - can be overwritten using the RENTERD_S3_ADDRESS environment variable")
 	flag.BoolVar(&cfg.S3.DisableAuth, "s3.disableAuth", cfg.S3.DisableAuth, "disables authentication for the S3 API - can be overwritten using the RENTERD_S3_DISABLE_AUTH environment variable")
 	flag.BoolVar(&cfg.S3.Enabled, "s3.enabled", cfg.S3.Enabled, "enable/disable the S3 API (only works if worker.enabled is also 'true') - can be overwritten using the RENTERD_S3_ENABLED environment variable")
+	flag.BoolVar(&cfg.S3.HostBucketEnabled, "s3.hostBucketEnabled", cfg.S3.HostBucketEnabled, "enables bucket rewriting in the router -  - can be overwritten using the RENTERD_S3_HOST_BUCKET_ENABLED environment variable")
 
 	flag.Parse()
 
@@ -364,14 +367,17 @@ func main() {
 	parseEnvVar("RENTERD_S3_ADDRESS", &cfg.S3.Address)
 	parseEnvVar("RENTERD_S3_ENABLED", &cfg.S3.Enabled)
 	parseEnvVar("RENTERD_S3_DISABLE_AUTH", &cfg.S3.DisableAuth)
+	parseEnvVar("RENTERD_S3_HOST_BUCKET_ENABLED", &cfg.S3.HostBucketEnabled)
 
-	var keyPairsV4 string
-	parseEnvVar("RENTERD_S3_KEYPAIRS_V4", &keyPairsV4)
-	if keyPairsV4 != "" {
-		var err error
-		cfg.S3.KeypairsV4, err = s3.Parsev4AuthKeys(strings.Split(keyPairsV4, ";"))
-		if err != nil {
-			log.Fatalf("failed to parse keypairs: %v", err)
+	if cfg.S3.Enabled {
+		var keyPairsV4 string
+		parseEnvVar("RENTERD_S3_KEYPAIRS_V4", &keyPairsV4)
+		if !cfg.S3.DisableAuth && keyPairsV4 != "" {
+			var err error
+			cfg.S3.KeypairsV4, err = s3.Parsev4AuthKeys(strings.Split(keyPairsV4, ";"))
+			if err != nil {
+				log.Fatalf("failed to parse keypairs: %v", err)
+			}
 		}
 	}
 
@@ -519,11 +525,9 @@ func main() {
 			workers = append(workers, wc)
 
 			if cfg.S3.Enabled {
-				if len(cfg.S3.KeypairsV4) == 0 && !cfg.S3.DisableAuth {
-					log.Fatal("no S3 keypairs provided and S3 authentication is not disabled - please provide at least one keypair e.g. 'accessKeyID1,secretAccessKey1;accessKeyID2,secretAccessKey2")
-				}
 				s3Handler, err := s3.New(bc, wc, logger.Sugar(), s3.Opts{
-					AuthKeyPairs: cfg.S3.KeypairsV4,
+					AuthDisabled:      cfg.S3.DisableAuth,
+					HostBucketEnabled: cfg.S3.HostBucketEnabled,
 				})
 				if err != nil {
 					log.Fatal("failed to create s3 client", err)
@@ -584,6 +588,25 @@ func main() {
 
 	// Start server.
 	go srv.Serve(l)
+
+	// Set initial S3 keys.
+	if cfg.S3.Enabled && !cfg.S3.DisableAuth {
+		as, err := bc.S3AuthenticationSettings(context.Background())
+		if err != nil && !strings.Contains(err.Error(), api.ErrSettingNotFound.Error()) {
+			logger.Fatal("failed to fetch S3 authentication settings: " + err.Error())
+		} else if as.V4Keypairs == nil {
+			as.V4Keypairs = make(map[string]string)
+		}
+		// merge keys
+		for k, v := range cfg.S3.KeypairsV4 {
+			as.V4Keypairs[k] = v
+		}
+		// update settings
+		if err := bc.UpdateSetting(context.Background(), api.SettingS3Authentication, as); err != nil {
+			logger.Fatal("failed to update S3 authentication settings: " + err.Error())
+		}
+	}
+
 	logger.Info("api: Listening on " + l.Addr().String())
 
 	if s3Srv != nil {

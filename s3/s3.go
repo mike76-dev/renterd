@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/SiaFoundation/gofakes3"
 	"go.sia.tech/core/types"
+	"go.sia.tech/gofakes3"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/object"
 	"go.uber.org/zap"
@@ -20,34 +20,37 @@ type gofakes3Logger struct {
 }
 
 type Opts struct {
-	AuthKeyPairs map[string]string
+	AuthDisabled      bool
+	HostBucketEnabled bool
 }
 
 type bus interface {
-	Bucket(ctx context.Context, name string) (api.Bucket, error)
-	CreateBucket(ctx context.Context, name string) error
-	DeleteBucket(ctx context.Context, name string) error
+	Bucket(ctx context.Context, bucketName string) (api.Bucket, error)
+	CreateBucket(ctx context.Context, bucketName string, opts api.CreateBucketOptions) error
+	DeleteBucket(ctx context.Context, bucketName string) error
 	ListBuckets(ctx context.Context) (buckets []api.Bucket, err error)
 
-	AddObject(ctx context.Context, bucket, path, contractSet string, o object.Object, usedContract map[types.PublicKey]types.FileContractID) (err error)
-	CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath, dstPath string) (om api.ObjectMetadata, err error)
-	DeleteObject(ctx context.Context, bucket, path string, batch bool) (err error)
-	Object(ctx context.Context, path string, opts ...api.ObjectsOption) (res api.ObjectsResponse, err error)
-	ListObjects(ctx context.Context, bucket, prefix, marker string, limit int) (resp api.ObjectsListResponse, err error)
+	AddObject(ctx context.Context, bucket, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID, opts api.AddObjectOptions) (err error)
+	CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath, dstPath string, opts api.CopyObjectOptions) (om api.ObjectMetadata, err error)
+	DeleteObject(ctx context.Context, bucket, path string, opts api.DeleteObjectOptions) (err error)
+	ListObjects(ctx context.Context, bucket string, opts api.ListObjectOptions) (resp api.ObjectsListResponse, err error)
+	Object(ctx context.Context, bucket, path string, opts api.GetObjectOptions) (res api.ObjectsResponse, err error)
 
 	AbortMultipartUpload(ctx context.Context, bucket, path string, uploadID string) (err error)
-	CompleteMultipartUpload(ctx context.Context, bucket, path string, uploadID string, parts []api.MultipartCompletedPart) (_ api.MultipartCompleteResponse, err error)
-	CreateMultipartUpload(ctx context.Context, bucket, path string, ec object.EncryptionKey) (api.MultipartCreateResponse, error)
+	CompleteMultipartUpload(ctx context.Context, bucket, path, uploadID string, parts []api.MultipartCompletedPart) (_ api.MultipartCompleteResponse, err error)
+	CreateMultipartUpload(ctx context.Context, bucket, path string, opts api.CreateMultipartOptions) (api.MultipartCreateResponse, error)
 	MultipartUploads(ctx context.Context, bucket, prefix, keyMarker, uploadIDMarker string, maxUploads int) (resp api.MultipartListUploadsResponse, _ error)
 	MultipartUploadParts(ctx context.Context, bucket, object string, uploadID string, marker int, limit int64) (resp api.MultipartListPartsResponse, _ error)
 
+	S3AuthenticationSettings(ctx context.Context) (as api.S3AuthenticationSettings, err error)
+	UpdateSetting(ctx context.Context, key string, value interface{}) error
 	UploadParams(ctx context.Context) (api.UploadParams, error)
 }
 
 type worker interface {
-	UploadObject(ctx context.Context, r io.Reader, path string, opts ...api.UploadOption) (err error)
-	GetObject(ctx context.Context, path, bucket string, opts ...api.DownloadObjectOption) (api.GetObjectResponse, error)
-	UploadMultipartUploadPart(ctx context.Context, r io.Reader, path, uploadID string, partNumber int, opts ...api.UploadOption) (etag string, err error)
+	GetObject(ctx context.Context, bucket, path string, opts api.DownloadObjectOptions) (*api.GetObjectResponse, error)
+	UploadObject(ctx context.Context, r io.Reader, bucket, path string, opts api.UploadObjectOptions) (*api.UploadObjectResponse, error)
+	UploadMultipartUploadPart(ctx context.Context, r io.Reader, bucket, path, uploadID string, partNumber int, opts api.UploadMultipartUploadPartOptions) (*api.UploadMultipartUploadPartResponse, error)
 }
 
 func (l *gofakes3Logger) Print(level gofakes3.LogLevel, v ...interface{}) {
@@ -65,24 +68,28 @@ func (l *gofakes3Logger) Print(level gofakes3.LogLevel, v ...interface{}) {
 
 func New(b bus, w worker, logger *zap.SugaredLogger, opts Opts) (http.Handler, error) {
 	namedLogger := logger.Named("s3")
-	backend := &s3{
+	s3Backend := &s3{
 		b:      b,
 		w:      w,
 		logger: namedLogger,
 	}
-	faker, err := gofakes3.New(backend,
-		gofakes3.WithHostBucket(false),
+	backend := gofakes3.Backend(s3Backend)
+	if !opts.AuthDisabled {
+		backend = newAuthenticatedBackend(s3Backend)
+	}
+	faker, err := gofakes3.New(
+		backend,
+		gofakes3.WithHostBucket(opts.HostBucketEnabled),
 		gofakes3.WithLogger(&gofakes3Logger{
 			l: namedLogger,
 		}),
 		gofakes3.WithRequestID(rand.Uint64()),
 		gofakes3.WithoutVersioning(),
-		gofakes3.WithV4Auth(opts.AuthKeyPairs),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create s3 server: %w", err)
 	}
-	return faker.Server(), err
+	return faker.Server(), nil
 }
 
 // Parsev4AuthKeys parses a list of accessKey-secretKey pairs and returns a map

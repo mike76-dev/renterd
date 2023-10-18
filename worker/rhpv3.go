@@ -74,7 +74,8 @@ var (
 
 	// errSectorNotFound is returned by the host when it can not find the
 	// requested sector.
-	errSectorNotFound = errors.New("sector not found")
+	errSectorNotFoundOld = errors.New("could not find the desired sector")
+	errSectorNotFound    = errors.New("sector not found")
 
 	// errWithdrawalsInactive occurs when the host is (perhaps temporarily)
 	// unsynced and has disabled its account manager.
@@ -86,11 +87,13 @@ func isBalanceMaxExceeded(err error) bool  { return isError(err, errBalanceMaxEx
 func isClosedStream(err error) bool {
 	return isError(err, mux.ErrClosedStream) || isError(err, net.ErrClosed)
 }
-func isInsufficientFunds(err error) bool   { return isError(err, ErrInsufficientFunds) }
-func isMaxRevisionReached(err error) bool  { return isError(err, errMaxRevisionReached) }
-func isPriceTableExpired(err error) bool   { return isError(err, errPriceTableExpired) }
-func isPriceTableNotFound(err error) bool  { return isError(err, errPriceTableNotFound) }
-func isSectorNotFound(err error) bool      { return isError(err, errSectorNotFound) }
+func isInsufficientFunds(err error) bool  { return isError(err, ErrInsufficientFunds) }
+func isMaxRevisionReached(err error) bool { return isError(err, errMaxRevisionReached) }
+func isPriceTableExpired(err error) bool  { return isError(err, errPriceTableExpired) }
+func isPriceTableNotFound(err error) bool { return isError(err, errPriceTableNotFound) }
+func isSectorNotFound(err error) bool {
+	return isError(err, errSectorNotFound) || isError(err, errSectorNotFoundOld)
+}
 func isWithdrawalsInactive(err error) bool { return isError(err, errWithdrawalsInactive) }
 
 func isError(err error, target error) bool {
@@ -667,7 +670,7 @@ func (h *host) UploadSector(ctx context.Context, sector *[rhpv2.SectorSize]byte,
 
 	// record spending
 	h.contractSpendingRecorder.Record(rev.ParentID, rev.RevisionNumber, rev.Filesize, api.ContractSpending{Uploads: cost})
-	return root, err
+	return root, nil
 }
 
 // padBandwitdh pads the bandwidth to the next multiple of 1460 bytes.  1460
@@ -1380,7 +1383,7 @@ func RPCRenew(ctx context.Context, rrr api.RHPRenewRequest, bus Bus, t *transpor
 
 	// Prepare the signed transaction that contains the final revision as well
 	// as the new contract
-	wprr, err := bus.WalletPrepareRenew(ctx, rev, rrr.HostAddress, rrr.RenterAddress, renterKey, rrr.RenterFunds, rrr.NewCollateral, rrr.HostKey, *pt, rrr.EndHeight, rrr.WindowSize)
+	wprr, err := bus.WalletPrepareRenew(ctx, rev, rrr.HostAddress, rrr.RenterAddress, renterKey, rrr.RenterFunds, rrr.NewCollateral, *pt, rrr.EndHeight, rrr.WindowSize)
 	if err != nil {
 		return rhpv2.ContractRevision{}, nil, fmt.Errorf("failed to prepare renew: %w", err)
 	}

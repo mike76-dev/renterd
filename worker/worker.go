@@ -7,13 +7,10 @@ import (
 	"io"
 	"math"
 	"math/big"
-	"mime"
 	"net"
 	"net/http"
-	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +29,7 @@ import (
 	"go.sia.tech/renterd/object"
 	"go.sia.tech/renterd/tracing"
 	"go.sia.tech/renterd/webhooks"
+	"go.sia.tech/renterd/worker/client"
 	"go.sia.tech/siad/modules"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/blake2b"
@@ -47,14 +45,28 @@ const (
 	defaultLockTimeout          = time.Minute
 	defaultRevisionFetchTimeout = 30 * time.Second
 
-	lockingPriorityActiveContractRevision = 100 // highest
+	lockingPriorityActiveContractRevision = 100
 	lockingPriorityRenew                  = 80
 	lockingPriorityPriceTable             = 60
 	lockingPriorityFunding                = 40
-	lockingPrioritySyncing                = 20
-	lockingPriorityPruning                = 10
-	lockingPriorityUpload                 = 1 // lowest
+	lockingPrioritySyncing                = 30
+	lockingPriorityPruning                = 20
+
+	lockingPriorityBlockedUpload    = 15
+	lockingPriorityUpload           = 10
+	lockingPriorityBackgroundUpload = 5
 )
+
+// re-export the client
+type Client struct {
+	*client.Client
+}
+
+func NewClient(address, password string) *Client {
+	return &Client{
+		Client: client.New(address, password),
+	}
+}
 
 var privateSubnets []*net.IPNet
 
@@ -71,36 +83,6 @@ func init() {
 		}
 		privateSubnets = append(privateSubnets, subnet)
 	}
-}
-
-// rangedResponseWriter is a wrapper around http.ResponseWriter. The difference
-// to the standard http.ResponseWriter is that it allows for overriding the
-// default status code that is sent upon the first call to Write with a custom
-// one.
-type rangedResponseWriter struct {
-	rw                http.ResponseWriter
-	defaultStatusCode int
-	headerWritten     bool
-}
-
-func (rw *rangedResponseWriter) Write(p []byte) (int, error) {
-	if !rw.headerWritten {
-		contentType := rw.Header().Get("Content-Type")
-		if contentType == "" {
-			rw.Header().Set("Content-Type", http.DetectContentType(p))
-		}
-		rw.WriteHeader(rw.defaultStatusCode)
-	}
-	return rw.rw.Write(p)
-}
-
-func (rw *rangedResponseWriter) Header() http.Header {
-	return rw.rw.Header()
-}
-
-func (rw *rangedResponseWriter) WriteHeader(statusCode int) {
-	rw.headerWritten = true
-	rw.rw.WriteHeader(statusCode)
 }
 
 type AccountStore interface {
@@ -163,15 +145,18 @@ type Bus interface {
 	GougingParams(ctx context.Context) (api.GougingParams, error)
 	UploadParams(ctx context.Context) (api.UploadParams, error)
 
-	Object(ctx context.Context, path string, opts ...api.ObjectsOption) (api.ObjectsResponse, error)
-	AddObject(ctx context.Context, bucket string, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID) error
-	DeleteObject(ctx context.Context, bucket, path string, batch bool) error
+	Object(ctx context.Context, bucket, path string, opts api.GetObjectOptions) (api.ObjectsResponse, error)
+	AddObject(ctx context.Context, bucket, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID, opts api.AddObjectOptions) error
+	DeleteObject(ctx context.Context, bucket, path string, opts api.DeleteObjectOptions) error
 
-	AddMultipartPart(ctx context.Context, bucket, path, contractSet, uploadID string, partNumber int, slices []object.SlabSlice, partialSlabs []object.PartialSlab, etag string, usedContracts map[types.PublicKey]types.FileContractID) (err error)
+	AddMultipartPart(ctx context.Context, bucket, path, contractSet, ETag, uploadID string, partNumber int, slices []object.SlabSlice, partialSlabs []object.PartialSlab, usedContracts map[types.PublicKey]types.FileContractID) (err error)
+	MultipartUpload(ctx context.Context, uploadID string) (resp api.MultipartUpload, err error)
 
-	AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) (slabs []object.PartialSlab, err error)
+	AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) (slabs []object.PartialSlab, slabBufferMaxSizeSoftReached bool, err error)
 	FetchPartialSlab(ctx context.Context, key object.EncryptionKey, offset, length uint32) ([]byte, error)
 	Slab(ctx context.Context, key object.EncryptionKey) (object.Slab, error)
+
+	DeleteHostSector(ctx context.Context, hk types.PublicKey, root types.Hash256) error
 
 	MarkPackedSlabsUploaded(ctx context.Context, slabs []api.UploadedPackedSlab, usedContracts map[types.PublicKey]types.FileContractID) error
 	PackedSlabsForUpload(ctx context.Context, lockingDuration time.Duration, minShards, totalShards uint8, set string, limit int) ([]api.PackedSlab, error)
@@ -186,8 +171,10 @@ type Bus interface {
 	WalletDiscard(ctx context.Context, txn types.Transaction) error
 	WalletFund(ctx context.Context, txn *types.Transaction, amount types.Currency) ([]types.Hash256, []types.Transaction, error)
 	WalletPrepareForm(ctx context.Context, renterAddress types.Address, renterKey types.PublicKey, renterFunds, hostCollateral types.Currency, hostKey types.PublicKey, hostSettings rhpv2.HostSettings, endHeight uint64) (txns []types.Transaction, err error)
-	WalletPrepareRenew(ctx context.Context, revision types.FileContractRevision, hostAddress, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, newCollateral types.Currency, hostKey types.PublicKey, pt rhpv3.HostPriceTable, endHeight, windowSize uint64) (api.WalletPrepareRenewResponse, error)
+	WalletPrepareRenew(ctx context.Context, revision types.FileContractRevision, hostAddress, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, newCollateral types.Currency, pt rhpv3.HostPriceTable, endHeight, windowSize uint64) (api.WalletPrepareRenewResponse, error)
 	WalletSign(ctx context.Context, txn *types.Transaction, toSign []types.Hash256, cf types.CoveredFields) error
+
+	Bucket(_ context.Context, bucket string) (api.Bucket, error)
 }
 
 // deriveSubKey can be used to derive a sub-masterkey from the worker's
@@ -508,6 +495,12 @@ func (w *worker) rhpFormHandler(jc jape.Context) {
 		return
 	}
 
+	// check renter funds is not zero
+	if rfr.RenterFunds.IsZero() {
+		http.Error(jc.ResponseWriter, "RenterFunds can not be zero", http.StatusBadRequest)
+		return
+	}
+
 	// apply a pessimistic timeout on contract formations
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
@@ -688,15 +681,14 @@ func (w *worker) rhpPruneContractHandlerPOST(jc jape.Context) {
 
 	// prune the contract
 	pruned, remaining, err := w.PruneContract(ctx, contract.HostIP, contract.HostKey, fcid, contract.RevisionNumber)
-	if err == nil || (errors.Is(err, context.Canceled) && pruned > 0) {
+	if err == nil || pruned > 0 {
 		jc.Encode(api.RHPPruneContractResponse{
 			Pruned:    pruned,
 			Remaining: remaining,
+			Error:     err,
 		})
 	} else {
-		if pruned > 0 {
-			err = fmt.Errorf("%w; couldn't prune all sectors (%d/%d)", err, pruned, pruned+remaining)
-		}
+		err = fmt.Errorf("failed to prune contract; %w", err)
 		jc.Error(err, http.StatusInternalServerError)
 	}
 }
@@ -731,6 +723,12 @@ func (w *worker) rhpRenewHandler(jc jape.Context) {
 	// decode request
 	var rrr api.RHPRenewRequest
 	if jc.Decode(&rrr) != nil {
+		return
+	}
+
+	// check renter funds is not zero
+	if rrr.RenterFunds.IsZero() {
+		http.Error(jc.ResponseWriter, "RenterFunds can not be zero", http.StatusBadRequest)
 		return
 	}
 
@@ -1033,16 +1031,15 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 		return
 	}
 
-	opts := []api.ObjectsOption{
-		api.ObjectsWithBucket(bucket),
-		api.ObjectsWithPrefix(prefix),
-		api.ObjectsWithMarker(marker),
-		api.ObjectsWithOffset(off),
-		api.ObjectsWithLimit(limit),
+	opts := api.GetObjectOptions{
+		Prefix: prefix,
+		Marker: marker,
+		Offset: off,
+		Limit:  limit,
 	}
 
 	path := jc.PathParam("path")
-	res, err := w.bus.Object(ctx, path, opts...)
+	res, err := w.bus.Object(ctx, bucket, path, opts)
 	if err != nil && strings.Contains(err.Error(), api.ErrObjectNotFound.Error()) {
 		jc.Error(err, http.StatusNotFound)
 		return
@@ -1053,50 +1050,17 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 		jc.Encode(res.Entries)
 		return
 	}
-	jc.ResponseWriter.Header().Set("Last-Modified", res.Object.LastModified())
+
+	// return early if the object is empty
 	if len(res.Object.Slabs) == 0 && len(res.Object.PartialSlabs) == 0 {
 		return
 	}
 
+	// fetch gouging params
 	gp, err := w.bus.GougingParams(ctx)
 	if jc.Check("couldn't fetch gouging parameters from bus", err) != nil {
 		return
 	}
-
-	// attach gouging checker to the context
-	ctx = WithGougingChecker(ctx, w.bus, gp)
-
-	// NOTE: ideally we would use http.ServeContent in this handler, but that
-	// has performance issues. If we implemented io.ReadSeeker in the most
-	// straightforward fashion, we would need one (or more!) RHP RPCs for each
-	// Read call. We can improve on this to some degree by buffering, but
-	// without knowing the exact ranges being requested, this will always be
-	// suboptimal. Thus, sadly, we have to roll our own range support.
-	ranges, err := http_range.ParseRange(jc.Request.Header.Get("Range"), res.Object.Size)
-	if err != nil {
-		jc.Error(err, http.StatusRequestedRangeNotSatisfiable)
-		return
-	}
-	var offset int64
-	length := res.Object.Size
-	status := http.StatusOK
-	if len(ranges) > 0 {
-		status = http.StatusPartialContent
-		jc.ResponseWriter.Header().Set("Content-Range", ranges[0].ContentRange(res.Object.Size))
-		offset, length = ranges[0].Start, ranges[0].Length
-		if offset < 0 || length < 0 || offset+length > res.Object.Size {
-			jc.Error(fmt.Errorf("invalid range: %v %v", offset, length), http.StatusRequestedRangeNotSatisfiable)
-			return
-		}
-	}
-	jc.ResponseWriter.Header().Set("Content-Length", strconv.FormatInt(length, 10))
-	jc.ResponseWriter.Header().Set("Accept-Ranges", "bytes")
-	if ext := filepath.Ext(path); ext != "" {
-		if mimeType := mime.TypeByExtension(ext); mimeType != "" {
-			jc.ResponseWriter.Header().Set("Content-Type", mimeType)
-		}
-	}
-	rw := rangedResponseWriter{rw: jc.ResponseWriter, defaultStatusCode: status}
 
 	// fetch all contracts
 	contracts, err := w.bus.Contracts(ctx)
@@ -1105,9 +1069,20 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 		return
 	}
 
-	// download the object
-	if jc.Check(fmt.Sprintf("couldn't download object '%v'", path), w.downloadManager.DownloadObject(ctx, &rw, res.Object.Object, uint64(offset), uint64(length), contracts)) != nil {
-		return
+	// create a download function
+	downloadFn := func(wr io.Writer, offset, length int64) error {
+		ctx = WithGougingChecker(ctx, w.bus, gp)
+		return w.downloadManager.DownloadObject(ctx, wr, res.Object.Object, uint64(offset), uint64(length), contracts)
+	}
+
+	// serve the content
+	status, err := serveContent(jc.ResponseWriter, jc.Request, *res.Object, downloadFn)
+	if errors.Is(err, http_range.ErrInvalid) || errors.Is(err, errMultiRangeNotSupported) {
+		jc.Error(err, http.StatusBadRequest)
+	} else if errors.Is(err, http_range.ErrNoOverlap) {
+		jc.Error(err, http.StatusRequestedRangeNotSatisfiable)
+	} else if err != nil {
+		jc.Error(err, status)
 	}
 }
 
@@ -1129,9 +1104,22 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 		up.ContractSet = contractset
 	}
 
+	// decode the mimetype from the query string
+	var mimeType string
+	if jc.DecodeForm("mimetype", &mimeType) != nil {
+		return
+	}
+
 	// decode the bucket from the query string
 	bucket := api.DefaultBucketName
 	if jc.DecodeForm("bucket", &bucket) != nil {
+		return
+	}
+
+	// return early if the bucket does not exist
+	_, err = w.bus.Bucket(ctx, bucket)
+	if err != nil && strings.Contains(err.Error(), api.ErrBucketNotFound.Error()) {
+		jc.Error(fmt.Errorf("bucket '%s' not found; %w", bucket, err), http.StatusNotFound)
 		return
 	}
 
@@ -1160,10 +1148,11 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 		return
 	}
 
-	// built options
+	// build options
 	opts := []UploadOption{
 		WithBlockHeight(up.CurrentHeight),
 		WithContractSet(up.ContractSet),
+		WithMimeType(mimeType),
 		WithPacking(up.UploadPacking),
 		WithRedundancySettings(up.RedundancySettings),
 	}
@@ -1172,17 +1161,20 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 	ctx = WithGougingChecker(ctx, w.bus, up.GougingParams)
 
 	// upload the object
-	_, err = w.upload(ctx, jc.Request.Body, bucket, jc.PathParam("path"), opts...)
+	eTag, err := w.upload(ctx, jc.Request.Body, bucket, jc.PathParam("path"), opts...)
 	if jc.Check("couldn't upload object", err) != nil {
 		return
 	}
+
+	// set etag header
+	jc.ResponseWriter.Header().Set("ETag", api.FormatETag(eTag))
 
 	// backup the object metadata if the user has opted in
 	cfg, err := satellite.StaticSatellite.Config()
 	if err == nil && cfg.Enabled {
 		rs, err := satellite.StaticSatellite.GetSettings(ctx)
 		if err == nil && rs.BackupFileMetadata {
-			resp, err := w.bus.Object(ctx, jc.PathParam("path"))
+			resp, err := w.bus.Object(ctx, jc.PathParam("path"), api.GetObjectOptions{})
 			if err == nil {
 				satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
 					Key:   resp.Object.Key,
@@ -1231,6 +1223,13 @@ func (w *worker) multipartUploadHandlerPUT(jc jape.Context) {
 		return
 	}
 
+	// return early if the bucket does not exist
+	_, err = w.bus.Bucket(ctx, bucket)
+	if err != nil && strings.Contains(err.Error(), api.ErrBucketNotFound.Error()) {
+		jc.Error(fmt.Errorf("bucket '%s' not found; %w", bucket, err), http.StatusNotFound)
+		return
+	}
+
 	// decode the upload id
 	var uploadID string
 	if jc.DecodeForm("uploadid", &uploadID) != nil {
@@ -1263,16 +1262,15 @@ func (w *worker) multipartUploadHandlerPUT(jc jape.Context) {
 	if jc.DecodeForm("disablepreshardingencryption", &disablePreshardingEncryption) != nil {
 		return
 	}
-	if !disablePreshardingEncryption {
-		jc.Error(errors.New("presharding encryption is not yet supported for multipart uploads"), http.StatusNotImplemented)
-		return
-	}
 	if !disablePreshardingEncryption && jc.Request.FormValue("offset") == "" {
 		jc.Error(errors.New("if presharding encryption isn't disabled, the offset needs to be set"), http.StatusBadRequest)
 		return
 	}
-	var offset uint64
+	var offset int
 	if jc.DecodeForm("offset", &offset) != nil {
+		return
+	} else if offset < 0 {
+		jc.Error(errors.New("offset must be positive"), http.StatusBadRequest)
 		return
 	}
 
@@ -1286,20 +1284,26 @@ func (w *worker) multipartUploadHandlerPUT(jc jape.Context) {
 	if disablePreshardingEncryption {
 		opts = append(opts, WithCustomKey(object.NoOpKey))
 	} else {
-		opts = append(opts, WithCustomEncryptionOffset(offset))
+		upload, err := w.bus.MultipartUpload(jc.Request.Context(), uploadID)
+		if err != nil {
+			jc.Error(err, http.StatusBadRequest)
+			return
+		}
+		opts = append(opts, WithCustomEncryptionOffset(uint64(offset)))
+		opts = append(opts, WithCustomKey(upload.Key))
 	}
 
 	// attach gouging checker to the context
 	ctx = WithGougingChecker(ctx, w.bus, up.GougingParams)
 
 	// upload the multipart
-	etag, err := w.uploadMultiPart(ctx, jc.Request.Body, bucket, jc.PathParam("path"), uploadID, partNumber, opts...)
+	eTag, err := w.uploadMultiPart(ctx, jc.Request.Body, bucket, jc.PathParam("path"), uploadID, partNumber, opts...)
 	if jc.Check("couldn't upload object", err) != nil {
 		return
 	}
 
-	// set etag in header response.
-	jc.ResponseWriter.Header().Set("ETag", api.FormatEtag(etag))
+	// set etag header
+	jc.ResponseWriter.Header().Set("ETag", api.FormatETag(eTag))
 }
 
 func encryptPartialSlab(data []byte, key object.EncryptionKey, minShards, totalShards uint8) [][]byte {
@@ -1323,7 +1327,7 @@ func (w *worker) objectsHandlerDELETE(jc jape.Context) {
 	if jc.DecodeForm("bucket", &bucket) != nil {
 		return
 	}
-	err := w.bus.DeleteObject(jc.Request.Context(), bucket, jc.PathParam("path"), batch)
+	err := w.bus.DeleteObject(jc.Request.Context(), bucket, jc.PathParam("path"), api.DeleteObjectOptions{Batch: batch})
 	if err != nil && strings.Contains(err.Error(), api.ErrObjectNotFound.Error()) {
 		jc.Error(err, http.StatusNotFound)
 		return

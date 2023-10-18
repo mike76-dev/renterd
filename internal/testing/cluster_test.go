@@ -10,7 +10,6 @@ import (
 	"io"
 	"math"
 	"math/big"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -31,30 +30,23 @@ import (
 	"lukechampine.com/frand"
 )
 
+const (
+	testEtag     = "d34db33f"
+	testMimeType = "application/octet-stream"
+)
+
 // TestNewTestCluster is a test for creating a cluster of Nodes for testing,
 // making sure that it forms contracts, renews contracts and shuts down.
 func TestNewTestCluster(t *testing.T) {
-	if testing.Short() {
-		t.SkipNow()
-	}
-
-	cluster, err := newTestCluster(t.TempDir(), newTestLoggerCustom(zapcore.DebugLevel))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, clusterOptsDefault)
+	defer cluster.Shutdown()
 	b := cluster.Bus
 	w := cluster.Worker
+	tt := cluster.tt
 
 	// Upload packing should be disabled by default.
 	ups, err := b.UploadPackingSettings(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if ups.Enabled {
 		t.Fatalf("expected upload packing to be disabled by default, got %v", ups.Enabled)
 	}
@@ -73,41 +65,28 @@ func TestNewTestCluster(t *testing.T) {
 				Length: 0,
 			},
 		},
-	}, map[types.PublicKey]types.FileContractID{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	}, map[types.PublicKey]types.FileContractID{}, api.AddObjectOptions{MimeType: testMimeType, ETag: testEtag})
+	tt.OK(err)
 
 	// Try talking to the worker and request the object.
-	err = w.DeleteObject(context.Background(), "foo", false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	err = w.DeleteObject(context.Background(), api.DefaultBucketName, "foo", api.DeleteObjectOptions{})
+	tt.OK(err)
 
 	// See if autopilot is running by triggering the loop.
 	_, err = cluster.Autopilot.Trigger(false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 
 	// Add a host.
-	if _, err := cluster.AddHosts(1); err != nil {
-		t.Fatal(err)
-	}
+	cluster.AddHosts(1)
 
 	// Wait for contracts to form.
 	var contract api.Contract
-	if contracts, err := cluster.WaitForContracts(); err != nil {
-		t.Fatal(err)
-	} else {
-		contract = contracts[0]
-	}
+	contracts := cluster.WaitForContracts()
+	contract = contracts[0]
 
 	// Make sure the contract set exists.
 	sets, err := cluster.Bus.ContractSets(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(sets) != 1 {
 		t.Fatal("invalid number of setse", len(sets))
 	}
@@ -116,22 +95,17 @@ func TestNewTestCluster(t *testing.T) {
 	}
 
 	// Verify startHeight and endHeight of the contract.
-	cfg, currentPeriod, err := cluster.AutopilotConfig(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg, currentPeriod := cluster.AutopilotConfig(context.Background())
 	expectedEndHeight := currentPeriod + cfg.Contracts.Period + cfg.Contracts.RenewWindow
 	if contract.EndHeight() != expectedEndHeight || contract.Revision.EndHeight() != expectedEndHeight {
 		t.Fatal("wrong endHeight", contract.EndHeight(), contract.Revision.EndHeight())
 	}
 
 	// Mine blocks until contracts start renewing.
-	if err := cluster.MineToRenewWindow(); err != nil {
-		t.Fatal(err)
-	}
+	cluster.MineToRenewWindow()
 
 	// Wait for the contract to be renewed.
-	err = Retry(100, 100*time.Millisecond, func() error {
+	tt.Retry(100, 100*time.Millisecond, func() error {
 		contracts, err := cluster.Bus.Contracts(context.Background())
 		if err != nil {
 			return err
@@ -147,31 +121,21 @@ func TestNewTestCluster(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// Mine until before the window start to give the host time to submit the
 	// revision first.
 	cs, err := cluster.Bus.ConsensusState(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cluster.MineBlocks(int(contract.WindowStart - cs.BlockHeight - 4)); err != nil {
-		t.Fatal(err)
-	}
-	if err := cluster.Sync(); err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
+	cluster.MineBlocks(int(contract.WindowStart - cs.BlockHeight - 4))
+	cluster.Sync()
 	if cs.LastBlockTime.IsZero() {
 		t.Fatal("last block time not set")
 	}
 
 	// Now wait for the revision and proof to be caught by the hostdb.
-	err = Retry(20, time.Second, func() error {
-		if err := cluster.MineBlocks(1); err != nil {
-			t.Fatal(err)
-		}
+	tt.Retry(20, time.Second, func() error {
+		cluster.MineBlocks(1)
+
 		// Fetch renewed contract and make sure we caught the proof and revision.
 		contracts, err := cluster.Bus.Contracts(context.Background())
 		if err != nil {
@@ -193,15 +157,11 @@ func TestNewTestCluster(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 
 	// Get host info for every host.
-	hosts, err := cluster.Bus.Hosts(context.Background(), 0, math.MaxInt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	hosts, err := cluster.Bus.Hosts(context.Background(), api.GetHostsOptions{})
+	tt.OK(err)
 	for _, host := range hosts {
 		hi, err := cluster.Autopilot.HostInfo(host.PublicKey)
 		if err != nil {
@@ -225,9 +185,7 @@ func TestNewTestCluster(t *testing.T) {
 		}
 	}
 	hostInfos, err := cluster.Autopilot.HostInfos(context.Background(), api.HostFilterModeAll, api.UsabilityFilterModeAll, "", nil, 0, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 
 	allHosts := make(map[types.PublicKey]struct{})
 	for _, hi := range hostInfos {
@@ -251,17 +209,13 @@ func TestNewTestCluster(t *testing.T) {
 	}
 
 	hostInfosUnusable, err := cluster.Autopilot.HostInfos(context.Background(), api.HostFilterModeAll, api.UsabilityFilterModeUnusable, "", nil, 0, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(hostInfosUnusable) != 0 {
 		t.Fatal("there should be no unusable hosts", len(hostInfosUnusable))
 	}
 
 	hostInfosUsable, err := cluster.Autopilot.HostInfos(context.Background(), api.HostFilterModeAll, api.UsabilityFilterModeUsable, "", nil, 0, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	for _, hI := range hostInfosUsable {
 		delete(allHosts, hI.Host.PublicKey)
 	}
@@ -271,9 +225,7 @@ func TestNewTestCluster(t *testing.T) {
 
 	// Fetch the autopilot state
 	state, err := cluster.Autopilot.State()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if time.Time(state.StartTime).IsZero() {
 		t.Fatal("autopilot should have start time")
 	}
@@ -300,41 +252,40 @@ func TestObjectEntries(t *testing.T) {
 		t.SkipNow()
 	}
 
-	// assert mod time & clear it afterwards so we can compare
+	// assertMetadata asserts ModTime, ETag and MimeType are set and then clears
+	// them afterwards so we can compare without having to specify the metadata
 	start := time.Now()
-	assertModTime := func(entries []api.ObjectMetadata) {
+	assertMetadata := func(entries []api.ObjectMetadata) {
 		for i := range entries {
+			// assert mod time
 			if !strings.HasSuffix(entries[i].Name, "/") && !entries[i].ModTime.After(start.UTC()) {
 				t.Fatal("mod time should be set")
 			}
 			entries[i].ModTime = time.Time{}
+
+			// assert mime type
+			if entries[i].MimeType == "" {
+				t.Fatal("mime type should be set", entries[i].MimeType, entries[i].Name)
+			}
+			entries[i].MimeType = ""
+
+			// assert etag
+			if entries[i].ETag == "" {
+				t.Fatal("ETag should be set")
+			}
+			entries[i].ETag = ""
 		}
 	}
 
 	// create a test cluster
-	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts: testRedundancySettings.TotalShards,
+	})
+	defer cluster.Shutdown()
 
 	b := cluster.Bus
 	w := cluster.Worker
-	rs := testRedundancySettings
-
-	// add hosts
-	if _, err := cluster.AddHostsBlocking(rs.TotalShards); err != nil {
-		t.Fatal(err)
-	}
-
-	// wait for accounts to be funded
-	if _, err := cluster.WaitForAccounts(); err != nil {
-		t.Fatal(err)
-	}
+	tt := cluster.tt
 
 	// upload the following paths
 	uploads := []struct {
@@ -354,15 +305,11 @@ func TestObjectEntries(t *testing.T) {
 
 	for _, upload := range uploads {
 		if upload.size == 0 {
-			if err := w.UploadObject(context.Background(), bytes.NewReader(nil), upload.path); err != nil {
-				t.Fatal(err)
-			}
+			tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(nil), api.DefaultBucketName, upload.path, api.UploadObjectOptions{}))
 		} else {
 			data := make([]byte, upload.size)
 			frand.Read(data)
-			if err := w.UploadObject(context.Background(), bytes.NewReader(data), upload.path); err != nil {
-				t.Fatal(err)
-			}
+			tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data), api.DefaultBucketName, upload.path, api.UploadObjectOptions{}))
 		}
 	}
 
@@ -387,25 +334,21 @@ func TestObjectEntries(t *testing.T) {
 	}
 	for _, test := range tests {
 		// use the bus client
-		res, err := b.Object(context.Background(), test.path, api.ObjectsWithPrefix(test.prefix))
+		res, err := b.Object(context.Background(), api.DefaultBucketName, test.path, api.GetObjectOptions{Prefix: test.prefix})
 		if err != nil {
 			t.Fatal(err, test.path)
 		}
-
-		// assert mod time & clear it afterwards so we can compare
-		assertModTime(res.Entries)
+		assertMetadata(res.Entries)
 
 		if !(len(res.Entries) == 0 && len(test.want) == 0) && !reflect.DeepEqual(res.Entries, test.want) {
 			t.Errorf("\nlist: %v\nprefix: %v\ngot: %v\nwant: %v", test.path, test.prefix, res.Entries, test.want)
 		}
 		for offset := 0; offset < len(test.want); offset++ {
-			res, err := b.Object(context.Background(), test.path, api.ObjectsWithPrefix(test.prefix), api.ObjectsWithOffset(offset), api.ObjectsWithLimit(1))
+			res, err := b.Object(context.Background(), api.DefaultBucketName, test.path, api.GetObjectOptions{Prefix: test.prefix, Offset: offset, Limit: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
-
-			// assert mod time & clear it afterwards so we can compare
-			assertModTime(res.Entries)
+			assertMetadata(res.Entries)
 
 			if len(res.Entries) != 1 || res.Entries[0] != test.want[offset] {
 				t.Errorf("\nlist: %v\nprefix: %v\ngot: %v\nwant: %v", test.path, test.prefix, res.Entries, test.want[offset])
@@ -420,13 +363,11 @@ func TestObjectEntries(t *testing.T) {
 				continue
 			}
 
-			res, err = b.Object(context.Background(), test.path, api.ObjectsWithPrefix(test.prefix), api.ObjectsWithMarker(test.want[offset].Name), api.ObjectsWithLimit(1))
+			res, err = b.Object(context.Background(), api.DefaultBucketName, test.path, api.GetObjectOptions{Prefix: test.prefix, Marker: test.want[offset].Name, Limit: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
-
-			// assert mod time & clear it afterwards so we can compare
-			assertModTime(res.Entries)
+			assertMetadata(res.Entries)
 
 			if len(res.Entries) != 1 || res.Entries[0] != test.want[offset+1] {
 				t.Errorf("\nlist: %v\nprefix: %v\nmarker: %v\ngot: %v\nwant: %v", test.path, test.prefix, test.want[offset].Name, res.Entries, test.want[offset+1])
@@ -439,20 +380,18 @@ func TestObjectEntries(t *testing.T) {
 		}
 
 		// use the worker client
-		got, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, test.path, test.prefix, 0, -1)
+		got, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, test.path, api.ObjectEntriesOptions{Prefix: test.prefix})
 		if err != nil {
 			t.Fatal(err)
 		}
-
-		// assert mod time & clear it afterwards so we can compare
-		assertModTime(got)
+		assertMetadata(got)
 
 		if !(len(got) == 0 && len(test.want) == 0) && !reflect.DeepEqual(got, test.want) {
 			t.Errorf("\nlist: %v\nprefix: %v\ngot: %v\nwant: %v", test.path, test.prefix, got, test.want)
 		}
 		for _, entry := range got {
 			if !strings.HasSuffix(entry.Name, "/") {
-				if err := w.DownloadObject(context.Background(), io.Discard, entry.Name); err != nil {
+				if err := w.DownloadObject(context.Background(), io.Discard, api.DefaultBucketName, entry.Name, api.DownloadObjectOptions{}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -461,14 +400,11 @@ func TestObjectEntries(t *testing.T) {
 
 	// delete all uploads
 	for _, upload := range uploads {
-		err = w.DeleteObject(context.Background(), upload.path, false)
-		if err != nil {
-			t.Fatal(err)
-		}
+		tt.OK(w.DeleteObject(context.Background(), api.DefaultBucketName, upload.path, api.DeleteObjectOptions{}))
 	}
 
 	// assert root dir is empty
-	if entries, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, "/", "", 0, -1); err != nil {
+	if entries, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, "/", api.ObjectEntriesOptions{}); err != nil {
 		t.Fatal(err)
 	} else if len(entries) != 0 {
 		t.Fatal("there should be no entries left", entries)
@@ -482,29 +418,14 @@ func TestObjectsRename(t *testing.T) {
 	}
 
 	// create a test cluster
-	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts: testRedundancySettings.TotalShards,
+	})
+	defer cluster.Shutdown()
 
 	b := cluster.Bus
 	w := cluster.Worker
-	rs := testRedundancySettings
-
-	// add hosts
-	if _, err := cluster.AddHostsBlocking(rs.TotalShards); err != nil {
-		t.Fatal(err)
-	}
-
-	// wait for accounts to be funded
-	if _, err := cluster.WaitForAccounts(); err != nil {
-		t.Fatal(err)
-	}
+	tt := cluster.tt
 
 	// upload the following paths
 	uploads := []string{
@@ -514,9 +435,7 @@ func TestObjectsRename(t *testing.T) {
 		"/foo/baz/quuz",
 	}
 	for _, path := range uploads {
-		if err := w.UploadObject(context.Background(), bytes.NewReader(nil), path); err != nil {
-			t.Fatal(err)
-		}
+		tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(nil), api.DefaultBucketName, path, api.UploadObjectOptions{}))
 	}
 
 	// rename
@@ -535,7 +454,7 @@ func TestObjectsRename(t *testing.T) {
 		"/quuz",
 	} {
 		buf := bytes.NewBuffer(nil)
-		if err := w.DownloadObject(context.Background(), buf, path); err != nil {
+		if err := w.DownloadObject(context.Background(), buf, api.DefaultBucketName, path, api.DownloadObjectOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -549,39 +468,20 @@ func TestUploadDownloadEmpty(t *testing.T) {
 	}
 
 	// create a test cluster
-	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts: testRedundancySettings.TotalShards,
+	})
+	defer cluster.Shutdown()
 
 	w := cluster.Worker
-	rs := testRedundancySettings
-
-	// add hosts
-	if _, err := cluster.AddHostsBlocking(rs.TotalShards); err != nil {
-		t.Fatal(err)
-	}
-
-	// wait for accounts to be funded
-	if _, err := cluster.WaitForAccounts(); err != nil {
-		t.Fatal(err)
-	}
+	tt := cluster.tt
 
 	// upload an empty file
-	if err := w.UploadObject(context.Background(), bytes.NewReader(nil), "empty"); err != nil {
-		t.Fatal(err)
-	}
+	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(nil), api.DefaultBucketName, "empty", api.UploadObjectOptions{}))
 
 	// download the empty file
 	var buffer bytes.Buffer
-	if err := w.DownloadObject(context.Background(), &buffer, "empty"); err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(w.DownloadObject(context.Background(), &buffer, api.DefaultBucketName, "empty", api.DownloadObjectOptions{}))
 
 	// assert it's empty
 	if len(buffer.Bytes()) != 0 {
@@ -602,46 +502,25 @@ func TestUploadDownloadBasic(t *testing.T) {
 	}
 
 	// create a test cluster
-	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts: testRedundancySettings.TotalShards,
+	})
+	defer cluster.Shutdown()
 
 	w := cluster.Worker
-	rs := testRedundancySettings
-
-	// add hosts
-	if _, err := cluster.AddHostsBlocking(rs.TotalShards); err != nil {
-		t.Fatal(err)
-	}
-
-	// wait for accounts to be funded
-	if _, err := cluster.WaitForAccounts(); err != nil {
-		t.Fatal(err)
-	}
+	tt := cluster.tt
 
 	// prepare a file
 	data := make([]byte, 128)
-	if _, err := frand.Read(data); err != nil {
-		t.Fatal(err)
-	}
+	tt.OKAll(frand.Read(data))
 
 	// upload the data
-	name := fmt.Sprintf("data_%v", len(data))
-	if err := w.UploadObject(context.Background(), bytes.NewReader(data), name); err != nil {
-		t.Fatal(err)
-	}
+	path := fmt.Sprintf("data_%v", len(data))
+	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data), api.DefaultBucketName, path, api.UploadObjectOptions{}))
 
 	// download data
 	var buffer bytes.Buffer
-	if err := w.DownloadObject(context.Background(), &buffer, name); err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(w.DownloadObject(context.Background(), &buffer, api.DefaultBucketName, path, api.DownloadObjectOptions{}))
 
 	// assert it matches
 	if !bytes.Equal(data, buffer.Bytes()) {
@@ -652,9 +531,7 @@ func TestUploadDownloadBasic(t *testing.T) {
 	for i := int64(0); i < 4; i++ {
 		offset := i * 32
 		var buffer bytes.Buffer
-		if err := w.DownloadObject(context.Background(), &buffer, name, api.DownloadWithRange(offset, 32)); err != nil {
-			t.Fatal(err)
-		}
+		tt.OK(w.DownloadObject(context.Background(), &buffer, api.DefaultBucketName, path, api.DownloadObjectOptions{Range: api.DownloadRange{Offset: offset, Length: 32}}))
 		if !bytes.Equal(data[offset:offset+32], buffer.Bytes()) {
 			fmt.Println(data[offset : offset+32])
 			fmt.Println(buffer.Bytes())
@@ -664,9 +541,7 @@ func TestUploadDownloadBasic(t *testing.T) {
 
 	// fetch the contracts.
 	contracts, err := cluster.Bus.Contracts(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 
 	// broadcast the revision for each contract and assert the revision height
 	// is 0.
@@ -674,18 +549,14 @@ func TestUploadDownloadBasic(t *testing.T) {
 		if c.RevisionHeight != 0 {
 			t.Fatal("revision height should be 0")
 		}
-		if err := w.RHPBroadcast(context.Background(), c.ID); err != nil {
-			t.Fatal(err)
-		}
+		tt.OK(w.RHPBroadcast(context.Background(), c.ID))
 	}
 
 	// mine a block to get the revisions mined.
-	if err := cluster.MineBlocks(1); err != nil {
-		t.Fatal(err)
-	}
+	cluster.MineBlocks(1)
 
 	// check the revision height was updated.
-	err = Retry(100, 100*time.Millisecond, func() error {
+	tt.Retry(100, 100*time.Millisecond, func() error {
 		// fetch the contracts.
 		contracts, err := cluster.Bus.Contracts(context.Background())
 		if err != nil {
@@ -699,13 +570,10 @@ func TestUploadDownloadBasic(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 }
 
-// TestUploadDownloadBasic is an integration test that verifies objects can be
-// uploaded and download correctly.
+// TestUploadDownloadExtended is an integration test that verifies objects can
+// be uploaded and download correctly.
 func TestUploadDownloadExtended(t *testing.T) {
 	if testing.Short() {
 		t.SkipNow()
@@ -717,74 +585,51 @@ func TestUploadDownloadExtended(t *testing.T) {
 	}
 
 	// create a test cluster
-	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts: testRedundancySettings.TotalShards,
+	})
+	defer cluster.Shutdown()
 
 	b := cluster.Bus
 	w := cluster.Worker
-	rs := testRedundancySettings
-
-	// add hosts
-	if _, err := cluster.AddHostsBlocking(rs.TotalShards); err != nil {
-		t.Fatal(err)
-	}
-
-	// wait for accounts to be funded
-	if _, err := cluster.WaitForAccounts(); err != nil {
-		t.Fatal(err)
-	}
+	tt := cluster.tt
 
 	// upload two files under /foo
 	file1 := make([]byte, rhpv2.SectorSize/12)
 	file2 := make([]byte, rhpv2.SectorSize/12)
 	frand.Read(file1)
 	frand.Read(file2)
-	if err := w.UploadObject(context.Background(), bytes.NewReader(file1), "fileś/file1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.UploadObject(context.Background(), bytes.NewReader(file2), "fileś/file2"); err != nil {
-		t.Fatal(err)
-	}
+	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(file1), api.DefaultBucketName, "fileś/file1", api.UploadObjectOptions{}))
+	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(file2), api.DefaultBucketName, "fileś/file2", api.UploadObjectOptions{}))
 
 	// fetch all entries from the worker
-	entries, err := cluster.Worker.ObjectEntries(context.Background(), api.DefaultBucketName, "", "", 0, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	entries, err := cluster.Worker.ObjectEntries(context.Background(), api.DefaultBucketName, "", api.ObjectEntriesOptions{})
+	tt.OK(err)
+
 	if len(entries) != 1 {
 		t.Fatal("expected one entry to be returned", len(entries))
 	}
+	if entries[0].MimeType != "application/octet-stream" {
+		t.Fatal("wrong mime type", entries[0].MimeType)
+	}
 
 	// fetch entries with "file" prefix
-	res, err := cluster.Bus.Object(context.Background(), "fileś/", api.ObjectsWithPrefix("file"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	res, err := cluster.Bus.Object(context.Background(), api.DefaultBucketName, "fileś/", api.GetObjectOptions{Prefix: "file"})
+	tt.OK(err)
 	if len(res.Entries) != 2 {
 		t.Fatal("expected two entry to be returned", len(entries))
 	}
 
 	// fetch entries with "fileś" prefix
-	res, err = cluster.Bus.Object(context.Background(), "fileś/", api.ObjectsWithPrefix("foo"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	res, err = cluster.Bus.Object(context.Background(), api.DefaultBucketName, "fileś/", api.GetObjectOptions{Prefix: "foo"})
+	tt.OK(err)
 	if len(res.Entries) != 0 {
 		t.Fatal("expected no entries to be returned", len(entries))
 	}
 
 	// fetch entries from the worker for unexisting path
-	entries, err = cluster.Worker.ObjectEntries(context.Background(), api.DefaultBucketName, "bar/", "", 0, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	entries, err = cluster.Worker.ObjectEntries(context.Background(), api.DefaultBucketName, "bar/", api.ObjectEntriesOptions{})
+	tt.OK(err)
 	if len(entries) != 0 {
 		t.Fatal("expected no entries to be returned", len(entries))
 	}
@@ -795,21 +640,14 @@ func TestUploadDownloadExtended(t *testing.T) {
 
 	// upload the data
 	for _, data := range [][]byte{small, large} {
-		if _, err := frand.Read(data); err != nil {
-			t.Fatal(err)
-		}
-
-		name := fmt.Sprintf("data_%v", len(data))
-		if err := w.UploadObject(context.Background(), bytes.NewReader(data), name); err != nil {
-			t.Fatal(err)
-		}
+		tt.OKAll(frand.Read(data))
+		path := fmt.Sprintf("data_%v", len(data))
+		tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data), api.DefaultBucketName, path, api.UploadObjectOptions{}))
 	}
 
 	// check objects stats.
 	info, err := cluster.Bus.ObjectsStats()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	objectsSize := uint64(len(file1) + len(file2) + len(small) + len(large))
 	if info.TotalObjectsSize != objectsSize {
 		t.Error("wrong size", info.TotalObjectsSize, len(small)+len(large))
@@ -828,11 +666,8 @@ func TestUploadDownloadExtended(t *testing.T) {
 	// download the data
 	for _, data := range [][]byte{small, large} {
 		name := fmt.Sprintf("data_%v", len(data))
-
 		var buffer bytes.Buffer
-		if err := w.DownloadObject(context.Background(), &buffer, name); err != nil {
-			t.Fatal(err)
-		}
+		tt.OK(w.DownloadObject(context.Background(), &buffer, api.DefaultBucketName, name, api.DownloadObjectOptions{}))
 
 		// assert it matches
 		if !bytes.Equal(data, buffer.Bytes()) {
@@ -841,37 +676,24 @@ func TestUploadDownloadExtended(t *testing.T) {
 	}
 
 	// update the bus setting and specify a non-existing contract set
-	cfg, _, err := cluster.AutopilotConfig(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg, _ := cluster.AutopilotConfig(context.Background())
 	cfg.Contracts.Set = t.Name()
-	err = cluster.UpdateAutopilotConfig(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = b.SetContractSet(context.Background(), t.Name(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cluster.UpdateAutopilotConfig(context.Background(), cfg)
+	tt.OK(b.SetContractSet(context.Background(), t.Name(), nil))
 
 	// assert there are no contracts in the set
 	csc, err := b.ContractSetContracts(context.Background(), t.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(csc) != 0 {
 		t.Fatalf("expected no contracts, got %v", len(csc))
 	}
 
 	// download the data again
 	for _, data := range [][]byte{small, large} {
-		name := fmt.Sprintf("data_%v", len(data))
+		path := fmt.Sprintf("data_%v", len(data))
 
 		var buffer bytes.Buffer
-		if err := w.DownloadObject(context.Background(), &buffer, name); err != nil {
-			t.Fatal(err)
-		}
+		tt.OK(w.DownloadObject(context.Background(), &buffer, api.DefaultBucketName, path, api.DownloadObjectOptions{}))
 
 		// assert it matches
 		if !bytes.Equal(data, buffer.Bytes()) {
@@ -879,54 +701,32 @@ func TestUploadDownloadExtended(t *testing.T) {
 		}
 
 		// delete the object
-		if err := w.DeleteObject(context.Background(), name, false); err != nil {
-			t.Fatal(err)
-		}
+		tt.OK(w.DeleteObject(context.Background(), api.DefaultBucketName, path, api.DeleteObjectOptions{}))
 	}
 }
 
 // TestUploadDownloadSpending is an integration test that verifies the upload
 // and download spending metrics are tracked properly.
 func TestUploadDownloadSpending(t *testing.T) {
-	if testing.Short() {
-		t.SkipNow()
-	}
-
 	// sanity check the default settings
 	if testAutopilotConfig.Contracts.Amount < uint64(testRedundancySettings.MinShards) {
 		t.Fatal("too few hosts to support the redundancy settings")
 	}
 
 	// create a test cluster
-	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts: testRedundancySettings.TotalShards,
+	})
+	defer cluster.Shutdown()
 
 	w := cluster.Worker
 	rs := testRedundancySettings
-
-	// add hosts
-	if _, err := cluster.AddHostsBlocking(rs.TotalShards); err != nil {
-		t.Fatal(err)
-	}
-
-	// wait for accounts to be funded
-	if _, err := cluster.WaitForAccounts(); err != nil {
-		t.Fatal(err)
-	}
+	tt := cluster.tt
 
 	// check that the funding was recorded
-	err = Retry(100, testBusFlushInterval, func() error {
+	tt.Retry(100, testBusFlushInterval, func() error {
 		cms, err := cluster.Bus.Contracts(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
+		tt.OK(err)
 		if len(cms) == 0 {
 			t.Fatal("no contracts found")
 		}
@@ -951,9 +751,6 @@ func TestUploadDownloadSpending(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// prepare two files, a small one and a large one
 	small := make([]byte, rhpv2.SectorSize/12)
@@ -964,24 +761,19 @@ func TestUploadDownloadSpending(t *testing.T) {
 		t.Helper()
 		for _, data := range files {
 			// prepare some data - make sure it's more than one sector
-			if _, err := frand.Read(data); err != nil {
-				t.Fatal(err)
-			}
+			tt.OKAll(frand.Read(data))
 
 			// upload the data
-			name := fmt.Sprintf("data_%v", len(data))
-			if err := w.UploadObject(context.Background(), bytes.NewReader(data), name); err != nil {
-				t.Fatal(err)
-			}
+			path := fmt.Sprintf("data_%v", len(data))
+			tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data), api.DefaultBucketName, path, api.UploadObjectOptions{}))
 
 			// Should be registered in bus.
-			res, err := cluster.Bus.Object(context.Background(), "")
-			if err != nil {
-				t.Fatal(err)
-			}
+			res, err := cluster.Bus.Object(context.Background(), api.DefaultBucketName, "", api.GetObjectOptions{})
+			tt.OK(err)
+
 			var found bool
 			for _, entry := range res.Entries {
-				if entry.Name == fmt.Sprintf("/%s", name) {
+				if entry.Name == fmt.Sprintf("/%s", path) {
 					found = true
 					break
 				}
@@ -992,9 +784,7 @@ func TestUploadDownloadSpending(t *testing.T) {
 
 			// download the data
 			var buffer bytes.Buffer
-			if err := w.DownloadObject(context.Background(), &buffer, name); err != nil {
-				t.Fatal(err)
-			}
+			tt.OK(w.DownloadObject(context.Background(), &buffer, api.DefaultBucketName, path, api.DownloadObjectOptions{}))
 
 			// assert it matches
 			if !bytes.Equal(data, buffer.Bytes()) {
@@ -1007,49 +797,37 @@ func TestUploadDownloadSpending(t *testing.T) {
 	uploadDownload()
 
 	// Fuzzy search for uploaded data in various ways.
-	objects, err := cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, "", 0, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	objects, err := cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, api.SearchObjectOptions{})
+	tt.OK(err)
 	if len(objects) != 2 {
 		t.Fatalf("should have 2 objects but got %v", len(objects))
 	}
-	objects, err = cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, "ata", 0, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	objects, err = cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, api.SearchObjectOptions{Key: "ata"})
+	tt.OK(err)
 	if len(objects) != 2 {
 		t.Fatalf("should have 2 objects but got %v", len(objects))
 	}
-	objects, err = cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, "1258", 0, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	objects, err = cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, api.SearchObjectOptions{Key: "1258"})
+	tt.OK(err)
 	if len(objects) != 1 {
 		t.Fatalf("should have 1 objects but got %v", len(objects))
 	}
 
 	// renew contracts.
-	if err := cluster.MineToRenewWindow(); err != nil {
-		t.Fatal(err)
-	}
+	cluster.MineToRenewWindow()
 
 	// wait for the contract to be renewed
-	err = Retry(100, 100*time.Millisecond, func() error {
+	tt.Retry(100, 100*time.Millisecond, func() error {
 		// fetch contracts
 		cms, err := cluster.Bus.Contracts(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
+		tt.OK(err)
 		if len(cms) == 0 {
 			t.Fatal("no contracts found")
 		}
 
 		// fetch contract set contracts
 		contracts, err := cluster.Bus.ContractSetContracts(context.Background(), testAutopilotConfig.Contracts.Set)
-		if err != nil {
-			t.Fatal(err)
-		}
+		tt.OK(err)
 		currentSet := make(map[types.FileContractID]struct{})
 		for _, c := range contracts {
 			currentSet[c.ID] = struct{}{}
@@ -1064,18 +842,14 @@ func TestUploadDownloadSpending(t *testing.T) {
 				return errors.New("found renewed contract that wasn't part of the set")
 			}
 		}
-
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// run uploads again
 	uploadDownload()
 
 	// check that the spending was recorded
-	err = Retry(100, testBusFlushInterval, func() error {
+	tt.Retry(100, testBusFlushInterval, func() error {
 		cms, err := cluster.Bus.Contracts(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -1100,9 +874,7 @@ func TestUploadDownloadSpending(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 }
 
 // TestEphemeralAccounts tests the use of ephemeral accounts.
@@ -1112,16 +884,15 @@ func TestEphemeralAccounts(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cluster, err := newTestCluster(dir, zap.NewNop())
-	if err != nil {
-		t.Fatal(err)
-	}
+	cluster := newTestCluster(t, testClusterOptions{
+		dir:    dir,
+		logger: zap.NewNop(),
+	})
+	defer cluster.Shutdown()
+	tt := cluster.tt
 
 	// add host
-	nodes, err := cluster.AddHosts(1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	nodes := cluster.AddHosts(1)
 	host := nodes[0]
 
 	// make the cost of fetching a revision 0. That allows us to check for exact
@@ -1135,17 +906,29 @@ func TestEphemeralAccounts(t *testing.T) {
 
 	// Wait for contracts to form.
 	var contract api.Contract
-	if contracts, err := cluster.WaitForContracts(); err != nil {
-		t.Fatal(err)
-	} else {
-		contract = contracts[0]
-	}
+	contracts := cluster.WaitForContracts()
+	contract = contracts[0]
 
 	// Wait for account to appear.
-	accounts, err := cluster.WaitForAccounts()
-	if err != nil {
-		t.Fatal(err)
+	accounts := cluster.WaitForAccounts()
+
+	// Newly created accounts are !cleanShutdown. Simulate a sync to change
+	// that.
+	for _, acc := range accounts {
+		if acc.CleanShutdown {
+			t.Fatal("new account should indicate an unclean shutdown")
+		} else if acc.RequiresSync {
+			t.Fatal("new account should not require a sync")
+		}
+		if err := cluster.Bus.SetBalance(context.Background(), acc.ID, acc.HostKey, acc.Balance); err != nil {
+			t.Fatal(err)
+		}
 	}
+
+	// Fetch accounts again.
+	accounts, err := cluster.Bus.Accounts(context.Background())
+	tt.OK(err)
+
 	acc := accounts[0]
 	minExpectedBalance := types.Siacoins(1).Sub(types.NewCurrency64(1))
 	if acc.Balance.Cmp(minExpectedBalance.Big()) < 0 {
@@ -1157,12 +940,13 @@ func TestEphemeralAccounts(t *testing.T) {
 	if acc.HostKey != types.PublicKey(host.PublicKey()) {
 		t.Fatal("wrong host")
 	}
+	if !acc.CleanShutdown {
+		t.Fatal("account should indicate a clean shutdown")
+	}
 
 	// Fetch account from bus directly.
 	busAccounts, err := cluster.Bus.Accounts(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(busAccounts) != 1 {
 		t.Fatal("expected one account but got", len(busAccounts))
 	}
@@ -1176,9 +960,7 @@ func TestEphemeralAccounts(t *testing.T) {
 	// fee.
 	time.Sleep(2 * testBusFlushInterval)
 	cm, err := cluster.Bus.Contract(context.Background(), contract.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	fundAmt := types.Siacoins(1)
 	if cm.Spending.FundAccount.Cmp(fundAmt) <= 0 {
 		t.Fatalf("invalid spending reported: %v > %v", fundAmt.String(), cm.Spending.FundAccount.String())
@@ -1191,9 +973,7 @@ func TestEphemeralAccounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	busAccounts, err = cluster.Bus.Accounts(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	busAcc = busAccounts[0]
 	maxNewDrift := newDrift.Add(newDrift, types.NewCurrency64(2).Big()) // forgive 2H
 	if busAcc.Drift.Cmp(maxNewDrift) > 0 {
@@ -1201,21 +981,12 @@ func TestEphemeralAccounts(t *testing.T) {
 	}
 
 	// Reboot cluster.
-	cluster2, err := cluster.Reboot(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster2.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster2 := cluster.Reboot(context.Background())
+	defer cluster2.Shutdown()
 
 	// Check that accounts were loaded from the bus.
 	accounts2, err := cluster2.Bus.Accounts(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	for _, acc := range accounts2 {
 		if acc.Balance.Cmp(big.NewInt(0)) == 0 {
 			t.Fatal("account balance wasn't loaded")
@@ -1229,40 +1000,15 @@ func TestEphemeralAccounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	accounts2, err = cluster2.Bus.Accounts(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if accounts2[0].Drift.Cmp(new(big.Int)) != 0 {
 		t.Fatal("drift wasn't reset", accounts2[0].Drift.String())
 	}
 	accounts2, err = cluster2.Bus.Accounts(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if accounts2[0].Drift.Cmp(new(big.Int)) != 0 {
 		t.Fatal("drift wasn't reset", accounts2[0].Drift.String())
 	}
-}
-
-// newTestLogger creates a console logger used for testing.
-func newTestLogger() *zap.Logger {
-	return newTestLoggerCustom(zapcore.ErrorLevel)
-}
-
-// newTestLoggerCustom creates a console logger used for testing and allows
-// passing in the desired log level.
-func newTestLoggerCustom(level zapcore.Level) *zap.Logger {
-	config := zap.NewProductionEncoderConfig()
-	config.EncodeTime = zapcore.RFC3339TimeEncoder
-	config.EncodeLevel = zapcore.CapitalColorLevelEncoder
-	config.StacktraceKey = ""
-	consoleEncoder := zapcore.NewConsoleEncoder(config)
-
-	return zap.New(
-		zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), level),
-		zap.AddCaller(),
-		zap.AddStacktrace(level),
-	)
 }
 
 // TestParallelUpload tests uploading multiple files in parallel.
@@ -1272,43 +1018,23 @@ func TestParallelUpload(t *testing.T) {
 	}
 
 	// create a test cluster
-	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts: testRedundancySettings.TotalShards,
+	})
+	defer cluster.Shutdown()
 
 	w := cluster.Worker
-	rs := testRedundancySettings
-
-	// add hosts
-	if _, err := cluster.AddHostsBlocking(int(rs.TotalShards)); err != nil {
-		t.Fatal(err)
-	}
-
-	// wait for accounts to be funded
-	_, err = cluster.WaitForAccounts()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt := cluster.tt
 
 	upload := func() error {
 		t.Helper()
 		// prepare some data - make sure it's more than one sector
 		data := make([]byte, rhpv2.SectorSize)
-		if _, err := frand.Read(data); err != nil {
-			return err
-		}
+		tt.OKAll(frand.Read(data))
 
 		// upload the data
-		name := fmt.Sprintf("/dir/data_%v", hex.EncodeToString(data[:16]))
-		if err := w.UploadObject(context.Background(), bytes.NewReader(data), name); err != nil {
-			return err
-		}
+		path := fmt.Sprintf("/dir/data_%v", hex.EncodeToString(data[:16]))
+		tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data), api.DefaultBucketName, path, api.UploadObjectOptions{}))
 		return nil
 	}
 
@@ -1327,47 +1053,37 @@ func TestParallelUpload(t *testing.T) {
 	wg.Wait()
 
 	// Check if objects exist.
-	objects, err := cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, "/dir/", 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
+	objects, err := cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, api.SearchObjectOptions{Key: "/dir/", Limit: 100})
+	tt.OK(err)
 	if len(objects) != 3 {
 		t.Fatal("wrong number of objects", len(objects))
 	}
 
 	// Upload one more object.
-	if err := w.UploadObject(context.Background(), bytes.NewReader([]byte("data")), "/foo"); err != nil {
-		t.Fatal(err)
-	}
+	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader([]byte("data")), api.DefaultBucketName, "/foo", api.UploadObjectOptions{}))
 
-	objects, err = cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, "/", 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
+	objects, err = cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, api.SearchObjectOptions{Key: "/", Limit: 100})
+	tt.OK(err)
 	if len(objects) != 4 {
 		t.Fatal("wrong number of objects", len(objects))
 	}
 
 	// Delete all objects under /dir/.
-	if err := cluster.Bus.DeleteObject(context.Background(), api.DefaultBucketName, "/dir/", true); err != nil {
+	if err := cluster.Bus.DeleteObject(context.Background(), api.DefaultBucketName, "/dir/", api.DeleteObjectOptions{Batch: true}); err != nil {
 		t.Fatal(err)
 	}
-	objects, err = cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, "/", 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
+	objects, err = cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, api.SearchObjectOptions{Key: "/", Limit: 100})
+	tt.OK(err)
 	if len(objects) != 1 {
 		t.Fatal("objects weren't deleted")
 	}
 
 	// Delete all objects under /.
-	if err := cluster.Bus.DeleteObject(context.Background(), api.DefaultBucketName, "/", true); err != nil {
+	if err := cluster.Bus.DeleteObject(context.Background(), api.DefaultBucketName, "/", api.DeleteObjectOptions{Batch: true}); err != nil {
 		t.Fatal(err)
 	}
-	objects, err = cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, "/", 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
+	objects, err = cluster.Bus.SearchObjects(context.Background(), api.DefaultBucketName, api.SearchObjectOptions{Key: "/", Limit: 100})
+	tt.OK(err)
 	if len(objects) != 0 {
 		t.Fatal("objects weren't deleted")
 	}
@@ -1380,40 +1096,22 @@ func TestParallelDownload(t *testing.T) {
 	}
 
 	// create a test cluster
-	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts: testRedundancySettings.TotalShards,
+	})
+	defer cluster.Shutdown()
 
 	w := cluster.Worker
-	rs := testRedundancySettings
-
-	// add hosts
-	if _, err := cluster.AddHostsBlocking(int(rs.TotalShards)); err != nil {
-		t.Fatal(err)
-	}
-
-	// Wait for accounts to be funded.
-	_, err = cluster.WaitForAccounts()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt := cluster.tt
 
 	// upload the data
 	data := frand.Bytes(rhpv2.SectorSize)
-	if err := w.UploadObject(context.Background(), bytes.NewReader(data), "foo"); err != nil {
-		t.Fatal(err)
-	}
+	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data), api.DefaultBucketName, "foo", api.UploadObjectOptions{}))
 
 	download := func() error {
 		t.Helper()
 		buf := bytes.NewBuffer(nil)
-		err := w.DownloadObject(context.Background(), buf, "foo")
+		err := w.DownloadObject(context.Background(), buf, api.DefaultBucketName, "foo", api.DownloadObjectOptions{})
 		if err != nil {
 			return err
 		}
@@ -1446,38 +1144,20 @@ func TestEphemeralAccountSync(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cluster, err := newTestCluster(dir, newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// add host
-	_, err = cluster.AddHosts(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Wait for account to appear.
-	accounts, err := cluster.WaitForAccounts()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(accounts) != 1 || accounts[0].RequiresSync {
-		t.Fatal("account shouldn't require a sync")
-	}
+	cluster := newTestCluster(t, testClusterOptions{
+		dir:   dir,
+		hosts: 1,
+	})
+	tt := cluster.tt
 
 	// Shut down the autopilot to prevent it from manipulating the account.
-	if err := cluster.ShutdownAutopilot(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	cluster.ShutdownAutopilot(context.Background())
 
 	// Fetch the account balance before setting the balance
-	accounts, err = cluster.Bus.Accounts(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(accounts) != 1 {
-		t.Fatal("unexpected number of accounts")
+	accounts, err := cluster.Bus.Accounts(context.Background())
+	tt.OK(err)
+	if len(accounts) != 1 || accounts[0].RequiresSync {
+		t.Fatal("account shouldn't require a sync")
 	}
 	acc := accounts[0]
 
@@ -1489,35 +1169,24 @@ func TestEphemeralAccountSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	accounts, err = cluster.Bus.Accounts(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(accounts) != 1 || !accounts[0].RequiresSync {
 		t.Fatal("account wasn't updated")
 	}
 
 	// Restart cluster to have worker fetch the account from the bus again.
-	cluster2, err := cluster.Reboot(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster2.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster2 := cluster.Reboot(context.Background())
+	defer cluster2.Shutdown()
 
 	// Account should need a sync.
 	account, err := cluster2.Bus.Account(context.Background(), acc.ID, acc.HostKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if !account.RequiresSync {
 		t.Fatal("flag wasn't persisted")
 	}
 
 	// Wait for autopilot to sync and reset flag.
-	err = Retry(100, 100*time.Millisecond, func() error {
+	tt.Retry(100, 100*time.Millisecond, func() error {
 		account, err := cluster2.Bus.Account(context.Background(), acc.ID, acc.HostKey)
 		if err != nil {
 			t.Fatal(err)
@@ -1527,15 +1196,10 @@ func TestEphemeralAccountSync(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// Flag should also be reset on bus now.
 	accounts, err = cluster2.Bus.Accounts(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(accounts) != 1 || accounts[0].RequiresSync {
 		t.Fatal("account wasn't updated")
 	}
@@ -1549,40 +1213,22 @@ func TestUploadDownloadSameHost(t *testing.T) {
 	}
 
 	// create a test cluster
-	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	// add host.
-	if _, err := cluster.AddHostsBlocking(1); err != nil {
-		t.Fatal(err)
-	}
-
-	// wait for accounts to be funded
-	if _, err := cluster.WaitForAccounts(); err != nil {
-		t.Fatal(err)
-	}
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts: 1,
+	})
+	defer cluster.Shutdown()
+	tt := cluster.tt
 
 	// shut down the autopilot to prevent it from doing contract maintenance if any kind
-	if err := cluster.ShutdownAutopilot(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	cluster.ShutdownAutopilot(context.Background())
 
 	// get wallet address
-	renterAddress, err := cluster.Bus.WalletAddress(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	wallet, err := cluster.Bus.Wallet(context.Background())
+	tt.OK(err)
+
 	ac, err := cluster.Worker.Contracts(context.Background(), time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
+
 	contracts := ac.Contracts
 	if len(contracts) != 1 {
 		t.Fatal("expected 1 contract", len(contracts))
@@ -1590,48 +1236,31 @@ func TestUploadDownloadSameHost(t *testing.T) {
 	c := contracts[0]
 
 	// form 2 more contracts with the same host
-	rev2, _, err := cluster.Worker.RHPForm(context.Background(), c.WindowStart, c.HostKey, c.HostIP, renterAddress, c.RenterFunds(), c.Revision.ValidHostPayout())
-	if err != nil {
-		t.Fatal(err)
-	}
+	rev2, _, err := cluster.Worker.RHPForm(context.Background(), c.WindowStart, c.HostKey, c.HostIP, wallet.Address, c.RenterFunds(), c.Revision.ValidHostPayout())
+	tt.OK(err)
 	c2, err := cluster.Bus.AddContract(context.Background(), rev2, c.TotalCost, c.StartHeight)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rev3, _, err := cluster.Worker.RHPForm(context.Background(), c.WindowStart, c.HostKey, c.HostIP, renterAddress, c.RenterFunds(), c.Revision.ValidHostPayout())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
+	rev3, _, err := cluster.Worker.RHPForm(context.Background(), c.WindowStart, c.HostKey, c.HostIP, wallet.Address, c.RenterFunds(), c.Revision.ValidHostPayout())
+	tt.OK(err)
 	c3, err := cluster.Bus.AddContract(context.Background(), rev3, c.TotalCost, c.StartHeight)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 
 	// create a contract set with all 3 contracts
 	err = cluster.Bus.SetContractSet(context.Background(), testAutopilotConfig.Contracts.Set, []types.FileContractID{c.ID, c2.ID, c3.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 
 	// check the bus returns the desired contracts
 	up, err := cluster.Bus.UploadParams(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	csc, err := cluster.Bus.ContractSetContracts(context.Background(), up.ContractSet)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(csc) != 3 {
 		t.Fatal("expected 3 contracts", len(csc))
 	}
 
 	// upload a file
 	data := frand.Bytes(5*rhpv2.SectorSize + 1)
-	err = cluster.Worker.UploadObject(context.Background(), bytes.NewReader(data), "foo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OKAll(cluster.Worker.UploadObject(context.Background(), bytes.NewReader(data), api.DefaultBucketName, "foo", api.UploadObjectOptions{}))
 
 	// Download the file multiple times.
 	var wg sync.WaitGroup
@@ -1641,7 +1270,7 @@ func TestUploadDownloadSameHost(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 5; i++ {
 				buf := &bytes.Buffer{}
-				if err := cluster.Worker.DownloadObject(context.Background(), buf, "foo"); err != nil {
+				if err := cluster.Worker.DownloadObject(context.Background(), buf, api.DefaultBucketName, "foo", api.DownloadObjectOptions{}); err != nil {
 					t.Error(err)
 					break
 				}
@@ -1661,47 +1290,31 @@ func TestContractArchival(t *testing.T) {
 	}
 
 	// create a test cluster
-	cluster, err := newTestCluster(t.TempDir(), zap.NewNop())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	// add host.
-	if _, err := cluster.AddHostsBlocking(1); err != nil {
-		t.Fatal(err)
-	}
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts:  1,
+		logger: zap.NewNop(),
+	})
+	defer cluster.Shutdown()
+	tt := cluster.tt
 
 	// check that we have 1 contract
 	contracts, err := cluster.Bus.Contracts(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(contracts) != 1 {
 		t.Fatal("expected 1 contract", len(contracts))
 	}
 
 	// remove the host
-	if err := cluster.RemoveHost(cluster.hosts[0]); err != nil {
-		t.Fatal(err)
-	}
+	cluster.RemoveHost(cluster.hosts[0])
 
 	// mine until the contract is archived
 	endHeight := contracts[0].WindowEnd
 	cs, err := cluster.Bus.ConsensusState(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cluster.MineBlocks(int(endHeight - cs.BlockHeight + 1)); err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
+	cluster.MineBlocks(int(endHeight - cs.BlockHeight + 1))
 
 	// check that we have 0 contracts
-	err = Retry(100, 100*time.Millisecond, func() error {
+	tt.Retry(100, 100*time.Millisecond, func() error {
 		contracts, err := cluster.Bus.Contracts(context.Background())
 		if err != nil {
 			return err
@@ -1711,9 +1324,7 @@ func TestContractArchival(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 }
 
 func TestWalletTransactions(t *testing.T) {
@@ -1721,32 +1332,22 @@ func TestWalletTransactions(t *testing.T) {
 		t.SkipNow()
 	}
 
-	cluster, err := newTestCluster(t.TempDir(), newTestLoggerCustom(zapcore.DebugLevel))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		logger: newTestLoggerCustom(zapcore.DebugLevel),
+	})
+	defer cluster.Shutdown()
 	b := cluster.Bus
+	tt := cluster.tt
 
 	// Make sure we get transactions that are spread out over multiple seconds.
 	time.Sleep(time.Second)
-	if err := cluster.MineBlocks(1); err != nil {
-		t.Fatal(err)
-	}
+	cluster.MineBlocks(1)
 	time.Sleep(time.Second)
-	if err := cluster.MineBlocks(1); err != nil {
-		t.Fatal(err)
-	}
+	cluster.MineBlocks(1)
 
 	// Get all transactions of the wallet.
 	allTxns, err := b.WalletTransactions(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(allTxns) < 5 {
 		t.Fatalf("expected at least 5 transactions, got %v", len(allTxns))
 	}
@@ -1758,9 +1359,7 @@ func TestWalletTransactions(t *testing.T) {
 
 	// Get the transactions at an offset and compare.
 	txns, err := b.WalletTransactions(context.Background(), api.WalletTransactionsWithOffset(2))
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if !reflect.DeepEqual(txns, allTxns[2:]) {
 		t.Fatal("transactions don't match")
 	}
@@ -1777,18 +1376,14 @@ func TestWalletTransactions(t *testing.T) {
 
 	// Limit the number of transactions to 5.
 	txns, err = b.WalletTransactions(context.Background(), api.WalletTransactionsWithLimit(5))
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(txns) != 5 {
 		t.Fatalf("expected exactly 5 transactions, got %v", len(txns))
 	}
 
 	// Fetch txns before and since median.
 	txns, err = b.WalletTransactions(context.Background(), api.WalletTransactionsWithBefore(medianTxnTimestamp))
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(txns) == 0 {
 		for _, txn := range allTxns {
 			fmt.Println(txn.Timestamp.Unix())
@@ -1801,9 +1396,7 @@ func TestWalletTransactions(t *testing.T) {
 		}
 	}
 	txns, err = b.WalletTransactions(context.Background(), api.WalletTransactionsWithSince(medianTxnTimestamp))
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(txns) == 0 {
 		for _, txn := range allTxns {
 			fmt.Println(txn.Timestamp.Unix())
@@ -1828,37 +1421,16 @@ func TestUploadPacking(t *testing.T) {
 	}
 
 	// create a test cluster
-	cluster, err := newTestCluster(t.TempDir(), newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts:         testRedundancySettings.TotalShards,
+		uploadPacking: true,
+	})
+	defer cluster.Shutdown()
 
 	b := cluster.Bus
 	w := cluster.Worker
 	rs := testRedundancySettings
-
-	// Enable upload packing.
-	err = b.UpdateSetting(context.Background(), api.SettingUploadPacking, api.UploadPackingSettings{
-		Enabled: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// add hosts
-	if _, err := cluster.AddHostsBlocking(rs.TotalShards); err != nil {
-		t.Fatal(err)
-	}
-
-	// wait for accounts to be funded
-	if _, err := cluster.WaitForAccounts(); err != nil {
-		t.Fatal(err)
-	}
+	tt := cluster.tt
 
 	// prepare 3 files which are all smaller than a slab but together make up
 	// for 2 full slabs.
@@ -1872,11 +1444,16 @@ func TestUploadPacking(t *testing.T) {
 	frand.Read(data3)
 
 	// declare helpers
-	download := func(name string, data []byte, offset, length int64) {
+	download := func(path string, data []byte, offset, length int64) {
 		t.Helper()
 		var buffer bytes.Buffer
-		if err := w.DownloadObject(context.Background(), &buffer, name,
-			api.DownloadWithRange(offset, length)); err != nil {
+		if err := w.DownloadObject(
+			context.Background(),
+			&buffer,
+			api.DefaultBucketName,
+			path,
+			api.DownloadObjectOptions{Range: api.DownloadRange{Offset: offset, Length: length}},
+		); err != nil {
 			t.Fatal(err)
 		}
 		if !bytes.Equal(data[offset:offset+length], buffer.Bytes()) {
@@ -1885,18 +1462,16 @@ func TestUploadPacking(t *testing.T) {
 	}
 	uploadDownload := func(name string, data []byte) {
 		t.Helper()
-		if err := w.UploadObject(context.Background(), bytes.NewReader(data), name); err != nil {
-			t.Fatal(err)
-		}
+		tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data), api.DefaultBucketName, name, api.UploadObjectOptions{}))
 		download(name, data, 0, int64(len(data)))
-		res, err := b.Object(context.Background(), name)
+		res, err := b.Object(context.Background(), api.DefaultBucketName, name, api.GetObjectOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if res.Object.Size != int64(len(data)) {
 			t.Fatal("unexpected size after upload", res.Object.Size, len(data))
 		}
-		entries, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, "/", "", 0, -1)
+		entries, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, "/", api.ObjectEntriesOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1959,16 +1534,14 @@ func TestUploadPacking(t *testing.T) {
 
 	// assert number of objects
 	os, err := b.ObjectsStats()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if os.NumObjects != 5 {
 		t.Fatalf("expected 5 objects, got %v", os.NumObjects)
 	}
 
 	// check the object size stats, we use a retry loop since packed slabs are
 	// uploaded in a separate goroutine, so the object stats might lag a bit
-	err = Retry(60, time.Second, func() error {
+	tt.Retry(60, time.Second, func() error {
 		os, err := b.ObjectsStats()
 		if err != nil {
 			t.Fatal(err)
@@ -1987,20 +1560,14 @@ func TestUploadPacking(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 
 	// ObjectsBySlabKey should return 2 objects for the slab of file1 since file1
 	// and file2 share the same slab.
-	res, err := b.Object(context.Background(), "file1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	res, err := b.Object(context.Background(), api.DefaultBucketName, "file1", api.GetObjectOptions{})
+	tt.OK(err)
 	objs, err := b.ObjectsBySlabKey(context.Background(), api.DefaultBucketName, res.Object.Slabs[0].Key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(objs) != 2 {
 		t.Fatal("expected 2 objects", len(objs))
 	}
@@ -2019,22 +1586,16 @@ func TestWallet(t *testing.T) {
 		t.SkipNow()
 	}
 
-	cluster, err := newTestCluster(t.TempDir(), newTestLoggerCustom(zapcore.DebugLevel))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		logger: newTestLoggerCustom(zapcore.DebugLevel),
+	})
+	defer cluster.Shutdown()
 	b := cluster.Bus
+	tt := cluster.tt
 
 	// Check wallet info is sane after startup.
 	wallet, err := b.Wallet(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if wallet.ScanHeight == 0 {
 		t.Fatal("wallet scan height should not be 0")
 	}
@@ -2062,24 +1623,16 @@ func TestWallet(t *testing.T) {
 		MinerFees: []types.Currency{minerFee},
 	}
 	toSign, parents, err := b.WalletFund(context.Background(), &txn, txn.SiacoinOutputs[0].Value)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	err = b.WalletSign(context.Background(), &txn, toSign, types.CoveredFields{WholeTransaction: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.BroadcastTransaction(context.Background(), append(parents, txn)); err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
+	tt.OK(b.BroadcastTransaction(context.Background(), append(parents, txn)))
 
 	// The wallet should still have the same confirmed balance, a lower
 	// spendable balance and a greater unconfirmed balance.
-	err = Retry(600, 100*time.Millisecond, func() error {
+	tt.Retry(600, 100*time.Millisecond, func() error {
 		updated, err := b.Wallet(context.Background())
-		if err != nil {
-			return err
-		}
+		tt.OK(err)
 		if !updated.Confirmed.Equals(wallet.Confirmed) {
 			return fmt.Errorf("wallet confirmed balance should not have changed: %v %v", updated.Confirmed, wallet.Confirmed)
 		}
@@ -2101,9 +1654,6 @@ func TestWallet(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestSlabBufferStats(t *testing.T) {
@@ -2120,37 +1670,17 @@ func TestSlabBufferStats(t *testing.T) {
 	busCfg := testBusCfg()
 	threshold := 1 << 12 // 4 KiB
 	busCfg.SlabBufferCompletionThreshold = int64(threshold)
-	cluster, err := newTestClusterCustom(t.TempDir(), "", true, types.GeneratePrivateKey(), busCfg, testWorkerCfg(), testApCfg(), newTestLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		busCfg:        &busCfg,
+		hosts:         testRedundancySettings.TotalShards,
+		uploadPacking: true,
+	})
+	defer cluster.Shutdown()
 
 	b := cluster.Bus
 	w := cluster.Worker
 	rs := testRedundancySettings
-
-	// Enable upload packing.
-	err = b.UpdateSetting(context.Background(), api.SettingUploadPacking, api.UploadPackingSettings{
-		Enabled: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// add hosts
-	if _, err := cluster.AddHostsBlocking(rs.TotalShards); err != nil {
-		t.Fatal(err)
-	}
-
-	// wait for accounts to be funded
-	if _, err := cluster.WaitForAccounts(); err != nil {
-		t.Fatal(err)
-	}
+	tt := cluster.tt
 
 	// prepare 3 files which are all smaller than a slab but together make up
 	// for 2 full slabs.
@@ -2161,22 +1691,18 @@ func TestSlabBufferStats(t *testing.T) {
 	frand.Read(data2)
 
 	// upload the first file - buffer should still be incomplete after this
-	if err := w.UploadObject(context.Background(), bytes.NewReader(data1), "1"); err != nil {
-		t.Fatal(err)
-	}
+	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data1), api.DefaultBucketName, "1", api.UploadObjectOptions{}))
 
 	// assert number of objects
 	os, err := b.ObjectsStats()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if os.NumObjects != 1 {
 		t.Fatalf("expected 1 object, got %d", os.NumObjects)
 	}
 
 	// check the object size stats, we use a retry loop since packed slabs are
 	// uploaded in a separate goroutine, so the object stats might lag a bit
-	err = Retry(60, time.Second, func() error {
+	tt.Retry(60, time.Second, func() error {
 		os, err := b.ObjectsStats()
 		if err != nil {
 			t.Fatal(err)
@@ -2192,15 +1718,10 @@ func TestSlabBufferStats(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// check the slab buffers
 	buffers, err := b.SlabBuffers()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if len(buffers) != 1 {
 		t.Fatal("expected 1 slab buffer, got", len(buffers))
 	}
@@ -2224,26 +1745,20 @@ func TestSlabBufferStats(t *testing.T) {
 	}
 
 	// upload the second file - this should fill the buffer
-	if err := w.UploadObject(context.Background(), bytes.NewReader(data2), "2"); err != nil {
-		t.Fatal(err)
-	}
+	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data2), api.DefaultBucketName, "2", api.UploadObjectOptions{}))
 
 	// assert number of objects
 	os, err = b.ObjectsStats()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(err)
 	if os.NumObjects != 2 {
 		t.Fatalf("expected 1 object, got %d", os.NumObjects)
 	}
 
 	// check the object size stats, we use a retry loop since packed slabs are
 	// uploaded in a separate goroutine, so the object stats might lag a bit
-	err = Retry(60, time.Second, func() error {
+	tt.Retry(60, time.Second, func() error {
 		os, err := b.ObjectsStats()
-		if err != nil {
-			t.Fatal(err)
-		}
+		tt.OK(err)
 		if os.TotalObjectsSize != uint64(len(data1)+len(data2)) {
 			return fmt.Errorf("expected totalObjectSize of %d, got %d", len(data1)+len(data2), os.TotalObjectsSize)
 		}
@@ -2255,18 +1770,16 @@ func TestSlabBufferStats(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	// check the slab buffers
-	buffers, err = b.SlabBuffers()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(buffers) != 0 {
-		t.Fatal("expected 0 slab buffers, got", len(buffers))
-	}
+	// check the slab buffers, again a retry loop to avoid NDFs
+	tt.Retry(100, 100*time.Millisecond, func() error {
+		buffers, err = b.SlabBuffers()
+		tt.OK(err)
+		if len(buffers) != 0 {
+			return fmt.Errorf("expected 0 slab buffers, got %d", len(buffers))
+		}
+		return nil
+	})
 }
 
 func TestAlerts(t *testing.T) {
@@ -2274,16 +1787,12 @@ func TestAlerts(t *testing.T) {
 		t.SkipNow()
 	}
 
-	cluster, err := newTestCluster(t.TempDir(), newTestLoggerCustom(zapcore.DebugLevel))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := cluster.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	cluster := newTestCluster(t, testClusterOptions{
+		logger: newTestLoggerCustom(zapcore.DebugLevel),
+	})
+	defer cluster.Shutdown()
 	b := cluster.Bus
+	tt := cluster.tt
 
 	// register alert
 	alert := alerts.Alert{
@@ -2295,15 +1804,11 @@ func TestAlerts(t *testing.T) {
 		},
 		Timestamp: time.Now(),
 	}
-	if err := b.RegisterAlert(context.Background(), alert); err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(b.RegisterAlert(context.Background(), alert))
 	findAlert := func(id types.Hash256) *alerts.Alert {
 		t.Helper()
 		alerts, err := b.Alerts()
-		if err != nil {
-			t.Fatal(err)
-		}
+		tt.OK(err)
 		for _, alert := range alerts {
 			if alert.ID == id {
 				return &alert
@@ -2315,20 +1820,126 @@ func TestAlerts(t *testing.T) {
 	if foundAlert == nil {
 		t.Fatal("alert not found")
 	}
-	if err != nil {
-		t.Fatal(err)
-	}
 	if !cmp.Equal(*foundAlert, alert) {
 		t.Fatal("alert mismatch", cmp.Diff(*foundAlert, alert))
 	}
 
 	// dismiss alert
-	err = b.DismissAlerts(context.Background(), alert.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tt.OK(b.DismissAlerts(context.Background(), alert.ID))
 	foundAlert = findAlert(alert.ID)
 	if foundAlert != nil {
 		t.Fatal("alert found")
+	}
+}
+
+func TestMultipartUploads(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts:         testRedundancySettings.TotalShards,
+		uploadPacking: true,
+	})
+	defer cluster.Shutdown()
+	defer cluster.Shutdown()
+	b := cluster.Bus
+	w := cluster.Worker
+	tt := cluster.tt
+
+	// Start a new multipart upload.
+	objPath := "/foo"
+	mpr, err := b.CreateMultipartUpload(context.Background(), api.DefaultBucketName, objPath, api.CreateMultipartOptions{Key: object.GenerateEncryptionKey()})
+	tt.OK(err)
+	if mpr.UploadID == "" {
+		t.Fatal("expected non-empty upload ID")
+	}
+
+	// List uploads
+	lmu, err := b.MultipartUploads(context.Background(), api.DefaultBucketName, "/f", "", "", 0)
+	tt.OK(err)
+	if len(lmu.Uploads) != 1 {
+		t.Fatal("expected 1 upload got", len(lmu.Uploads))
+	} else if upload := lmu.Uploads[0]; upload.UploadID != mpr.UploadID || upload.Path != objPath {
+		t.Fatal("unexpected upload:", upload)
+	}
+
+	// Add 3 parts out of order to make sure the object is reconstructed
+	// correctly.
+	putPart := func(partNum int, offset int, data []byte) string {
+		t.Helper()
+		res, err := w.UploadMultipartUploadPart(context.Background(), bytes.NewReader(data), api.DefaultBucketName, objPath, mpr.UploadID, partNum, api.UploadMultipartUploadPartOptions{EncryptionOffset: offset})
+		tt.OK(err)
+		if res.ETag == "" {
+			t.Fatal("expected non-empty ETag")
+		}
+		return res.ETag
+	}
+
+	data1 := frand.Bytes(64)
+	data2 := frand.Bytes(128)
+	data3 := frand.Bytes(64)
+	etag2 := putPart(2, len(data1), data2)
+	etag1 := putPart(1, 0, data1)
+	etag3 := putPart(3, len(data1)+len(data2), data3)
+	size := int64(len(data1) + len(data2) + len(data3))
+
+	// List parts
+	mup, err := b.MultipartUploadParts(context.Background(), api.DefaultBucketName, objPath, mpr.UploadID, 0, 0)
+	tt.OK(err)
+	if len(mup.Parts) != 3 {
+		t.Fatal("expected 3 parts got", len(mup.Parts))
+	} else if part1 := mup.Parts[0]; part1.PartNumber != 1 || part1.Size != int64(len(data1)) || part1.ETag == "" {
+		t.Fatal("unexpected part:", part1)
+	} else if part2 := mup.Parts[1]; part2.PartNumber != 2 || part2.Size != int64(len(data2)) || part2.ETag == "" {
+		t.Fatal("unexpected part:", part2)
+	} else if part3 := mup.Parts[2]; part3.PartNumber != 3 || part3.Size != int64(len(data3)) || part3.ETag == "" {
+		t.Fatal("unexpected part:", part3)
+	}
+
+	// Complete upload
+	ui, err := b.CompleteMultipartUpload(context.Background(), api.DefaultBucketName, objPath, mpr.UploadID, []api.MultipartCompletedPart{
+		{
+			PartNumber: 1,
+			ETag:       etag1,
+		},
+		{
+			PartNumber: 2,
+			ETag:       etag2,
+		},
+		{
+			PartNumber: 3,
+			ETag:       etag3,
+		},
+	})
+	tt.OK(err)
+	if ui.ETag == "" {
+		t.Fatal("unexpected response:", ui)
+	}
+
+	// Download object
+	gor, err := w.GetObject(context.Background(), api.DefaultBucketName, objPath, api.DownloadObjectOptions{})
+	tt.OK(err)
+	if gor.Range != nil {
+		t.Fatal("unexpected range:", gor.Range)
+	} else if gor.Size != size {
+		t.Fatal("unexpected size:", gor.Size)
+	} else if data, err := io.ReadAll(gor.Content); err != nil {
+		t.Fatal(err)
+	} else if expectedData := append(data1, append(data2, data3...)...); !bytes.Equal(data, expectedData) {
+		t.Fatal("unexpected data:", cmp.Diff(data, expectedData))
+	}
+
+	// Download a range of the object
+	gor, err = w.GetObject(context.Background(), api.DefaultBucketName, objPath, api.DownloadObjectOptions{Range: api.DownloadRange{Offset: 0, Length: 1}})
+	tt.OK(err)
+	if gor.Range == nil || gor.Range.Offset != 0 || gor.Range.Length != 1 {
+		t.Fatal("unexpected range:", gor.Range)
+	} else if gor.Size != size {
+		t.Fatal("unexpected size:", gor.Size)
+	} else if data, err := io.ReadAll(gor.Content); err != nil {
+		t.Fatal(err)
+	} else if expectedData := data1[:1]; !bytes.Equal(data, expectedData) {
+		t.Fatal("unexpected data:", cmp.Diff(data, expectedData))
 	}
 }
