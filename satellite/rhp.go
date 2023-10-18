@@ -933,12 +933,12 @@ func (s *Satellite) settingsHandlerPOST(jc jape.Context) {
 
 // transferMetadata sends all file metadata to the satellite.
 func (s *Satellite) transferMetadata(ctx context.Context) {
-	resp, err := s.bus.Object(ctx, "")
+	resp, err := s.bus.Object(ctx, "default", "", api.GetObjectOptions{})
 	if err != nil {
 		return
 	}
 	for _, entry := range resp.Entries {
-		resp, err := s.bus.Object(ctx, entry.Name)
+		resp, err := s.bus.Object(ctx, "default", entry.Name, api.GetObjectOptions{})
 		if err != nil {
 			s.logger.Error(fmt.Sprintf("couldn't find object %s: %s", entry.Name, err))
 			continue
@@ -1016,7 +1016,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 
-	resp, err := s.bus.Object(ctx, "")
+	resp, err := s.bus.Object(ctx, "default", "", api.GetObjectOptions{})
 	if jc.Check("couldn't requests present objects", err) != nil {
 		return
 	}
@@ -1071,15 +1071,15 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 				used[ss.Host] = h2c[ss.Host]
 			}
 		}
-		_, err := s.bus.Object(ctx, fm.Path)
+		_, err := s.bus.Object(ctx, "default", fm.Path, api.GetObjectOptions{})
 		if err == nil {
-			err = s.bus.DeleteObject(ctx, api.DefaultBucketName, fm.Path, false)
+			err = s.bus.DeleteObject(ctx, api.DefaultBucketName, fm.Path, api.DeleteObjectOptions{})
 			if err != nil {
 				s.logger.Error(fmt.Sprintf("couldn't delete object: %s", err))
 				continue
 			}
 		}
-		if err := s.bus.AddObject(ctx, api.DefaultBucketName, fm.Path, set, obj, used); err != nil {
+		if err := s.bus.AddObject(ctx, api.DefaultBucketName, fm.Path, set, obj, used, api.AddObjectOptions{}); err != nil {
 			s.logger.Error(fmt.Sprintf("couldn't add object: %s", err))
 			continue
 		}

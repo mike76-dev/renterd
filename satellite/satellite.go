@@ -29,14 +29,14 @@ type autopilotClient interface {
 // busClient is the interface for renterd/bus.
 type busClient interface {
 	AddContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64) (api.ContractMetadata, error)
-	AddObject(ctx context.Context, bucket, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID) error
+	AddObject(ctx context.Context, bucket, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID, opts api.AddObjectOptions) error
 	AddRenewedContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, renewedFrom types.FileContractID) (api.ContractMetadata, error)
 	Contract(ctx context.Context, id types.FileContractID) (api.ContractMetadata, error)
 	Contracts(ctx context.Context) ([]api.ContractMetadata, error)
 	ContractSetContracts(ctx context.Context, set string) (contracts []api.ContractMetadata, err error)
-	DeleteObject(ctx context.Context, bucket, path string, batch bool) error
+	DeleteObject(ctx context.Context, bucket, path string, opts api.DeleteObjectOptions) error
 	GougingParams(ctx context.Context) (api.GougingParams, error)
-	Object(ctx context.Context, path string, options ...api.ObjectsOption) (api.ObjectsResponse, error)
+	Object(ctx context.Context, bucket, path string, options api.GetObjectOptions) (api.ObjectsResponse, error)
 	RecordContractSpending(ctx context.Context, records []api.ContractSpendingRecord) error
 	SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) error
 }
