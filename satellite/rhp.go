@@ -220,7 +220,7 @@ type renterFiles struct {
 // requestMetadataRequest is used to request file metadata.
 type requestMetadataRequest struct {
 	PubKey         types.PublicKey
-	PresentObjects []string
+	PresentObjects []BucketFiles
 	Signature      types.Signature
 }
 
@@ -933,21 +933,34 @@ func (s *Satellite) settingsHandlerPOST(jc jape.Context) {
 
 // transferMetadata sends all file metadata to the satellite.
 func (s *Satellite) transferMetadata(ctx context.Context) {
-	resp, err := s.bus.Object(ctx, "default", "", api.GetObjectOptions{})
+	buckets, err := s.bus.ListBuckets(ctx)
 	if err != nil {
+		s.logger.Error(fmt.Sprintf("couldn't get buckets: %s", err))
 		return
 	}
-	for _, entry := range resp.Entries {
-		resp, err := s.bus.Object(ctx, "default", entry.Name, api.GetObjectOptions{})
+	for _, bucket := range buckets {
+		resp, err := s.bus.ListObjects(ctx, bucket.Name, api.ListObjectOptions{
+			Limit: -1,
+		})
 		if err != nil {
-			s.logger.Error(fmt.Sprintf("couldn't find object %s: %s", entry.Name, err))
+			s.logger.Error(fmt.Sprintf("couldn't get bucket objects: %s: %s", bucket.Name, err))
 			continue
 		}
-		StaticSatellite.SaveMetadata(ctx, FileMetadata{
-			Key:   resp.Object.Key,
-			Path:  entry.Name,
-			Slabs: resp.Object.Slabs,
-		})
+		for _, entry := range resp.Objects {
+			resp, err := s.bus.Object(ctx, bucket.Name, entry.Name, api.GetObjectOptions{})
+			if err != nil {
+				s.logger.Error(fmt.Sprintf("couldn't find object %s: %s", entry.Name, err))
+				continue
+			}
+			StaticSatellite.SaveMetadata(ctx, FileMetadata{
+				Key:      resp.Object.Key,
+				Bucket:   bucket.Name,
+				Path:     entry.Name,
+				ETag:     resp.Object.ETag,
+				MimeType: resp.Object.MimeType,
+				Slabs:    resp.Object.Slabs,
+			})
+		}
 	}
 }
 
@@ -1015,17 +1028,28 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 	ctx := jc.Request.Context()
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
-
-	resp, err := s.bus.Object(ctx, "default", "", api.GetObjectOptions{})
-	if jc.Check("couldn't requests present objects", err) != nil {
-		return
-	}
-
 	rmr := requestMetadataRequest{
 		PubKey: pk,
 	}
-	for _, entry := range resp.Entries {
-		rmr.PresentObjects = append(rmr.PresentObjects, entry.Name)
+
+	buckets, err := s.bus.ListBuckets(ctx)
+	if jc.Check("couldn't get buckets", err) != nil {
+		return
+	}
+	for _, bucket := range buckets {
+		resp, err := s.bus.ListObjects(ctx, bucket.Name, api.ListObjectOptions{
+			Limit: -1,
+		})
+		if jc.Check("couldn't requests present objects", err) != nil {
+			return
+		}
+		bf := BucketFiles{
+			Name: bucket.Name,
+		}
+		for _, entry := range resp.Objects {
+			bf.Paths = append(bf.Paths, entry.Name)
+		}
+		rmr.PresentObjects = append(rmr.PresentObjects, bf)
 	}
 
 	h := types.NewHasher()
@@ -1071,15 +1095,18 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 				used[ss.Host] = h2c[ss.Host]
 			}
 		}
-		_, err := s.bus.Object(ctx, "default", fm.Path, api.GetObjectOptions{})
+		_, err := s.bus.Object(ctx, fm.Bucket, fm.Path, api.GetObjectOptions{})
 		if err == nil {
-			err = s.bus.DeleteObject(ctx, api.DefaultBucketName, fm.Path, api.DeleteObjectOptions{})
+			err = s.bus.DeleteObject(ctx, fm.Bucket, fm.Path, api.DeleteObjectOptions{})
 			if err != nil {
 				s.logger.Error(fmt.Sprintf("couldn't delete object: %s", err))
 				continue
 			}
 		}
-		if err := s.bus.AddObject(ctx, api.DefaultBucketName, fm.Path, set, obj, used, api.AddObjectOptions{}); err != nil {
+		if err := s.bus.AddObject(ctx, fm.Bucket, fm.Path, set, obj, used, api.AddObjectOptions{
+			ETag:     fm.ETag,
+			MimeType: fm.MimeType,
+		}); err != nil {
 			s.logger.Error(fmt.Sprintf("couldn't add object: %s", err))
 			continue
 		}

@@ -82,9 +82,12 @@ type RenterSettings struct {
 
 // FileMetadata contains the uploaded file metadata.
 type FileMetadata struct {
-	Key   object.EncryptionKey `json:"key"`
-	Path  string               `json:"path"`
-	Slabs []object.SlabSlice   `json:"slabs"`
+	Key      object.EncryptionKey `json:"key"`
+	Bucket   string               `json:"bucket"`
+	Path     string               `json:"path"`
+	ETag     string               `json:"etag"`
+	MimeType string               `json:"mime"`
+	Slabs    []object.SlabSlice   `json:"slabs"`
 }
 
 // SaveMetadataRequest is the request type for the SaveMetadata RPC.
@@ -95,4 +98,10 @@ type SaveMetadataRequest struct {
 // UpdateSlabRequest is the request type for the UpdateSlab RPC.
 type UpdateSlabRequest struct {
 	Slab object.Slab `json:"slab"`
+}
+
+// BucketFiles contains a list of filepaths within a single bucket.
+type BucketFiles struct {
+	Name  string   `json:"name"`
+	Paths []string `json:"paths"`
 }

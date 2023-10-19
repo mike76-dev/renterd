@@ -300,7 +300,10 @@ func (rs *renterSignature) DecodeFrom(d *types.Decoder) {
 func (fm *FileMetadata) EncodeTo(e *types.Encoder) {
 	key, _ := hex.DecodeString(strings.TrimPrefix(fm.Key.String(), "key:"))
 	e.Write(key[:])
+	e.WriteString(fm.Bucket)
 	e.WriteString(fm.Path)
+	e.WriteString(fm.ETag)
+	e.WriteString(fm.MimeType)
 	e.WritePrefix(len(fm.Slabs))
 	for _, s := range fm.Slabs {
 		key, _ := hex.DecodeString(strings.TrimPrefix(s.Key.String(), "key:"))
@@ -321,7 +324,10 @@ func (fm *FileMetadata) DecodeFrom(d *types.Decoder) {
 	var key types.Hash256
 	d.Read(key[:])
 	fm.Key.UnmarshalText([]byte(strings.TrimPrefix(key.String(), "h:")))
+	fm.Bucket = d.ReadString()
 	fm.Path = d.ReadString()
+	fm.ETag = d.ReadString()
+	fm.MimeType = d.ReadString()
 	fm.Slabs = make([]object.SlabSlice, d.ReadPrefix())
 	for i := 0; i < len(fm.Slabs); i++ {
 		var key types.Hash256
@@ -385,7 +391,11 @@ func (rmr *requestMetadataRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	e.Write(rmr.PubKey[:])
 	e.WritePrefix(len(rmr.PresentObjects))
 	for _, po := range rmr.PresentObjects {
-		e.WriteString(po)
+		e.WriteString(po.Name)
+		e.WritePrefix(len(po.Paths))
+		for _, p := range po.Paths {
+			e.WriteString(p)
+		}
 	}
 }
 
