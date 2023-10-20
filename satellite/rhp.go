@@ -1095,7 +1095,15 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 				used[ss.Host] = h2c[ss.Host]
 			}
 		}
-		_, err := s.bus.Object(ctx, fm.Bucket, fm.Path, api.GetObjectOptions{})
+		_, err := s.bus.Bucket(ctx, fm.Bucket)
+		if err != nil {
+			err = s.bus.CreateBucket(ctx, fm.Bucket, api.CreateBucketOptions{})
+			if err != nil {
+				s.logger.Error(fmt.Sprintf("couldn't create bucket: %s", err))
+				continue
+			}
+		}
+		_, err = s.bus.Object(ctx, fm.Bucket, fm.Path, api.GetObjectOptions{})
 		if err == nil {
 			err = s.bus.DeleteObject(ctx, fm.Bucket, fm.Path, api.DeleteObjectOptions{})
 			if err != nil {

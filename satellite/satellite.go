@@ -31,9 +31,11 @@ type busClient interface {
 	AddContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64) (api.ContractMetadata, error)
 	AddObject(ctx context.Context, bucket, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID, opts api.AddObjectOptions) error
 	AddRenewedContract(ctx context.Context, contract rhpv2.ContractRevision, totalCost types.Currency, startHeight uint64, renewedFrom types.FileContractID) (api.ContractMetadata, error)
+	Bucket(ctx context.Context, bucketName string) (resp api.Bucket, err error)
 	Contract(ctx context.Context, id types.FileContractID) (api.ContractMetadata, error)
 	Contracts(ctx context.Context) ([]api.ContractMetadata, error)
 	ContractSetContracts(ctx context.Context, set string) (contracts []api.ContractMetadata, err error)
+	CreateBucket(ctx context.Context, bucketName string, opts api.CreateBucketOptions) error
 	DeleteObject(ctx context.Context, bucket, path string, opts api.DeleteObjectOptions) error
 	GougingParams(ctx context.Context) (api.GougingParams, error)
 	ListBuckets(ctx context.Context) (buckets []api.Bucket, err error)
