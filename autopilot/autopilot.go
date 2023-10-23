@@ -209,6 +209,7 @@ func (ap *Autopilot) Run() error {
 		err := ap.updateState(ctx)
 		if err != nil {
 			ap.logger.Errorf("failed to update state, err: %v", err)
+			cancel()
 			return nil
 		}
 		satellite.StaticSatellite.RequestMetadata(ctx, ap.State().cfg.Contracts.Set)
