@@ -62,6 +62,7 @@ require (
 	github.com/klauspost/compress v1.16.7 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.5 // indirect
 	github.com/mattn/go-sqlite3 v1.14.17 // indirect
+	github.com/mike76-dev/renterd-satellite v0.3.0 // indirect
 	github.com/mike76-dev/sia-web v0.0.0-20230901082429-66c26e5b192b // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/sha256-simd v1.0.1 // indirect
