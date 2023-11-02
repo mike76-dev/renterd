@@ -35,8 +35,8 @@ import (
 	"golang.org/x/crypto/blake2b"
 
 	// Satellite.
-	satellite "github.com/mike76-dev/renterd-satellite"
-	//"go.sia.tech/renterd/satellite"
+	//satellite "github.com/mike76-dev/renterd-satellite"
+	"go.sia.tech/renterd/satellite"
 )
 
 const (
@@ -947,7 +947,7 @@ func (w *worker) slabMigrateHandler(jc jape.Context) {
 			return
 		}
 		if rs.BackupFileMetadata {
-			satellite.StaticSatellite.UpdateSlab(ctx, slab)
+			satellite.StaticSatellite.UpdateSlab(ctx, slab, false)
 		}
 	}
 }
@@ -1169,25 +1169,6 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 
 	// set etag header
 	jc.ResponseWriter.Header().Set("ETag", api.FormatETag(eTag))
-
-	// backup the object metadata if the user has opted in
-	cfg, err := satellite.StaticSatellite.Config()
-	if err == nil && cfg.Enabled {
-		rs, err := satellite.StaticSatellite.GetSettings(ctx)
-		if err == nil && rs.BackupFileMetadata {
-			resp, err := w.bus.Object(ctx, bucket, jc.PathParam("path"), api.GetObjectOptions{})
-			if err == nil {
-				satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
-					Key:      resp.Object.Key,
-					Bucket:   bucket,
-					Path:     jc.PathParam("path"),
-					ETag:     resp.Object.ETag,
-					MimeType: resp.Object.MimeType,
-					Slabs:    resp.Object.Slabs,
-				})
-			}
-		}
-	}
 }
 
 func (w *worker) multipartUploadHandlerPUT(jc jape.Context) {

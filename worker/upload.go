@@ -26,6 +26,9 @@ import (
 	"go.sia.tech/renterd/tracing"
 	"go.uber.org/zap"
 	"lukechampine.com/frand"
+
+	// Satellite.
+	"go.sia.tech/renterd/satellite"
 )
 
 const (
@@ -290,6 +293,28 @@ func (w *worker) upload(ctx context.Context, r io.Reader, bucket, path string, o
 			w.logger.Errorf("couldn't upload packed slabs, err: %v", err)
 		}
 	}
+
+	// backup the object metadata if the user has opted in
+	cfg, err := satellite.StaticSatellite.Config()
+	if err == nil && cfg.Enabled {
+		rs, err := satellite.StaticSatellite.GetSettings(ctx)
+		if err == nil && rs.BackupFileMetadata {
+			err = satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
+				Key:          obj.Key,
+				Bucket:       bucket,
+				Path:         path,
+				ETag:         eTag,
+				MimeType:     mimeType,
+				Slabs:        obj.Slabs,
+				PartialSlabs: obj.PartialSlabs,
+				Data:         partialSlabData,
+			})
+			if err != nil {
+				w.logger.Errorf("couldn't send metadata to satellite: %v", err)
+			}
+		}
+	}
+
 	return eTag, nil
 }
 
@@ -423,6 +448,22 @@ func (w *worker) uploadPackedSlab(ctx context.Context, ps api.PackedSlab, rs api
 	err = w.bus.MarkPackedSlabsUploaded(ctx, []api.UploadedPackedSlab{slab}, used)
 	if err != nil {
 		return fmt.Errorf("couldn't mark packed slabs uploaded, err: %v", err)
+	}
+
+	// send updated slab to the satellite
+	cfg, err := satellite.StaticSatellite.Config()
+	if err == nil && cfg.Enabled {
+		settings, err := satellite.StaticSatellite.GetSettings(ctx)
+		if err == nil && settings.BackupFileMetadata {
+			err = satellite.StaticSatellite.UpdateSlab(ctx, object.Slab{
+				Key:       ps.Key,
+				MinShards: uint8(rs.MinShards),
+				Shards:    sectors,
+			}, true)
+			if err != nil {
+				return fmt.Errorf("couldn't send updated slab to satellite: %v", err)
+			}
+		}
 	}
 
 	return nil

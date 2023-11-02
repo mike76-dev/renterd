@@ -32,8 +32,8 @@ import (
 	"go.uber.org/zap"
 
 	// Satellite.
-	satellite "github.com/mike76-dev/renterd-satellite"
-	//"go.sia.tech/renterd/satellite"
+	//satellite "github.com/mike76-dev/renterd-satellite"
+	"go.sia.tech/renterd/satellite"
 )
 
 // Client re-exports the client from the client package.
