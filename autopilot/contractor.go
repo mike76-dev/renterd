@@ -196,7 +196,7 @@ func (c *contractor) performContractMaintenance(ctx context.Context, w Worker) (
 			satellite.StaticSatellite.RequestContracts(sctx)
 		}
 		if rs.AutoRepairFiles {
-			satellite.StaticSatellite.RequestMetadata(sctx, state.cfg.Contracts.Set)
+			satellite.StaticSatellite.RequestSlabs(sctx, state.cfg.Contracts.Set)
 		}
 	}
 
