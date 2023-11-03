@@ -43,6 +43,7 @@ type busClient interface {
 	Object(ctx context.Context, bucket, path string, options api.GetObjectOptions) (api.ObjectsResponse, error)
 	RecordContractSpending(ctx context.Context, records []api.ContractSpendingRecord) error
 	SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) error
+	UpdateSlab(ctx context.Context, s object.Slab, contractSet string, usedContracts map[types.PublicKey]types.FileContractID) error
 }
 
 // workerClient is the interface for renterd/worker.
@@ -213,6 +214,7 @@ func (s *Satellite) Handler() http.Handler {
 		"POST   /settings":      s.settingsHandlerPOST,
 		"POST   /metadata":      s.saveMetadataHandler,
 		"GET    /metadata/:set": s.requestMetadataHandler,
+		"GET    /slabs/:set":    s.requestSlabsHandler,
 		"POST   /slab":          s.updateSlabHandler,
 	})
 }

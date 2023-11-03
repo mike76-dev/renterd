@@ -166,6 +166,12 @@ func (c *Client) UpdateSlab(ctx context.Context, s object.Slab, packed bool) err
 	return err
 }
 
+// RequestSlabs requests any modified slabs from the satellite.
+func (c *Client) RequestSlabs(ctx context.Context, set string) (slabs []object.Slab, err error) {
+	err = c.c.WithContext(ctx).GET(fmt.Sprintf("/slabs/%s", set), &slabs)
+	return
+}
+
 // NewClient returns a client that communicates with a renterd satellite server
 // listening on the specified address.
 func NewClient(addr, password string) *Client {

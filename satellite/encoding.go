@@ -450,8 +450,8 @@ func (usr *updateSlabRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	key, _ := hex.DecodeString(strings.TrimPrefix(usr.Slab.Key.String(), "key:"))
 	e.Write(key[:])
 	e.WriteUint64(uint64(usr.Slab.MinShards))
-	e.WriteUint64(uint64(usr.Slab.Offset))
-	e.WriteUint64(uint64(usr.Slab.Length))
+	e.WriteUint64(0) // Offset
+	e.WriteUint64(0) // Length
 	e.WriteBool(false)
 	e.WritePrefix(len(usr.Slab.Shards))
 	for _, ss := range usr.Slab.Shards {
@@ -463,6 +463,54 @@ func (usr *updateSlabRequest) EncodeToWithoutSignature(e *types.Encoder) {
 
 // DecodeFrom implements types.ProtocolObject.
 func (usr *updateSlabRequest) DecodeFrom(d *types.Decoder) {
+	// Nothing to do here.
+}
+
+// EncodeTo implements types.ProtocolObject.
+func (ms *modifiedSlabs) EncodeTo(e *types.Encoder) {
+	// Nothing to do here.
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (ms *modifiedSlabs) DecodeFrom(d *types.Decoder) {
+	ms.slabs = make([]object.Slab, d.ReadPrefix())
+	for i := 0; i < len(ms.slabs); i++ {
+		var k types.Hash256
+		d.Read(k[:])
+		var key object.EncryptionKey
+		key.UnmarshalText([]byte(strings.TrimPrefix(k.String(), "h:")))
+		minShards := uint8(d.ReadUint64())
+		_ = d.ReadUint64() // Offset
+		_ = d.ReadUint64() // Length
+		_ = d.ReadBool()   // Partial flag
+		numShards := d.ReadPrefix()
+		s := object.Slab{
+			Key:       key,
+			MinShards: minShards,
+		}
+		s.Shards = make([]object.Sector, numShards)
+		for j := 0; j < numShards; j++ {
+			d.Read(s.Shards[j].Host[:])
+			d.Read(s.Shards[j].Root[:])
+		}
+		ms.slabs[i] = s
+	}
+}
+
+// EncodeTo implements types.ProtocolObject.
+func (rsr *requestSlabsRequest) EncodeTo(e *types.Encoder) {
+	rsr.EncodeToWithoutSignature(e)
+	rsr.Signature.EncodeTo(e)
+}
+
+// EncodeToWithoutSignature does the same as EncodeTo but
+// leaves the signature out.
+func (rsr *requestSlabsRequest) EncodeToWithoutSignature(e *types.Encoder) {
+	e.Write(rsr.PubKey[:])
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (rsr *requestSlabsRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
 }
 

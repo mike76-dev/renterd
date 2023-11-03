@@ -33,6 +33,7 @@ var (
 	specifierSaveMetadata     = types.NewSpecifier("SaveMetadata")
 	specifierRequestMetadata  = types.NewSpecifier("RequestMetadata")
 	specifierUpdateSlab       = types.NewSpecifier("UpdateSlab")
+	specifierRequestSlabs     = types.NewSpecifier("RequestSlabs")
 	specifierShareContracts   = types.NewSpecifier("ShareContracts")
 )
 
@@ -227,8 +228,19 @@ type requestMetadataRequest struct {
 // updateSlabRequest is used to update a slab after a successful migration.
 type updateSlabRequest struct {
 	PubKey    types.PublicKey
-	Slab      object.SlabSlice
+	Slab      object.Slab
 	Packed    bool
+	Signature types.Signature
+}
+
+// modifiedSlabs is a list of slabs.
+type modifiedSlabs struct {
+	slabs []object.Slab
+}
+
+// requestSlabsRequest is used to request modified slabs.
+type requestSlabsRequest struct {
+	PubKey    types.PublicKey
 	Signature types.Signature
 }
 
@@ -1147,11 +1159,7 @@ func (s *Satellite) updateSlabHandler(jc jape.Context) {
 
 	usr := updateSlabRequest{
 		PubKey: pk,
-		Slab: object.SlabSlice{
-			Slab:   req.Slab,
-			Offset: 0,
-			Length: 0,
-		},
+		Slab:   req.Slab,
 		Packed: req.Packed,
 	}
 
@@ -1181,6 +1189,74 @@ func (s *Satellite) updateSlabHandler(jc jape.Context) {
 	if jc.Check("couldn't update slab", err) != nil {
 		s.logger.Error(fmt.Sprintf("couldn't update slab: %s", err))
 	}
+}
+
+// requestSlabsHandler handles the GET /slabs requests.
+func (s *Satellite) requestSlabsHandler(jc jape.Context) {
+	cfg := s.store.getConfig()
+	if !cfg.Enabled {
+		s.logger.Error("couldn't request modified slabs: satellite disabled")
+		jc.Check("ERROR", errors.New("satellite disabled"))
+		return
+	}
+	set := jc.PathParam("set")
+	if set == "" {
+		jc.Check("ERROR", errors.New("contract set cannot be empty"))
+		return
+	}
+	s.logger.Info("requesting modified slabs from the satellite")
+	ctx := jc.Request.Context()
+
+	pk, sk := generateKeyPair(cfg.RenterSeed)
+	rsr := requestSlabsRequest{
+		PubKey: pk,
+	}
+
+	h := types.NewHasher()
+	rsr.EncodeToWithoutSignature(h.E)
+	rsr.Signature = sk.SignHash(h.Sum())
+
+	var ms modifiedSlabs
+	err := s.withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
+		if err := t.WriteRequest(specifierRequestSlabs, &rsr); err != nil {
+			return err
+		}
+
+		if err := t.ReadResponse(&ms, 65536); err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if jc.Check("couldn't request modified slabs", err) != nil {
+		s.logger.Error(fmt.Sprintf("couldn't request modified slabs: %s", err))
+		return
+	}
+
+	contracts, err := s.bus.ContractSetContracts(ctx, set)
+	if jc.Check("couldn't fetch contracts from bus", err) != nil {
+		return
+	}
+
+	h2c := make(map[types.PublicKey]types.FileContractID)
+	for _, c := range contracts {
+		h2c[c.HostKey] = c.ID
+	}
+
+	for _, slab := range ms.slabs {
+		used := make(map[types.PublicKey]types.FileContractID)
+		for _, ss := range slab.Shards {
+			used[ss.Host] = h2c[ss.Host]
+		}
+		if err := s.bus.UpdateSlab(ctx, slab, set, used); err != nil {
+			s.logger.Error(fmt.Sprintf("couldn't update slab: %s", err))
+			continue
+		}
+	}
+
+	s.logger.Info(fmt.Sprintf("successfully updated %d slabs", len(ms.slabs)))
+	jc.Encode(ms.slabs)
 }
 
 // shareContractsHandler handles the POST /contracts requests.
