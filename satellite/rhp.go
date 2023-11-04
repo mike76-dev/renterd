@@ -19,6 +19,10 @@ const (
 	// timeoutHostRevision is the amount of time we wait to receive the latest
 	// revision from the host.
 	timeoutHostRevision = 15 * time.Second
+
+	// metadataRequestMaxSize should be high enough to allow uploading or
+	// downloading a partial slab.
+	metadataRequestMaxSize = 1e9
 )
 
 var (
@@ -1042,8 +1046,14 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 		jc.Check("ERROR", errors.New("contract set cannot be empty"))
 		return
 	}
+
 	s.logger.Info("requesting file metadata from the satellite")
 	ctx := jc.Request.Context()
+
+	gp, err := s.bus.GougingParams(ctx)
+	if jc.Check("could not get gouging parameters", err) != nil {
+		return
+	}
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 	rmr := requestMetadataRequest{
@@ -1080,7 +1090,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 			return err
 		}
 
-		if err := t.ReadResponse(&rf, 65536); err != nil {
+		if err := t.ReadResponse(&rf, metadataRequestMaxSize); err != nil {
 			return err
 		}
 
@@ -1100,8 +1110,9 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 	var objects []object.Object
 	for _, fm := range rf.metadata {
 		obj := object.Object{
-			Key:   fm.Key,
-			Slabs: fm.Slabs,
+			Key:          fm.Key,
+			Slabs:        fm.Slabs,
+			PartialSlabs: fm.PartialSlabs,
 		}
 		h2c := make(map[types.PublicKey]types.FileContractID)
 		for _, c := range contracts {
@@ -1123,11 +1134,24 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 		}
 		_, err = s.bus.Object(ctx, fm.Bucket, fm.Path, api.GetObjectOptions{})
 		if err == nil {
-			err = s.bus.DeleteObject(ctx, fm.Bucket, fm.Path, api.DeleteObjectOptions{})
+			s.logger.Error(fmt.Sprintf("object already present: %s/%s", fm.Bucket, fm.Path))
+			continue
+		}
+		if len(fm.Data) > 0 {
+			// Deduct redundancy params from the first slab. If there are
+			// no complete slabs, use the current redundancy settings.
+			ms := gp.RedundancySettings.MinShards
+			ts := gp.RedundancySettings.TotalShards
+			if len(fm.Slabs) > 0 {
+				ms = int(fm.Slabs[0].MinShards)
+				ts = len(fm.Slabs[0].Shards)
+			}
+			ps, _, err := s.bus.AddPartialSlab(ctx, fm.Data, uint8(ms), uint8(ts), set)
 			if err != nil {
-				s.logger.Error(fmt.Sprintf("couldn't delete object: %s", err))
+				s.logger.Error(fmt.Sprintf("couldn't add partial slab: %s", err))
 				continue
 			}
+			obj.PartialSlabs = ps
 		}
 		if err := s.bus.AddObject(ctx, fm.Bucket, fm.Path, set, obj, used, api.AddObjectOptions{
 			ETag:     fm.ETag,
