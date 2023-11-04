@@ -42,8 +42,10 @@ type busClient interface {
 	ListBuckets(ctx context.Context) (buckets []api.Bucket, err error)
 	ListObjects(ctx context.Context, bucket string, opts api.ListObjectOptions) (resp api.ObjectsListResponse, err error)
 	Object(ctx context.Context, bucket, path string, options api.GetObjectOptions) (api.ObjectsResponse, error)
+	FetchPartialSlab(ctx context.Context, key object.EncryptionKey, offset, length uint32) ([]byte, error)
 	RecordContractSpending(ctx context.Context, records []api.ContractSpendingRecord) error
 	SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) error
+	Slab(ctx context.Context, key object.EncryptionKey) (slab object.Slab, err error)
 	UpdateSlab(ctx context.Context, s object.Slab, contractSet string, usedContracts map[types.PublicKey]types.FileContractID) error
 }
 

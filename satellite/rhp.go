@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	rhpv2 "go.sia.tech/core/rhp/v2"
@@ -974,13 +975,36 @@ func (s *Satellite) transferMetadata(ctx context.Context) {
 				s.logger.Error(fmt.Sprintf("couldn't find object %s: %s", entry.Name, err))
 				continue
 			}
+			var data []byte
+			if len(resp.Object.PartialSlabs) > 0 {
+				ps := resp.Object.PartialSlabs[0]
+				data, err = s.bus.FetchPartialSlab(ctx, ps.Key, ps.Offset, ps.Length)
+				if err != nil && strings.Contains(err.Error(), api.ErrObjectNotFound.Error()) {
+					// Check if the slab was already uploaded.
+					slab, err := s.bus.Slab(ctx, ps.Key)
+					if err != nil {
+						s.logger.Error(fmt.Sprintf("failed to fetch uploaded partial slab: %v", err))
+						continue
+					}
+					resp.Object.Slabs = append(resp.Object.Slabs, object.SlabSlice{
+						Slab:   slab,
+						Offset: ps.Offset,
+						Length: ps.Length,
+					})
+				} else if err != nil {
+					s.logger.Error(fmt.Sprintf("failed to fetch partial slab: %v", err))
+					continue
+				}
+			}
 			StaticSatellite.SaveMetadata(ctx, FileMetadata{
-				Key:      resp.Object.Key,
-				Bucket:   bucket.Name,
-				Path:     entry.Name,
-				ETag:     resp.Object.ETag,
-				MimeType: resp.Object.MimeType,
-				Slabs:    resp.Object.Slabs,
+				Key:          resp.Object.Key,
+				Bucket:       bucket.Name,
+				Path:         entry.Name,
+				ETag:         resp.Object.ETag,
+				MimeType:     resp.Object.MimeType,
+				Slabs:        resp.Object.Slabs,
+				PartialSlabs: resp.Object.PartialSlabs,
+				Data:         data,
 			})
 		}
 	}
