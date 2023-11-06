@@ -47,6 +47,7 @@ type busClient interface {
 	SetContractSet(ctx context.Context, set string, contracts []types.FileContractID) error
 	Slab(ctx context.Context, key object.EncryptionKey) (slab object.Slab, err error)
 	UpdateSlab(ctx context.Context, s object.Slab, contractSet string, usedContracts map[types.PublicKey]types.FileContractID) error
+	UploadPackingSettings(ctx context.Context) (ups api.UploadPackingSettings, err error)
 }
 
 // workerClient is the interface for renterd/worker.

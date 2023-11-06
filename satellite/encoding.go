@@ -52,6 +52,7 @@ func (fr *formRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	fr.MaxSectorAccessPrice.EncodeTo(e)
 	fr.MinMaxCollateral.EncodeTo(e)
 	e.WriteUint64(fr.BlockHeightLeeway)
+	e.WriteBool(fr.UploadPacking)
 }
 
 // DecodeFrom implements types.ProtocolObject.
@@ -89,6 +90,7 @@ func (rr *renewRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	rr.MaxSectorAccessPrice.EncodeTo(e)
 	rr.MinMaxCollateral.EncodeTo(e)
 	e.WriteUint64(rr.BlockHeightLeeway)
+	e.WriteBool(rr.UploadPacking)
 }
 
 // DecodeFrom implements types.ProtocolObject.
@@ -268,6 +270,7 @@ func (usr *updateSettingsRequest) EncodeToWithoutSignature(e *types.Encoder) {
 		usr.MaxSectorAccessPrice.EncodeTo(e)
 		usr.MinMaxCollateral.EncodeTo(e)
 		e.WriteUint64(usr.BlockHeightLeeway)
+		e.WriteBool(usr.UploadPacking)
 	}
 }
 

@@ -72,6 +72,8 @@ type formRequest struct {
 	MinMaxCollateral     types.Currency
 	BlockHeightLeeway    uint64
 
+	UploadPacking bool
+
 	Signature types.Signature
 }
 
@@ -116,6 +118,8 @@ type renewRequest struct {
 	MaxSectorAccessPrice types.Currency
 	MinMaxCollateral     types.Currency
 	BlockHeightLeeway    uint64
+
+	UploadPacking bool
 
 	Signature types.Signature
 }
@@ -207,6 +211,8 @@ type updateSettingsRequest struct {
 	MaxSectorAccessPrice types.Currency
 	MinMaxCollateral     types.Currency
 	BlockHeightLeeway    uint64
+
+	UploadPacking bool
 
 	Signature types.Signature
 }
@@ -388,6 +394,11 @@ func (s *Satellite) formContractsHandler(jc jape.Context) {
 		return
 	}
 
+	ups, err := s.bus.UploadPackingSettings(ctx)
+	if jc.Check("could not get upload packing settings", err) != nil {
+		return
+	}
+
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 
 	fr := formRequest{
@@ -412,6 +423,8 @@ func (s *Satellite) formContractsHandler(jc jape.Context) {
 		MaxSectorAccessPrice: gp.GougingSettings.MaxRPCPrice.Mul64(10),
 		MinMaxCollateral:     gp.GougingSettings.MinMaxCollateral,
 		BlockHeightLeeway:    uint64(gp.GougingSettings.HostBlockHeightLeeway),
+
+		UploadPacking: ups.Enabled,
 	}
 
 	s.logger.Debug(fmt.Sprintf("trying to form %v contracts", fr.Hosts))
@@ -494,6 +507,11 @@ func (s *Satellite) renewContractsHandler(jc jape.Context) {
 		return
 	}
 
+	ups, err := s.bus.UploadPackingSettings(ctx)
+	if jc.Check("could not get upload packing settings", err) != nil {
+		return
+	}
+
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 
 	rr := renewRequest{
@@ -518,6 +536,8 @@ func (s *Satellite) renewContractsHandler(jc jape.Context) {
 		MaxSectorAccessPrice: gp.GougingSettings.MaxRPCPrice.Mul64(10),
 		MinMaxCollateral:     gp.GougingSettings.MinMaxCollateral,
 		BlockHeightLeeway:    uint64(gp.GougingSettings.HostBlockHeightLeeway),
+
+		UploadPacking: ups.Enabled,
 	}
 
 	s.logger.Debug(fmt.Sprintf("trying to renew %v contracts", len(rr.Contracts)))
@@ -895,6 +915,11 @@ func (s *Satellite) settingsHandlerPOST(jc jape.Context) {
 		return
 	}
 
+	ups, err := s.bus.UploadPackingSettings(ctx)
+	if jc.Check("could not get upload packing settings", err) != nil {
+		return
+	}
+
 	ac, err := s.ap.Config()
 	if jc.Check("could not get autopilot config", err) != nil {
 		return
@@ -934,6 +959,8 @@ func (s *Satellite) settingsHandlerPOST(jc jape.Context) {
 		MaxSectorAccessPrice: gp.GougingSettings.MaxRPCPrice.Mul64(10),
 		MinMaxCollateral:     gp.GougingSettings.MinMaxCollateral,
 		BlockHeightLeeway:    uint64(gp.GougingSettings.HostBlockHeightLeeway),
+
+		UploadPacking: ups.Enabled,
 	}
 
 	h := types.NewHasher()
