@@ -198,6 +198,9 @@ func (c *contractor) performContractMaintenance(ctx context.Context, w Worker) (
 		if rs.AutoRepairFiles {
 			satellite.StaticSatellite.RequestSlabs(sctx, state.cfg.Contracts.Set)
 		}
+		if rs.BackupFileMetadata {
+			satellite.StaticSatellite.RequestMetadata(ctx, state.cfg.Contracts.Set)
+		}
 	}
 
 	// fetch current contract set
