@@ -191,6 +191,7 @@ type updateSettingsRequest struct {
 	AutoRenewContracts bool
 	BackupFileMetadata bool
 	AutoRepairFiles    bool
+	ProxyUploads       bool
 	SecretKey          types.PrivateKey
 	AccountKey         types.PrivateKey
 
@@ -937,6 +938,7 @@ func (s *Satellite) settingsHandlerPOST(jc jape.Context) {
 		AutoRenewContracts: settings.AutoRenewContracts,
 		BackupFileMetadata: settings.BackupFileMetadata,
 		AutoRepairFiles:    settings.AutoRepairFiles,
+		ProxyUploads:       settings.ProxyUploads,
 		SecretKey:          s.renterKey,
 		AccountKey:         s.accountKey,
 

@@ -232,6 +232,7 @@ func (settings *RenterSettings) DecodeFrom(d *types.Decoder) {
 	settings.AutoRenewContracts = d.ReadBool()
 	settings.BackupFileMetadata = d.ReadBool()
 	settings.AutoRepairFiles = d.ReadBool()
+	settings.ProxyUploads = d.ReadBool()
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -247,6 +248,7 @@ func (usr *updateSettingsRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	e.WriteBool(usr.AutoRenewContracts)
 	e.WriteBool(usr.BackupFileMetadata)
 	e.WriteBool(usr.AutoRepairFiles)
+	e.WriteBool(usr.ProxyUploads)
 	if usr.AutoRenewContracts || usr.AutoRepairFiles {
 		e.WriteBytes(usr.SecretKey)
 	}

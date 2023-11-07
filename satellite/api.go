@@ -78,6 +78,7 @@ type RenterSettings struct {
 	AutoRenewContracts bool `json:"autoRenew"`
 	BackupFileMetadata bool `json:"backupMetadata"`
 	AutoRepairFiles    bool `json:"autoRepair"`
+	ProxyUploads       bool `json:"proxyUploads"`
 }
 
 // FileMetadata contains the uploaded file metadata.
