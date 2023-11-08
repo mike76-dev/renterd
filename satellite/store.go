@@ -34,6 +34,7 @@ func (s *ephemeralStore) setConfig(c Config) error {
 	if (pk != types.PublicKey{}) {
 		return s.addSatellite(SatelliteInfo{
 			Address:    c.Address,
+			MuxPort:    c.MuxPort,
 			PublicKey:  c.PublicKey,
 			RenterSeed: c.RenterSeed,
 		})

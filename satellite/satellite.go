@@ -240,6 +240,7 @@ var cfg Config
 func init() {
 	parseEnvVar("RENTERD_SATELLITE_ENABLED", &cfg.Enabled)
 	parseEnvVar("RENTERD_SATELLITE_ADDR", &cfg.Address)
+	parseEnvVar("RENTERD_SATELLITE_MUX", &cfg.MuxPort)
 	parseEnvVar("RENTERD_SATELLITE_KEY", &cfg.PublicKey)
 	parseEnvVar("RENTERD_SATELLITE_SEED", &cfg.RenterSeed)
 }

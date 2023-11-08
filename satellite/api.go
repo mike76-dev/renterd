@@ -44,6 +44,7 @@ type Config struct {
 // SatelliteInfo contains the information about the satellite.
 type SatelliteInfo struct {
 	Address    string          `json:"address"`
+	MuxPort    string          `json:"muxPort"`
 	PublicKey  types.PublicKey `json:"publicKey"`
 	RenterSeed []byte          `json:"renterSeed"`
 }
