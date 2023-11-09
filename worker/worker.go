@@ -1124,6 +1124,16 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 		return
 	}
 
+	// fetch the satellite settings
+	settings, err := satellite.StaticSatellite.GetSettings(ctx)
+	if jc.Check("couldn't fetch satellite settings", err) != nil {
+		return
+	}
+	if settings.ProxyUploads {
+		jc.Check("couldn't upload object", satellite.UploadObject(jc.Request.Body, bucket, jc.PathParam("path")))
+		return
+	}
+
 	// cancel the upload if no contract set is specified
 	if up.ContractSet == "" {
 		jc.Error(api.ErrContractSetNotSpecified, http.StatusBadRequest)

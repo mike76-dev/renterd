@@ -4,9 +4,17 @@ import (
 	"encoding/hex"
 	"strings"
 
+	rhpv2 "go.sia.tech/core/rhp/v2"
 	"go.sia.tech/core/types"
+	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/object"
 )
+
+// requestRequest is used to request existing contracts.
+type requestRequest struct {
+	PubKey    types.PublicKey
+	Signature types.Signature
+}
 
 // EncodeTo implements types.ProtocolObject.
 func (rr *requestRequest) EncodeTo(e *types.Encoder) {
@@ -23,6 +31,35 @@ func (rr *requestRequest) EncodeToWithoutSignature(e *types.Encoder) {
 // DecodeFrom implements types.ProtocolObject.
 func (rr *requestRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
+}
+
+// formRequest is used to request contract formation.
+type formRequest struct {
+	PubKey      types.PublicKey
+	SecretKey   types.PrivateKey
+	Hosts       uint64
+	Period      uint64
+	RenewWindow uint64
+
+	Storage  uint64
+	Upload   uint64
+	Download uint64
+
+	MinShards   uint64
+	TotalShards uint64
+
+	MaxRPCPrice          types.Currency
+	MaxContractPrice     types.Currency
+	MaxDownloadPrice     types.Currency
+	MaxUploadPrice       types.Currency
+	MaxStoragePrice      types.Currency
+	MaxSectorAccessPrice types.Currency
+	MinMaxCollateral     types.Currency
+	BlockHeightLeeway    uint64
+
+	UploadPacking bool
+
+	Signature types.Signature
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -58,6 +95,35 @@ func (fr *formRequest) EncodeToWithoutSignature(e *types.Encoder) {
 // DecodeFrom implements types.ProtocolObject.
 func (fr *formRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
+}
+
+// renewRequest is used to request contract renewal.
+type renewRequest struct {
+	PubKey      types.PublicKey
+	SecretKey   types.PrivateKey
+	Contracts   []types.FileContractID
+	Period      uint64
+	RenewWindow uint64
+
+	Storage  uint64
+	Upload   uint64
+	Download uint64
+
+	MinShards   uint64
+	TotalShards uint64
+
+	MaxRPCPrice          types.Currency
+	MaxContractPrice     types.Currency
+	MaxDownloadPrice     types.Currency
+	MaxUploadPrice       types.Currency
+	MaxStoragePrice      types.Currency
+	MaxSectorAccessPrice types.Currency
+	MinMaxCollateral     types.Currency
+	BlockHeightLeeway    uint64
+
+	UploadPacking bool
+
+	Signature types.Signature
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -98,6 +164,16 @@ func (rr *renewRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
 }
 
+// updateRequest is used to send a new revision.
+type updateRequest struct {
+	PubKey      types.PublicKey
+	Contract    rhpv2.ContractRevision
+	Uploads     types.Currency
+	Downloads   types.Currency
+	FundAccount types.Currency
+	Signature   types.Signature
+}
+
 // EncodeTo implements types.ProtocolObject.
 func (ur *updateRequest) EncodeTo(e *types.Encoder) {
 	ur.EncodeToWithoutSignature(e)
@@ -121,6 +197,17 @@ func (ur *updateRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
 }
 
+// extendedContract contains the contract and its metadata.
+type extendedContract struct {
+	contract            rhpv2.ContractRevision
+	startHeight         uint64
+	totalCost           types.Currency
+	uploadSpending      types.Currency
+	downloadSpending    types.Currency
+	fundAccountSpending types.Currency
+	renewedFrom         types.FileContractID
+}
+
 // EncodeTo implements types.ProtocolObject.
 func (ec *extendedContract) EncodeTo(e *types.Encoder) {
 	// Nothing to do here.
@@ -139,6 +226,11 @@ func (ec *extendedContract) DecodeFrom(d *types.Decoder) {
 	ec.renewedFrom.DecodeFrom(d)
 }
 
+// extendedContractSet is a collection of extendedContracts.
+type extendedContractSet struct {
+	contracts []extendedContract
+}
+
 // EncodeTo implements types.ProtocolObject.
 func (ecs *extendedContractSet) EncodeTo(e *types.Encoder) {
 	// Nothing to do here.
@@ -154,6 +246,24 @@ func (ecs *extendedContractSet) DecodeFrom(d *types.Decoder) {
 		ecs.contracts = append(ecs.contracts, ec)
 		num--
 	}
+}
+
+// formContractRequest is used to request contract formation using
+// the new Renter-Satellite protocol.
+type formContractRequest struct {
+	PubKey    types.PublicKey
+	RenterKey types.PublicKey
+	HostKey   types.PublicKey
+	EndHeight uint64
+
+	Storage  uint64
+	Upload   uint64
+	Download uint64
+
+	MinShards   uint64
+	TotalShards uint64
+
+	Signature types.Signature
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -181,6 +291,23 @@ func (fcr *formContractRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
 }
 
+// renewContractRequest is used to request contract renewal using
+// the new Renter-Satellite protocol.
+type renewContractRequest struct {
+	PubKey    types.PublicKey
+	Contract  types.FileContractID
+	EndHeight uint64
+
+	Storage  uint64
+	Upload   uint64
+	Download uint64
+
+	MinShards   uint64
+	TotalShards uint64
+
+	Signature types.Signature
+}
+
 // EncodeTo implements types.ProtocolObject.
 func (rcr *renewContractRequest) EncodeTo(e *types.Encoder) {
 	rcr.EncodeToWithoutSignature(e)
@@ -203,6 +330,12 @@ func (rcr *renewContractRequest) EncodeToWithoutSignature(e *types.Encoder) {
 // DecodeFrom implements types.ProtocolObject.
 func (rcr *renewContractRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
+}
+
+// getSettingsRequest is used to retrieve the renter's opt-in settings.
+type getSettingsRequest struct {
+	PubKey    types.PublicKey
+	Signature types.Signature
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -233,6 +366,39 @@ func (settings *RenterSettings) DecodeFrom(d *types.Decoder) {
 	settings.BackupFileMetadata = d.ReadBool()
 	settings.AutoRepairFiles = d.ReadBool()
 	settings.ProxyUploads = d.ReadBool()
+}
+
+// updateSettingsRequest is used to update the renter's opt-in settings.
+type updateSettingsRequest struct {
+	PubKey             types.PublicKey
+	AutoRenewContracts bool
+	BackupFileMetadata bool
+	AutoRepairFiles    bool
+	ProxyUploads       bool
+	SecretKey          types.PrivateKey
+	AccountKey         types.PrivateKey
+
+	Hosts       uint64
+	Period      uint64
+	RenewWindow uint64
+	Storage     uint64
+	Upload      uint64
+	Download    uint64
+	MinShards   uint64
+	TotalShards uint64
+
+	MaxRPCPrice          types.Currency
+	MaxContractPrice     types.Currency
+	MaxDownloadPrice     types.Currency
+	MaxUploadPrice       types.Currency
+	MaxStoragePrice      types.Currency
+	MaxSectorAccessPrice types.Currency
+	MinMaxCollateral     types.Currency
+	BlockHeightLeeway    uint64
+
+	UploadPacking bool
+
+	Signature types.Signature
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -281,6 +447,12 @@ func (usr *updateSettingsRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
 }
 
+// revisionHash is used to read the revision hash provided by the
+// satellite.
+type revisionHash struct {
+	RevisionHash types.Hash256
+}
+
 // EncodeTo implements types.ProtocolObject.
 func (rh *revisionHash) EncodeTo(e *types.Encoder) {
 	// Nothing to do here.
@@ -289,6 +461,12 @@ func (rh *revisionHash) EncodeTo(e *types.Encoder) {
 // DecodeFrom implements types.ProtocolObject.
 func (rh *revisionHash) DecodeFrom(d *types.Decoder) {
 	rh.RevisionHash.DecodeFrom(d)
+}
+
+// renterSignature is used to send the revision signature to the
+// satellite.
+type renterSignature struct {
+	Signature types.Signature
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -382,6 +560,13 @@ func (fm *FileMetadata) DecodeFrom(d *types.Decoder) {
 	fm.Data = d.ReadBytes()
 }
 
+// saveMetadataRequest is used to save file metadata on the satellite.
+type saveMetadataRequest struct {
+	PubKey    types.PublicKey
+	Metadata  FileMetadata
+	Signature types.Signature
+}
+
 // EncodeTo implements types.ProtocolObject.
 func (smr *saveMetadataRequest) EncodeTo(e *types.Encoder) {
 	smr.EncodeToWithoutSignature(e)
@@ -400,6 +585,11 @@ func (smr *saveMetadataRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
 }
 
+// renterFiles is a collection of FileMetadata.
+type renterFiles struct {
+	metadata []FileMetadata
+}
+
 // EncodeTo implements types.ProtocolObject.
 func (rf *renterFiles) EncodeTo(e *types.Encoder) {
 	// Nothing to do here.
@@ -415,6 +605,13 @@ func (rf *renterFiles) DecodeFrom(d *types.Decoder) {
 		rf.metadata = append(rf.metadata, fm)
 		num--
 	}
+}
+
+// requestMetadataRequest is used to request file metadata.
+type requestMetadataRequest struct {
+	PubKey         types.PublicKey
+	PresentObjects []BucketFiles
+	Signature      types.Signature
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -440,6 +637,14 @@ func (rmr *requestMetadataRequest) EncodeToWithoutSignature(e *types.Encoder) {
 // DecodeFrom implements types.ProtocolObject.
 func (rmr *requestMetadataRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
+}
+
+// updateSlabRequest is used to update a slab after a successful migration.
+type updateSlabRequest struct {
+	PubKey    types.PublicKey
+	Slab      object.Slab
+	Packed    bool
+	Signature types.Signature
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -469,6 +674,11 @@ func (usr *updateSlabRequest) EncodeToWithoutSignature(e *types.Encoder) {
 // DecodeFrom implements types.ProtocolObject.
 func (usr *updateSlabRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
+}
+
+// modifiedSlabs is a list of slabs.
+type modifiedSlabs struct {
+	slabs []object.Slab
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -502,6 +712,12 @@ func (ms *modifiedSlabs) DecodeFrom(d *types.Decoder) {
 	}
 }
 
+// requestSlabsRequest is used to request modified slabs.
+type requestSlabsRequest struct {
+	PubKey    types.PublicKey
+	Signature types.Signature
+}
+
 // EncodeTo implements types.ProtocolObject.
 func (rsr *requestSlabsRequest) EncodeTo(e *types.Encoder) {
 	rsr.EncodeToWithoutSignature(e)
@@ -517,6 +733,13 @@ func (rsr *requestSlabsRequest) EncodeToWithoutSignature(e *types.Encoder) {
 // DecodeFrom implements types.ProtocolObject.
 func (rsr *requestSlabsRequest) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
+}
+
+// shareRequest is used to send a set of contracts to the satellite.
+type shareRequest struct {
+	PubKey    types.PublicKey
+	Contracts []api.Contract
+	Signature types.Signature
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -545,5 +768,65 @@ func (sr *shareRequest) EncodeToWithoutSignature(e *types.Encoder) {
 
 // DecodeFrom implements types.ProtocolObject.
 func (sr *shareRequest) DecodeFrom(d *types.Decoder) {
+	// Nothing to do here.
+}
+
+// uploadRequest is used to upload a file to the satellite via RHP3.
+type uploadRequest struct {
+	PubKey    types.PublicKey
+	Bucket    string
+	Path      string
+	Signature types.Signature
+}
+
+// EncodeTo implements types.ProtocolObject.
+func (ur *uploadRequest) EncodeTo(e *types.Encoder) {
+	ur.EncodeToWithoutSignature(e)
+	ur.Signature.EncodeTo(e)
+}
+
+// EncodeToWithoutSignature does the same as EncodeTo but
+// leaves the signature out.
+func (ur *uploadRequest) EncodeToWithoutSignature(e *types.Encoder) {
+	e.Write(ur.PubKey[:])
+	e.WriteString(ur.Bucket)
+	e.WriteString(ur.Path)
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (ur *uploadRequest) DecodeFrom(d *types.Decoder) {
+	// Nothing to do here.
+}
+
+// uploadResponse is the response type for uploadRequest.
+type uploadResponse struct {
+	DataSize uint64
+}
+
+// EncodeTo implements types.ProtocolObject.
+func (ur *uploadResponse) EncodeTo(e *types.Encoder) {
+	// Nothing to do here.
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (ur *uploadResponse) DecodeFrom(d *types.Decoder) {
+	ur.DataSize = d.ReadUint64()
+}
+
+// uploadData contains a chunk of data and an indicator if there
+// is more data available.
+type uploadData struct {
+	Data []byte
+	More bool
+}
+
+// EncodeTo implements types.ProtocolObject.
+func (ud *uploadData) EncodeTo(e *types.Encoder) {
+	e.WriteBytes(ud.Data)
+	e.WriteBool(ud.More)
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (ud *uploadData) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
 }
