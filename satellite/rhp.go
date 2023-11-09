@@ -1208,7 +1208,7 @@ func UploadObject(r io.Reader, bucket, path string) error {
 
 	err = withTransportV3(ctx, cfg.PublicKey, addr, func(t *rhpv3.Transport) (err error) {
 		stream := t.DialStream()
-		stream.SetDeadline(time.Now().Add(10 * time.Second))
+		stream.SetDeadline(time.Now().Add(30 * time.Second))
 		err = stream.WriteRequest(specifierUploadFile, &req)
 		if err != nil {
 			return err
@@ -1220,19 +1220,29 @@ func UploadObject(r io.Reader, bucket, path string) error {
 			return err
 		}
 
+		dataLen := uint64(1048576)
+		buf := make([]byte, dataLen)
 		var ud uploadData
-		if resp.DataSize > 0 {
-			buf := make([]byte, resp.DataSize)
+		var total uint64
+		incompleteChunk := resp.DataSize % dataLen
+		completeChunks := resp.DataSize - incompleteChunk
+		for total < completeChunks {
+			_, err := io.ReadFull(r, buf)
+			if err != nil {
+				return stream.WriteResponse(&ud)
+			}
+			total += dataLen
+		}
+		if incompleteChunk > 0 {
+			buf := make([]byte, incompleteChunk)
 			_, err := io.ReadFull(r, buf)
 			if err != nil {
 				return stream.WriteResponse(&ud)
 			}
 		}
 
-		dataLen := uint64(65536)
-		buf := make([]byte, dataLen)
 		for {
-			stream.SetDeadline(time.Now().Add(10 * time.Second))
+			stream.SetDeadline(time.Now().Add(30 * time.Second))
 			numBytes, err := io.ReadFull(r, buf)
 			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 				return err
