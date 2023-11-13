@@ -1252,8 +1252,10 @@ func UploadObject(r io.Reader, bucket, path string) error {
 			}
 			ud.Data = buf[:numBytes]
 			ud.More = err == nil
-			err = stream.WriteResponse(&ud)
-			if err != nil {
+			if err := stream.WriteResponse(&ud); err != nil {
+				return err
+			}
+			if err := stream.ReadResponse(&resp, 1024); err != nil {
 				return err
 			}
 			if !ud.More {
