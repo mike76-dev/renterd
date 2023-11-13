@@ -415,10 +415,10 @@ func (usr *updateSettingsRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	e.WriteBool(usr.BackupFileMetadata)
 	e.WriteBool(usr.AutoRepairFiles)
 	e.WriteBool(usr.ProxyUploads)
-	if usr.AutoRenewContracts || usr.AutoRepairFiles || usr.ProxyUploads {
+	if usr.AutoRenewContracts || usr.BackupFileMetadata || usr.AutoRepairFiles || usr.ProxyUploads {
 		e.WriteBytes(usr.SecretKey)
 	}
-	if usr.AutoRepairFiles || usr.ProxyUploads {
+	if usr.BackupFileMetadata || usr.AutoRepairFiles || usr.ProxyUploads {
 		e.WriteBytes(usr.AccountKey)
 	}
 	if usr.AutoRenewContracts {
