@@ -970,8 +970,11 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 		}
 		_, err = s.bus.Object(ctx, fm.Bucket, fm.Path, api.GetObjectOptions{})
 		if err == nil {
-			s.logger.Error(fmt.Sprintf("object already present: %s/%s", fm.Bucket, fm.Path))
-			continue
+			err = s.bus.DeleteObject(ctx, fm.Bucket, fm.Path, api.DeleteObjectOptions{})
+			if err != nil {
+				s.logger.Error(fmt.Sprintf("couldn't delete object: %s", err))
+				continue
+			}
 		}
 		if len(fm.Data) > 0 {
 			// Deduct redundancy params from the first slab. If there are
