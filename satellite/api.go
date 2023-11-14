@@ -39,15 +39,15 @@ type UpdateRevisionRequest struct {
 type Config struct {
 	Enabled bool `json:"enabled"`
 	SatelliteInfo
+	EncryptionKey object.EncryptionKey `json:"encryptionKey"`
 }
 
 // SatelliteInfo contains the information about the satellite.
 type SatelliteInfo struct {
-	Address       string               `json:"address"`
-	MuxPort       string               `json:"muxPort"`
-	PublicKey     types.PublicKey      `json:"publicKey"`
-	RenterSeed    []byte               `json:"renterSeed"`
-	EncryptionKey object.EncryptionKey `json:"encryptionKey"`
+	Address    string          `json:"address"`
+	MuxPort    string          `json:"muxPort"`
+	PublicKey  types.PublicKey `json:"publicKey"`
+	RenterSeed []byte          `json:"renterSeed"`
 }
 
 // SatellitesAllResponse is the response type for the /satellites request.

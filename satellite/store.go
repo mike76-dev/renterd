@@ -34,11 +34,10 @@ func (s *ephemeralStore) setConfig(c Config) error {
 	pk := c.PublicKey
 	if (pk != types.PublicKey{}) {
 		return s.addSatellite(SatelliteInfo{
-			Address:       c.Address,
-			MuxPort:       c.MuxPort,
-			PublicKey:     c.PublicKey,
-			RenterSeed:    c.RenterSeed,
-			EncryptionKey: c.EncryptionKey,
+			Address:    c.Address,
+			MuxPort:    c.MuxPort,
+			PublicKey:  c.PublicKey,
+			RenterSeed: c.RenterSeed,
 		})
 	}
 	return nil
@@ -130,20 +129,8 @@ func (s *jsonStore) load() error {
 	}
 	s.config = p.Config
 	s.satellites = p.Satellites
-	var compat bool
-	for pk, satellite := range s.satellites {
-		if satellite.EncryptionKey == (object.EncryptionKey{}) {
-			satellite.EncryptionKey = object.GenerateEncryptionKey()
-			s.satellites[pk] = satellite
-			compat = true
-		}
-	}
 	if s.config.EncryptionKey == (object.EncryptionKey{}) {
-		s.config.EncryptionKey = s.satellites[s.config.PublicKey].EncryptionKey
-		compat = true
-	}
-
-	if compat {
+		s.config.EncryptionKey = object.GenerateEncryptionKey()
 		return s.save()
 	}
 
