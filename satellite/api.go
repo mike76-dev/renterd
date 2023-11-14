@@ -43,10 +43,11 @@ type Config struct {
 
 // SatelliteInfo contains the information about the satellite.
 type SatelliteInfo struct {
-	Address    string          `json:"address"`
-	MuxPort    string          `json:"muxPort"`
-	PublicKey  types.PublicKey `json:"publicKey"`
-	RenterSeed []byte          `json:"renterSeed"`
+	Address       string               `json:"address"`
+	MuxPort       string               `json:"muxPort"`
+	PublicKey     types.PublicKey      `json:"publicKey"`
+	RenterSeed    []byte               `json:"renterSeed"`
+	EncryptionKey object.EncryptionKey `json:"encryptionKey"`
 }
 
 // SatellitesAllResponse is the response type for the /satellites request.
