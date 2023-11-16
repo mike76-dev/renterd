@@ -479,12 +479,25 @@ func (rs *renterSignature) DecodeFrom(d *types.Decoder) {
 	// Nothing to do here.
 }
 
+// encodedFileMetadata contains the file metadata with certain
+// fields encoded.
+type encodedFileMetadata struct {
+	Key          object.EncryptionKey `json:"key"`
+	Bucket       [255]byte            `json:"bucket"`
+	Path         [255]byte            `json:"path"`
+	ETag         string               `json:"etag"`
+	MimeType     string               `json:"mime"`
+	Slabs        []object.SlabSlice   `json:"slabs"`
+	PartialSlabs []object.PartialSlab `json:"partialSlabs"`
+	Data         []byte               `json:"data"`
+}
+
 // EncodeTo implements types.ProtocolObject.
-func (fm *FileMetadata) EncodeTo(e *types.Encoder) {
+func (fm *encodedFileMetadata) EncodeTo(e *types.Encoder) {
 	key, _ := hex.DecodeString(strings.TrimPrefix(fm.Key.String(), "key:"))
 	e.Write(key[:])
-	e.WriteString(fm.Bucket)
-	e.WriteString(fm.Path)
+	e.Write(fm.Bucket[:])
+	e.Write(fm.Path[:])
 	e.WriteString(fm.ETag)
 	e.WriteString(fm.MimeType)
 	e.WritePrefix(len(fm.Slabs) + len(fm.PartialSlabs))
@@ -514,12 +527,12 @@ func (fm *FileMetadata) EncodeTo(e *types.Encoder) {
 }
 
 // DecodeFrom implements types.ProtocolObject.
-func (fm *FileMetadata) DecodeFrom(d *types.Decoder) {
+func (fm *encodedFileMetadata) DecodeFrom(d *types.Decoder) {
 	var key types.Hash256
 	d.Read(key[:])
 	fm.Key.UnmarshalText([]byte(strings.TrimPrefix(key.String(), "h:")))
-	fm.Bucket = d.ReadString()
-	fm.Path = d.ReadString()
+	d.Read(fm.Bucket[:])
+	d.Read(fm.Path[:])
 	fm.ETag = d.ReadString()
 	fm.MimeType = d.ReadString()
 	numSlabs := d.ReadPrefix()
@@ -563,7 +576,7 @@ func (fm *FileMetadata) DecodeFrom(d *types.Decoder) {
 // saveMetadataRequest is used to save file metadata on the satellite.
 type saveMetadataRequest struct {
 	PubKey    types.PublicKey
-	Metadata  FileMetadata
+	Metadata  encodedFileMetadata
 	Signature types.Signature
 }
 
@@ -587,7 +600,7 @@ func (smr *saveMetadataRequest) DecodeFrom(d *types.Decoder) {
 
 // renterFiles is a collection of FileMetadata.
 type renterFiles struct {
-	metadata []FileMetadata
+	metadata []encodedFileMetadata
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -598,19 +611,25 @@ func (rf *renterFiles) EncodeTo(e *types.Encoder) {
 // DecodeFrom implements types.ProtocolObject.
 func (rf *renterFiles) DecodeFrom(d *types.Decoder) {
 	num := d.ReadUint64()
-	rf.metadata = make([]FileMetadata, 0, num)
+	rf.metadata = make([]encodedFileMetadata, 0, num)
 	for num > 0 {
-		var fm FileMetadata
+		var fm encodedFileMetadata
 		fm.DecodeFrom(d)
 		rf.metadata = append(rf.metadata, fm)
 		num--
 	}
 }
 
+// encodedBucketFiles contains a list of filepaths within a single bucket.
+type encodedBucketFiles struct {
+	Name  [255]byte   `json:"name"`
+	Paths [][255]byte `json:"paths"`
+}
+
 // requestMetadataRequest is used to request file metadata.
 type requestMetadataRequest struct {
 	PubKey         types.PublicKey
-	PresentObjects []BucketFiles
+	PresentObjects []encodedBucketFiles
 	Signature      types.Signature
 }
 
@@ -626,10 +645,10 @@ func (rmr *requestMetadataRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	e.Write(rmr.PubKey[:])
 	e.WritePrefix(len(rmr.PresentObjects))
 	for _, po := range rmr.PresentObjects {
-		e.WriteString(po.Name)
+		e.Write(po.Name[:])
 		e.WritePrefix(len(po.Paths))
 		for _, p := range po.Paths {
-			e.WriteString(p)
+			e.Write(p[:])
 		}
 	}
 }
@@ -774,8 +793,8 @@ func (sr *shareRequest) DecodeFrom(d *types.Decoder) {
 // uploadRequest is used to upload a file to the satellite via RHP3.
 type uploadRequest struct {
 	PubKey    types.PublicKey
-	Bucket    string
-	Path      string
+	Bucket    [255]byte
+	Path      [255]byte
 	Signature types.Signature
 }
 
@@ -789,8 +808,8 @@ func (ur *uploadRequest) EncodeTo(e *types.Encoder) {
 // leaves the signature out.
 func (ur *uploadRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	e.Write(ur.PubKey[:])
-	e.WriteString(ur.Bucket)
-	e.WriteString(ur.Path)
+	e.Write(ur.Bucket[:])
+	e.Write(ur.Path[:])
 }
 
 // DecodeFrom implements types.ProtocolObject.

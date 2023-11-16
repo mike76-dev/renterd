@@ -1,6 +1,7 @@
 package satellite
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -836,16 +837,35 @@ func (s *Satellite) saveMetadataHandler(jc jape.Context) {
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 
+	encryptedBucket, err := encodeString(cfg.EncryptionKey, fmr.Metadata.Bucket)
+	if jc.Check("couldn't encode bucket", err) != nil {
+		return
+	}
+
+	encryptedPath, err := encodeString(cfg.EncryptionKey, fmr.Metadata.Path)
+	if jc.Check("couldn't encode path", err) != nil {
+		return
+	}
+
 	smr := saveMetadataRequest{
-		PubKey:   pk,
-		Metadata: fmr.Metadata,
+		PubKey: pk,
+		Metadata: encodedFileMetadata{
+			Key:          fmr.Metadata.Key,
+			Bucket:       encryptedBucket,
+			Path:         encryptedPath,
+			ETag:         fmr.Metadata.ETag,
+			MimeType:     fmr.Metadata.MimeType,
+			Slabs:        fmr.Metadata.Slabs,
+			PartialSlabs: fmr.Metadata.PartialSlabs,
+			Data:         fmr.Metadata.Data,
+		},
 	}
 
 	h := types.NewHasher()
 	smr.EncodeToWithoutSignature(h.E)
 	smr.Signature = sk.SignHash(h.Sum())
 
-	err := withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
+	err = withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
 		err = t.WriteRequest(specifierSaveMetadata, &smr)
 		if err != nil {
 			return
@@ -907,11 +927,19 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 		if jc.Check("couldn't requests present objects", err) != nil {
 			return
 		}
-		bf := BucketFiles{
-			Name: bucket.Name,
+		encryptedBucket, err := encodeString(cfg.EncryptionKey, bucket.Name)
+		if jc.Check("couldn't encode bucket", err) != nil {
+			return
+		}
+		bf := encodedBucketFiles{
+			Name: encryptedBucket,
 		}
 		for _, entry := range resp.Objects {
-			bf.Paths = append(bf.Paths, entry.Name)
+			encryptedPath, err := encodeString(cfg.EncryptionKey, entry.Name)
+			if jc.Check("couldn't encode path", err) != nil {
+				return
+			}
+			bf.Paths = append(bf.Paths, encryptedPath)
 		}
 		rmr.PresentObjects = append(rmr.PresentObjects, bf)
 	}
@@ -960,17 +988,28 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 				used[ss.Host] = h2c[ss.Host]
 			}
 		}
-		_, err := s.bus.Bucket(ctx, fm.Bucket)
+		bucket, err := decodeString(cfg.EncryptionKey, fm.Bucket)
 		if err != nil {
-			err = s.bus.CreateBucket(ctx, fm.Bucket, api.CreateBucketOptions{})
+			s.logger.Error(fmt.Sprintf("couldn't decode bucket: %s", err))
+			continue
+		}
+		path, err := decodeString(cfg.EncryptionKey, fm.Path)
+		if err != nil {
+			s.logger.Error(fmt.Sprintf("couldn't decode path: %s", err))
+			continue
+		}
+
+		_, err = s.bus.Bucket(ctx, bucket)
+		if err != nil {
+			err = s.bus.CreateBucket(ctx, bucket, api.CreateBucketOptions{})
 			if err != nil {
 				s.logger.Error(fmt.Sprintf("couldn't create bucket: %s", err))
 				continue
 			}
 		}
-		_, err = s.bus.Object(ctx, fm.Bucket, fm.Path, api.GetObjectOptions{})
+		_, err = s.bus.Object(ctx, bucket, path, api.GetObjectOptions{})
 		if err == nil {
-			err = s.bus.DeleteObject(ctx, fm.Bucket, fm.Path, api.DeleteObjectOptions{})
+			err = s.bus.DeleteObject(ctx, bucket, path, api.DeleteObjectOptions{})
 			if err != nil {
 				s.logger.Error(fmt.Sprintf("couldn't delete object: %s", err))
 				continue
@@ -992,7 +1031,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 			}
 			obj.PartialSlabs = ps
 		}
-		if err := s.bus.AddObject(ctx, fm.Bucket, fm.Path, set, obj, used, api.AddObjectOptions{
+		if err := s.bus.AddObject(ctx, bucket, path, set, obj, used, api.AddObjectOptions{
 			ETag:     fm.ETag,
 			MimeType: fm.MimeType,
 		}); err != nil {
@@ -1194,10 +1233,20 @@ func UploadObject(r io.Reader, bucket, path string) error {
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 
+	encryptedBucket, err := encodeString(cfg.EncryptionKey, bucket)
+	if err != nil {
+		return errors.New("couldn't encode bucket")
+	}
+
+	encryptedPath, err := encodeString(cfg.EncryptionKey, path)
+	if err != nil {
+		return errors.New("couldn't encode path")
+	}
+
 	req := uploadRequest{
 		PubKey: pk,
-		Bucket: bucket,
-		Path:   path,
+		Bucket: encryptedBucket,
+		Path:   encryptedPath,
 	}
 	h := types.NewHasher()
 	req.EncodeToWithoutSignature(h.E)
@@ -1267,4 +1316,45 @@ func UploadObject(r io.Reader, bucket, path string) error {
 	})
 
 	return err
+}
+
+// encodeString encrypts a string with the encryption key.
+func encodeString(key object.EncryptionKey, str string) (ciphertext [255]byte, err error) {
+	if len(str) > 255 {
+		err = errors.New("string length exceeds 255 bytes")
+		return
+	}
+
+	var plaintext [255]byte
+	copy(plaintext[:], []byte(str))
+	rs, err := key.Encrypt(bytes.NewReader(plaintext[:]), 0)
+	if err != nil {
+		return
+	}
+
+	ct, err := io.ReadAll(rs)
+	if err != nil {
+		return
+	}
+
+	copy(ciphertext[:], ct)
+	return
+}
+
+// decodeString decrypts a string encrypted with the encryption key.
+func decodeString(key object.EncryptionKey, ciphertext [255]byte) (string, error) {
+	var out bytes.Buffer
+	ws := key.Decrypt(&out, 0)
+	_, err := ws.Write(ciphertext[:])
+	if err != nil {
+		return "", err
+	}
+
+	b := out.Bytes()
+	i := bytes.Index(b, []byte{0})
+	if i < 0 {
+		i = len(b)
+	}
+
+	return string(b[:i]), nil
 }
