@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/gabriel-vasile/mimetype"
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	rhpv3 "go.sia.tech/core/rhp/v3"
 	"go.sia.tech/core/types"
@@ -1228,6 +1231,13 @@ func (s *Satellite) shareContractsHandler(jc jape.Context) {
 	}
 }
 
+func newMimeReader(r io.Reader) (mimeType string, recycled io.Reader, err error) {
+	buf := bytes.NewBuffer(nil)
+	mtype, err := mimetype.DetectReader(io.TeeReader(r, buf))
+	recycled = io.MultiReader(buf, r)
+	return mtype.String(), recycled, err
+}
+
 // UploadObject uploads a file to the satellite.
 func UploadObject(r io.Reader, bucket, path, mimeType string) error {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1239,6 +1249,25 @@ func UploadObject(r io.Reader, bucket, path, mimeType string) error {
 	}
 	if !cfg.Enabled {
 		return errors.New("couldn't upload object: satellite disabled")
+	}
+
+	// if not given, try decide on a mime type using the file extension
+	if mimeType == "" {
+		mimeType = mime.TypeByExtension(filepath.Ext(path))
+
+		// if mime type is still not known, wrap the reader with a mime reader
+		if mimeType == "" {
+			var err error
+			mimeType, r, err = newMimeReader(r)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	if err != nil {
+		return err
 	}
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
@@ -1295,7 +1324,7 @@ func UploadObject(r io.Reader, bucket, path, mimeType string) error {
 		incompleteChunk := resp.DataSize % dataLen
 		completeChunks := resp.DataSize - incompleteChunk
 		for total < completeChunks {
-			_, err := io.ReadFull(r, buf)
+			_, err := io.ReadFull(cr, buf)
 			if err != nil {
 				return stream.WriteResponse(&ud)
 			}
@@ -1303,7 +1332,7 @@ func UploadObject(r io.Reader, bucket, path, mimeType string) error {
 		}
 		if incompleteChunk > 0 {
 			buf := make([]byte, incompleteChunk)
-			_, err := io.ReadFull(r, buf)
+			_, err := io.ReadFull(cr, buf)
 			if err != nil {
 				return stream.WriteResponse(&ud)
 			}
@@ -1311,7 +1340,7 @@ func UploadObject(r io.Reader, bucket, path, mimeType string) error {
 
 		for {
 			stream.SetDeadline(time.Now().Add(30 * time.Second))
-			numBytes, err := io.ReadFull(r, buf)
+			numBytes, err := io.ReadFull(cr, buf)
 			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 				return err
 			}
