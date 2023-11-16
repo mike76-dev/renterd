@@ -847,6 +847,11 @@ func (s *Satellite) saveMetadataHandler(jc jape.Context) {
 		return
 	}
 
+	encryptedMimeType, err := encodeString(cfg.EncryptionKey, fmr.Metadata.MimeType)
+	if jc.Check("couldn't encode MIME type", err) != nil {
+		return
+	}
+
 	smr := saveMetadataRequest{
 		PubKey: pk,
 		Metadata: encodedFileMetadata{
@@ -854,7 +859,7 @@ func (s *Satellite) saveMetadataHandler(jc jape.Context) {
 			Bucket:       encryptedBucket,
 			Path:         encryptedPath,
 			ETag:         fmr.Metadata.ETag,
-			MimeType:     fmr.Metadata.MimeType,
+			MimeType:     encryptedMimeType,
 			Slabs:        fmr.Metadata.Slabs,
 			PartialSlabs: fmr.Metadata.PartialSlabs,
 			Data:         fmr.Metadata.Data,
@@ -998,6 +1003,11 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 			s.logger.Error(fmt.Sprintf("couldn't decode path: %s", err))
 			continue
 		}
+		mimeType, err := decodeString(cfg.EncryptionKey, fm.MimeType)
+		if err != nil {
+			s.logger.Error(fmt.Sprintf("couldn't decode MIME type: %s", err))
+			continue
+		}
 
 		_, err = s.bus.Bucket(ctx, bucket)
 		if err != nil {
@@ -1033,7 +1043,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 		}
 		if err := s.bus.AddObject(ctx, bucket, path, set, obj, used, api.AddObjectOptions{
 			ETag:     fm.ETag,
-			MimeType: fm.MimeType,
+			MimeType: mimeType,
 		}); err != nil {
 			s.logger.Error(fmt.Sprintf("couldn't add object: %s", err))
 			continue
@@ -1219,7 +1229,7 @@ func (s *Satellite) shareContractsHandler(jc jape.Context) {
 }
 
 // UploadObject uploads a file to the satellite.
-func UploadObject(r io.Reader, bucket, path string) error {
+func UploadObject(r io.Reader, bucket, path, mimeType string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1243,10 +1253,16 @@ func UploadObject(r io.Reader, bucket, path string) error {
 		return errors.New("couldn't encode path")
 	}
 
+	encryptedMimeType, err := encodeString(cfg.EncryptionKey, mimeType)
+	if err != nil {
+		return errors.New("couldn't encode MIME type")
+	}
+
 	req := uploadRequest{
-		PubKey: pk,
-		Bucket: encryptedBucket,
-		Path:   encryptedPath,
+		PubKey:   pk,
+		Bucket:   encryptedBucket,
+		Path:     encryptedPath,
+		MimeType: encryptedMimeType,
 	}
 	h := types.NewHasher()
 	req.EncodeToWithoutSignature(h.E)

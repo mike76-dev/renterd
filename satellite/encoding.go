@@ -486,7 +486,7 @@ type encodedFileMetadata struct {
 	Bucket       [255]byte            `json:"bucket"`
 	Path         [255]byte            `json:"path"`
 	ETag         string               `json:"etag"`
-	MimeType     string               `json:"mime"`
+	MimeType     [255]byte            `json:"mime"`
 	Slabs        []object.SlabSlice   `json:"slabs"`
 	PartialSlabs []object.PartialSlab `json:"partialSlabs"`
 	Data         []byte               `json:"data"`
@@ -499,7 +499,7 @@ func (fm *encodedFileMetadata) EncodeTo(e *types.Encoder) {
 	e.Write(fm.Bucket[:])
 	e.Write(fm.Path[:])
 	e.WriteString(fm.ETag)
-	e.WriteString(fm.MimeType)
+	e.Write(fm.MimeType[:])
 	e.WritePrefix(len(fm.Slabs) + len(fm.PartialSlabs))
 	for _, s := range fm.Slabs {
 		key, _ := hex.DecodeString(strings.TrimPrefix(s.Key.String(), "key:"))
@@ -534,7 +534,7 @@ func (fm *encodedFileMetadata) DecodeFrom(d *types.Decoder) {
 	d.Read(fm.Bucket[:])
 	d.Read(fm.Path[:])
 	fm.ETag = d.ReadString()
-	fm.MimeType = d.ReadString()
+	d.Read(fm.MimeType[:])
 	numSlabs := d.ReadPrefix()
 	for i := 0; i < numSlabs; i++ {
 		var k types.Hash256
@@ -795,6 +795,7 @@ type uploadRequest struct {
 	PubKey    types.PublicKey
 	Bucket    [255]byte
 	Path      [255]byte
+	MimeType  [255]byte
 	Signature types.Signature
 }
 
@@ -810,6 +811,7 @@ func (ur *uploadRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	e.Write(ur.PubKey[:])
 	e.Write(ur.Bucket[:])
 	e.Write(ur.Path[:])
+	e.Write(ur.MimeType[:])
 }
 
 // DecodeFrom implements types.ProtocolObject.
