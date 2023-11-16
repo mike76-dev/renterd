@@ -266,8 +266,20 @@ func (w *worker) upload(ctx context.Context, r io.Reader, bucket, path string, o
 		}
 	}
 
+	// fetch satellite config
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		return "", err
+	}
+
+	// create a stream cipher
+	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	if err != nil {
+		return "", err
+	}
+
 	// perform the upload
-	obj, partialSlabData, used, eTag, err := w.uploadManager.Upload(ctx, r, up, lockingPriorityUpload)
+	obj, partialSlabData, used, eTag, err := w.uploadManager.Upload(ctx, cr, up, lockingPriorityUpload)
 	if err != nil {
 		return "", fmt.Errorf("couldn't upload object: %w", err)
 	}
@@ -295,7 +307,6 @@ func (w *worker) upload(ctx context.Context, r io.Reader, bucket, path string, o
 	}
 
 	// backup the object metadata if the user has opted in
-	cfg, err := satellite.StaticSatellite.Config()
 	if err == nil && cfg.Enabled {
 		rs, err := satellite.StaticSatellite.GetSettings(ctx)
 		if err == nil && rs.BackupFileMetadata {

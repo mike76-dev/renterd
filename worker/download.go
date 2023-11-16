@@ -17,6 +17,7 @@ import (
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/object"
+	"go.sia.tech/renterd/satellite"
 	"go.sia.tech/renterd/tracing"
 	"go.uber.org/zap"
 	"lukechampine.com/frand"
@@ -199,6 +200,15 @@ func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o o
 		span.End()
 	}()
 
+	// fetch satellite config
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		return err
+	}
+
+	// create stream cipher
+	masterCw := cfg.EncryptionKey.Decrypt(w, 0)
+
 	// create identifier
 	id := newID()
 
@@ -255,7 +265,7 @@ func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o o
 	}
 
 	// create the cipher writer
-	cw := o.Key.Decrypt(w, offset)
+	cw := o.Key.Decrypt(masterCw, offset)
 
 	// create next slab chan
 	nextSlabChan := make(chan struct{})
