@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/object"
 )
 
@@ -47,12 +47,11 @@ type (
 
 	// ObjectAddRequest is the request type for the /bus/object/*key endpoint.
 	ObjectAddRequest struct {
-		Bucket        string                                   `json:"bucket"`
-		ContractSet   string                                   `json:"contractSet"`
-		Object        object.Object                            `json:"object"`
-		UsedContracts map[types.PublicKey]types.FileContractID `json:"usedContracts"`
-		MimeType      string                                   `json:"mimeType"`
-		ETag          string                                   `json:"eTag"`
+		Bucket      string        `json:"bucket"`
+		ContractSet string        `json:"contractSet"`
+		Object      object.Object `json:"object"`
+		MimeType    string        `json:"mimeType"`
+		ETag        string        `json:"eTag"`
 	}
 
 	// ObjectsResponse is the response type for the /bus/objects endpoint.
@@ -274,4 +273,12 @@ func (opts SearchObjectOptions) Apply(values url.Values) {
 	if opts.Limit != 0 {
 		values.Set("limit", fmt.Sprint(opts.Limit))
 	}
+}
+
+func FormatETag(ETag string) string {
+	return fmt.Sprintf("\"%s\"", ETag)
+}
+
+func ObjectPathEscape(path string) string {
+	return url.PathEscape(strings.TrimPrefix(path, "/"))
 }

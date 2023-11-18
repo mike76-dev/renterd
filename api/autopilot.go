@@ -57,9 +57,10 @@ type (
 
 	// HostsConfig contains all hosts settings used in the autopilot.
 	HostsConfig struct {
-		AllowRedundantIPs bool                        `json:"allowRedundantIPs"`
-		MaxDowntimeHours  uint64                      `json:"maxDowntimeHours"`
-		ScoreOverrides    map[types.PublicKey]float64 `json:"scoreOverrides"`
+		AllowRedundantIPs     bool                        `json:"allowRedundantIPs"`
+		MaxDowntimeHours      uint64                      `json:"maxDowntimeHours"`
+		MinRecentScanFailures uint64                      `json:"minRecentScanFailures"`
+		ScoreOverrides        map[types.PublicKey]float64 `json:"scoreOverrides"`
 	}
 
 	// WalletConfig contains all wallet settings used in the autopilot.
@@ -69,13 +70,13 @@ type (
 )
 
 type (
-	// AutopilotTriggerRequest is the request object used by the /debug/trigger
+	// AutopilotTriggerRequest is the request object used by the /trigger
 	// endpoint
 	AutopilotTriggerRequest struct {
 		ForceScan bool `json:"forceScan"`
 	}
 
-	// AutopilotTriggerResponse is the response returned by the /debug/trigger
+	// AutopilotTriggerResponse is the response returned by the /trigger
 	// endpoint, indicating whether an autopilot loop was triggered.
 	AutopilotTriggerResponse struct {
 		Triggered bool `json:"triggered"`
@@ -137,6 +138,10 @@ type (
 
 func (sb HostScoreBreakdown) String() string {
 	return fmt.Sprintf("Age: %v, Col: %v, Int: %v, SR: %v, UT: %v, V: %v, Pr: %v", sb.Age, sb.Collateral, sb.Interactions, sb.StorageRemaining, sb.Uptime, sb.Version, sb.Prices)
+}
+
+func (hgb HostGougingBreakdown) DownloadGouging() bool {
+	return hgb.V3.DownloadErr != ""
 }
 
 func (hgb HostGougingBreakdown) Gouging() bool {

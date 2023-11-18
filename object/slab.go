@@ -12,8 +12,9 @@ import (
 
 // A Sector uniquely identifies a sector stored on a particular host.
 type Sector struct {
-	Host types.PublicKey `json:"host"`
-	Root types.Hash256   `json:"root"`
+	Contracts  map[types.PublicKey][]types.FileContractID `json:"contracts"`
+	LatestHost types.PublicKey                            `json:"latestHost"`
+	Root       types.Hash256                              `json:"root"`
 }
 
 // A Slab is raw data that has been erasure-encoded into sector-sized shards,
@@ -39,6 +40,27 @@ func NewSlab(minShards uint8) Slab {
 		Key:       GenerateEncryptionKey(),
 		MinShards: minShards,
 	}
+}
+
+// ContractsFromShards is a helper to extract all contracts used by a set of
+// shards.
+func ContractsFromShards(shards []Sector) map[types.PublicKey]map[types.FileContractID]struct{} {
+	usedContracts := make(map[types.PublicKey]map[types.FileContractID]struct{})
+	for _, shard := range shards {
+		for h, fcids := range shard.Contracts {
+			for _, fcid := range fcids {
+				if _, exists := usedContracts[h]; !exists {
+					usedContracts[h] = make(map[types.FileContractID]struct{})
+				}
+				usedContracts[h][fcid] = struct{}{}
+			}
+		}
+	}
+	return usedContracts
+}
+
+func (s Slab) Contracts() map[types.PublicKey]map[types.FileContractID]struct{} {
+	return ContractsFromShards(s.Shards)
 }
 
 // Length returns the length of the raw data stored in s.
@@ -72,42 +94,25 @@ func (s Slab) Encode(buf []byte, shards [][]byte) {
 	}
 }
 
-// ReconstructSome reconstructs the required shards of a slab.
-func (s Slab) ReconstructSome(shards [][]byte, required []bool) error {
+// Reconstruct reconstructs the missing shards of a slab. Missing shards must
+// have a len of zero. All shards should have a capacity of at least
+// rhpv2.SectorSize, or they will be reallocated.
+func (s Slab) Reconstruct(shards [][]byte) error {
 	for i := range shards {
-		// Make sure shards are either empty or full.
 		if len(shards[i]) != rhpv2.SectorSize && len(shards[i]) != 0 {
 			panic("shards must have a len of either 0 or rhpv2.SectorSize")
 		}
-		// Every required shard needs to have a sector worth of capacity.
-		if required[i] && cap(shards[i]) < rhpv2.SectorSize {
-			shards[i] = reedsolomon.AllocAligned(1, rhpv2.SectorSize)[0][:0]
+		if cap(shards[i]) < rhpv2.SectorSize {
+			shards[i] = make([]byte, 0, rhpv2.SectorSize)
 		}
-	}
-	// The size of the batch per shard that gets reconstructed.
-	var buf [rhpv2.SectorSize]byte
-	rsc, _ := reedsolomon.New(int(s.MinShards), len(shards)-int(s.MinShards))
-
-	dstShards := make([][]byte, len(shards))
-	for i, shard := range shards {
-		if len(shard) != 0 {
-			// keep shards that are already present
-			dstShards[i] = shards[i]
-		} else if required[i] {
-			// reconstruct required shards into 'shards'
-			dstShards[i] = shards[i][:0]
-		} else {
-			// reconstruct non-required shards into a temporary buffer
-			dstShards[i] = buf[:0]
-		}
-	}
-	if err := rsc.Reconstruct(dstShards); err != nil {
-		return err
-	}
-	for i := range shards {
-		if required[i] {
+		if len(shards[i]) != 0 {
 			shards[i] = shards[i][:rhpv2.SectorSize]
 		}
+	}
+
+	rsc, _ := reedsolomon.New(int(s.MinShards), len(shards)-int(s.MinShards))
+	if err := rsc.Reconstruct(shards); err != nil {
+		return err
 	}
 	return nil
 }

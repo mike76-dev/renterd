@@ -25,6 +25,7 @@ import (
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
+	"go.sia.tech/renterd/wallet"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"lukechampine.com/frand"
@@ -65,7 +66,7 @@ func TestNewTestCluster(t *testing.T) {
 				Length: 0,
 			},
 		},
-	}, map[types.PublicKey]types.FileContractID{}, api.AddObjectOptions{MimeType: testMimeType, ETag: testEtag})
+	}, api.AddObjectOptions{MimeType: testMimeType, ETag: testEtag})
 	tt.OK(err)
 
 	// Try talking to the worker and request the object.
@@ -99,6 +100,8 @@ func TestNewTestCluster(t *testing.T) {
 	expectedEndHeight := currentPeriod + cfg.Contracts.Period + cfg.Contracts.RenewWindow
 	if contract.EndHeight() != expectedEndHeight || contract.Revision.EndHeight() != expectedEndHeight {
 		t.Fatal("wrong endHeight", contract.EndHeight(), contract.Revision.EndHeight())
+	} else if contract.TotalCost.IsZero() || contract.ContractPrice.IsZero() {
+		t.Fatal("TotalCost and ContractPrice shouldn't be zero")
 	}
 
 	// Mine blocks until contracts start renewing.
@@ -119,6 +122,12 @@ func TestNewTestCluster(t *testing.T) {
 		if contracts[0].ProofHeight != 0 {
 			return errors.New("proof height should be 0 since the contract was renewed and therefore doesn't require a proof")
 		}
+		if contracts[0].ContractPrice.IsZero() {
+			return errors.New("contract price shouldn't be zero")
+		}
+		if contracts[0].State != api.ContractStatePending {
+			return fmt.Errorf("contract should be pending but was %v", contracts[0].State)
+		}
 		return nil
 	})
 
@@ -133,6 +142,7 @@ func TestNewTestCluster(t *testing.T) {
 	}
 
 	// Now wait for the revision and proof to be caught by the hostdb.
+	var ac api.ArchivedContract
 	tt.Retry(20, time.Second, func() error {
 		cluster.MineBlocks(1)
 
@@ -148,16 +158,25 @@ func TestNewTestCluster(t *testing.T) {
 		if len(archivedContracts) != 1 {
 			return fmt.Errorf("should have 1 archived contract but got %v", len(archivedContracts))
 		}
-		ac := archivedContracts[0]
+		ac = archivedContracts[0]
 		if ac.RevisionHeight == 0 || ac.RevisionNumber != math.MaxUint64 {
 			return fmt.Errorf("revision information is wrong: %v %v", ac.RevisionHeight, ac.RevisionNumber)
 		}
 		if ac.ProofHeight != 0 {
 			t.Fatal("proof height should be 0 since the contract was renewed and therefore doesn't require a proof")
 		}
+		if ac.State != api.ContractStateComplete {
+			return fmt.Errorf("contract should be complete but was %v", ac.State)
+		}
+		archivedContracts, err = cluster.Bus.AncestorContracts(context.Background(), contracts[0].ID, math.MaxUint32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(archivedContracts) != 0 {
+			return fmt.Errorf("should have 0 archived contracts but got %v", len(archivedContracts))
+		}
 		return nil
 	})
-	tt.OK(err)
 
 	// Get host info for every host.
 	hosts, err := cluster.Bus.Hosts(context.Background(), api.GetHostsOptions{})
@@ -517,6 +536,35 @@ func TestUploadDownloadBasic(t *testing.T) {
 	// upload the data
 	path := fmt.Sprintf("data_%v", len(data))
 	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data), api.DefaultBucketName, path, api.UploadObjectOptions{}))
+
+	// fetch object and check its slabs
+	resp, err := cluster.Bus.Object(context.Background(), api.DefaultBucketName, path, api.GetObjectOptions{})
+	tt.OK(err)
+	for _, slab := range resp.Object.Slabs {
+		hosts := make(map[types.PublicKey]struct{})
+		roots := make(map[types.Hash256]struct{})
+		if len(slab.Shards) != testRedundancySettings.TotalShards {
+			t.Fatal("wrong amount of shards", len(slab.Shards), testRedundancySettings.TotalShards)
+		}
+		for _, shard := range slab.Shards {
+			if shard.LatestHost == (types.PublicKey{}) {
+				t.Fatal("latest host should be set")
+			} else if len(shard.Contracts) != 1 {
+				t.Fatal("each shard should have a host")
+			} else if _, found := roots[shard.Root]; found {
+				t.Fatal("each root should only exist once per slab")
+			}
+			for hpk, contracts := range shard.Contracts {
+				if len(contracts) != 1 {
+					t.Fatal("each host should have one contract")
+				} else if _, found := hosts[hpk]; found {
+					t.Fatal("each host should only be used once per slab")
+				}
+				hosts[hpk] = struct{}{}
+			}
+			roots[shard.Root] = struct{}{}
+		}
+	}
 
 	// download data
 	var buffer bytes.Buffer
@@ -912,6 +960,9 @@ func TestEphemeralAccounts(t *testing.T) {
 	// Wait for account to appear.
 	accounts := cluster.WaitForAccounts()
 
+	// Shut down the autopilot to prevent it from interfering with the test.
+	cluster.ShutdownAutopilot(context.Background())
+
 	// Newly created accounts are !cleanShutdown. Simulate a sync to change
 	// that.
 	for _, acc := range accounts {
@@ -958,13 +1009,16 @@ func TestEphemeralAccounts(t *testing.T) {
 	// Check that the spending was recorded for the contract. The recorded
 	// spending should be > the fundAmt since it consists of the fundAmt plus
 	// fee.
-	time.Sleep(2 * testBusFlushInterval)
-	cm, err := cluster.Bus.Contract(context.Background(), contract.ID)
-	tt.OK(err)
 	fundAmt := types.Siacoins(1)
-	if cm.Spending.FundAccount.Cmp(fundAmt) <= 0 {
-		t.Fatalf("invalid spending reported: %v > %v", fundAmt.String(), cm.Spending.FundAccount.String())
-	}
+	tt.Retry(10, testBusFlushInterval, func() error {
+		cm, err := cluster.Bus.Contract(context.Background(), contract.ID)
+		tt.OK(err)
+
+		if cm.Spending.FundAccount.Cmp(fundAmt) <= 0 {
+			return fmt.Errorf("invalid spending reported: %v > %v", fundAmt.String(), cm.Spending.FundAccount.String())
+		}
+		return nil
+	})
 
 	// Update the balance to create some drift.
 	newBalance := fundAmt.Div64(2)
@@ -1238,11 +1292,11 @@ func TestUploadDownloadSameHost(t *testing.T) {
 	// form 2 more contracts with the same host
 	rev2, _, err := cluster.Worker.RHPForm(context.Background(), c.WindowStart, c.HostKey, c.HostIP, wallet.Address, c.RenterFunds(), c.Revision.ValidHostPayout())
 	tt.OK(err)
-	c2, err := cluster.Bus.AddContract(context.Background(), rev2, c.TotalCost, c.StartHeight)
+	c2, err := cluster.Bus.AddContract(context.Background(), rev2, types.ZeroCurrency, c.TotalCost, c.StartHeight, api.ContractStatePending)
 	tt.OK(err)
 	rev3, _, err := cluster.Worker.RHPForm(context.Background(), c.WindowStart, c.HostKey, c.HostIP, wallet.Address, c.RenterFunds(), c.Revision.ValidHostPayout())
 	tt.OK(err)
-	c3, err := cluster.Bus.AddContract(context.Background(), rev3, c.TotalCost, c.StartHeight)
+	c3, err := cluster.Bus.AddContract(context.Background(), rev3, types.ZeroCurrency, c.TotalCost, c.StartHeight, api.ContractStatePending)
 	tt.OK(err)
 
 	// create a contract set with all 3 contracts
@@ -1324,7 +1378,77 @@ func TestContractArchival(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func TestUnconfirmedContractArchival(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	// create a test cluster
+	cluster := newTestCluster(t, testClusterOptions{
+		logger: zap.NewNop(),
+		hosts:  1,
+	})
+	defer cluster.Shutdown()
+	tt := cluster.tt
+
+	cs, err := cluster.Bus.ConsensusState(context.Background())
 	tt.OK(err)
+
+	// we should have a contract with the host
+	contracts, err := cluster.Bus.Contracts(context.Background())
+	tt.OK(err)
+	if len(contracts) != 1 {
+		t.Fatalf("expected 1 contract, got %v", len(contracts))
+	}
+	c := contracts[0]
+
+	// add a contract to the bus
+	_, err = cluster.Bus.AddContract(context.Background(), rhpv2.ContractRevision{
+		Revision: types.FileContractRevision{
+			ParentID: types.FileContractID{1},
+			UnlockConditions: types.UnlockConditions{
+				PublicKeys: []types.UnlockKey{
+					c.HostKey.UnlockKey(),
+					c.HostKey.UnlockKey(),
+				},
+			},
+			FileContract: types.FileContract{
+				Filesize:       0,
+				FileMerkleRoot: types.Hash256{},
+				WindowStart:    math.MaxUint32,
+				WindowEnd:      math.MaxUint32 + 10,
+				Payout:         types.ZeroCurrency,
+				UnlockHash:     types.Hash256{},
+				RevisionNumber: 0,
+			},
+		},
+	}, types.NewCurrency64(1), types.Siacoins(1), cs.BlockHeight, api.ContractStatePending)
+	tt.OK(err)
+
+	// should have 2 contracts now
+	contracts, err = cluster.Bus.Contracts(context.Background())
+	tt.OK(err)
+	if len(contracts) != 2 {
+		t.Fatalf("expected 2 contracts, got %v", len(contracts))
+	}
+
+	// mine for 20 blocks to make sure we are beyond the 18 block deadline for
+	// contract confirmation
+	cluster.MineBlocks(20)
+
+	tt.Retry(100, 100*time.Millisecond, func() error {
+		contracts, err := cluster.Bus.Contracts(context.Background())
+		tt.OK(err)
+		if len(contracts) != 1 {
+			return fmt.Errorf("expected 1 contract, got %v", len(contracts))
+		}
+		if contracts[0].ID != c.ID {
+			t.Fatalf("expected contract %v, got %v", c.ID, contracts[0].ID)
+		}
+		return nil
+	})
 }
 
 func TestWalletTransactions(t *testing.T) {
@@ -1560,7 +1684,6 @@ func TestUploadPacking(t *testing.T) {
 		}
 		return nil
 	})
-	tt.OK(err)
 
 	// ObjectsBySlabKey should return 2 objects for the slab of file1 since file1
 	// and file2 share the same slab.
@@ -1622,7 +1745,7 @@ func TestWallet(t *testing.T) {
 		},
 		MinerFees: []types.Currency{minerFee},
 	}
-	toSign, parents, err := b.WalletFund(context.Background(), &txn, txn.SiacoinOutputs[0].Value)
+	toSign, parents, err := b.WalletFund(context.Background(), &txn, txn.SiacoinOutputs[0].Value, false)
 	tt.OK(err)
 	err = b.WalletSign(context.Background(), &txn, toSign, types.CoveredFields{WholeTransaction: true})
 	tt.OK(err)
@@ -1941,5 +2064,215 @@ func TestMultipartUploads(t *testing.T) {
 		t.Fatal(err)
 	} else if expectedData := data1[:1]; !bytes.Equal(data, expectedData) {
 		t.Fatal("unexpected data:", cmp.Diff(data, expectedData))
+	}
+}
+
+func TestWalletSendUnconfirmed(t *testing.T) {
+	cluster := newTestCluster(t, clusterOptsDefault)
+	defer cluster.Shutdown()
+	b := cluster.Bus
+	tt := cluster.tt
+
+	wr, err := b.Wallet(context.Background())
+	tt.OK(err)
+
+	// check balance
+	if !wr.Unconfirmed.IsZero() {
+		t.Fatal("wallet should not have unconfirmed balance")
+	} else if wr.Confirmed.IsZero() {
+		t.Fatal("wallet should have confirmed balance")
+	}
+
+	// send the full balance back to the weallet
+	toSend := wr.Confirmed.Sub(types.Siacoins(1).Div64(100)) // leave some for the fee
+	tt.OK(b.SendSiacoins(context.Background(), []types.SiacoinOutput{
+		{
+			Address: wr.Address,
+			Value:   toSend,
+		},
+	}, false))
+
+	// the unconfirmed balance should have changed to slightly more than toSend
+	// since we paid a fee
+	wr, err = b.Wallet(context.Background())
+	tt.OK(err)
+
+	if wr.Unconfirmed.Cmp(toSend) < 0 || wr.Unconfirmed.Add(types.Siacoins(1)).Cmp(toSend) < 0 {
+		t.Fatal("wallet should have unconfirmed balance")
+	}
+	fmt.Println(wr.Confirmed, wr.Unconfirmed)
+
+	// try again - this should fail
+	err = b.SendSiacoins(context.Background(), []types.SiacoinOutput{
+		{
+			Address: wr.Address,
+			Value:   toSend,
+		},
+	}, false)
+	tt.AssertIs(err, wallet.ErrInsufficientBalance)
+
+	// try again - this time using unconfirmed transactions
+	tt.OK(b.SendSiacoins(context.Background(), []types.SiacoinOutput{
+		{
+			Address: wr.Address,
+			Value:   toSend,
+		},
+	}, true))
+
+	// the unconfirmed balance should be almost the same
+	wr, err = b.Wallet(context.Background())
+	tt.OK(err)
+
+	if wr.Unconfirmed.Cmp(toSend) < 0 || wr.Unconfirmed.Add(types.Siacoins(1)).Cmp(toSend) < 0 {
+		t.Fatal("wallet should have unconfirmed balance")
+	}
+	fmt.Println(wr.Confirmed, wr.Unconfirmed)
+
+	// mine a block, this should confirm the transactions
+	cluster.MineBlocks(1)
+	tt.Retry(100, time.Millisecond, func() error {
+		wr, err = b.Wallet(context.Background())
+		tt.OK(err)
+
+		if !wr.Unconfirmed.IsZero() {
+			return fmt.Errorf("wallet should not have unconfirmed balance")
+		} else if wr.Confirmed.Cmp(toSend) < 0 || wr.Confirmed.Add(types.Siacoins(1)).Cmp(toSend) < 0 {
+			return fmt.Errorf("wallet should have almost the same confirmed balance as in the beginning")
+		}
+		return nil
+	})
+}
+
+func TestWalletFormUnconfirmed(t *testing.T) {
+	// New cluster with autopilot disabled
+	cfg := clusterOptsDefault
+	cfg.skipSettingAutopilot = true
+	cluster := newTestCluster(t, cfg)
+	defer cluster.Shutdown()
+	b := cluster.Bus
+	tt := cluster.tt
+
+	// Add a host.
+	cluster.AddHosts(1)
+
+	// Send the full balance back to the wallet to make sure it's all
+	// unconfirmed.
+	wr, err := b.Wallet(context.Background())
+	tt.OK(err)
+	tt.OK(b.SendSiacoins(context.Background(), []types.SiacoinOutput{
+		{
+			Address: wr.Address,
+			Value:   wr.Confirmed.Sub(types.Siacoins(1).Div64(100)), // leave some for the fee
+		},
+	}, false))
+
+	// There should be hardly any money in the wallet.
+	wr, err = b.Wallet(context.Background())
+	tt.OK(err)
+	if wr.Confirmed.Sub(wr.Unconfirmed).Cmp(types.Siacoins(1).Div64(100)) > 0 {
+		t.Fatal("wallet should have hardly any confirmed balance")
+	}
+
+	// There shouldn't be any contracts at this point.
+	contracts, err := b.Contracts(context.Background())
+	tt.OK(err)
+	if len(contracts) != 0 {
+		t.Fatal("expected 0 contracts", len(contracts))
+	}
+
+	// Enable autopilot by setting it.
+	cluster.UpdateAutopilotConfig(context.Background(), testAutopilotConfig)
+
+	// Wait for a contract to form.
+	contractsFormed := cluster.WaitForContracts()
+	if len(contractsFormed) != 1 {
+		t.Fatal("expected 1 contract", len(contracts))
+	}
+}
+
+func TestBusRecordedMetrics(t *testing.T) {
+	startTime := time.Now()
+
+	cluster := newTestCluster(t, testClusterOptions{
+		hosts: 1,
+	})
+	defer cluster.Shutdown()
+
+	// Get contract set metrics.
+	csMetrics, err := cluster.Bus.ContractSetMetrics(context.Background(), startTime, math.MaxUint32, time.Second, api.ContractSetMetricsQueryOpts{})
+	cluster.tt.OK(err)
+
+	for i := 0; i < len(csMetrics); i++ {
+		// Remove metrics from before contract was formed.
+		if csMetrics[i].Contracts > 0 {
+			csMetrics = csMetrics[i:]
+			break
+		}
+	}
+	if len(csMetrics) == 0 {
+		t.Fatal("expected at least 1 metric with contracts")
+	}
+	for _, m := range csMetrics {
+		if m.Contracts != 1 {
+			t.Fatalf("expected 1 contract, got %v", m.Contracts)
+		} else if m.Name != testContractSet {
+			t.Fatalf("expected contract set %v, got %v", testContractSet, m.Name)
+		} else if !m.Timestamp.After(startTime) {
+			t.Fatal("expected time to be after start time")
+		}
+	}
+
+	// Get churn metrics. Should have 1 for the new contract.
+	cscMetrics, err := cluster.Bus.ContractSetChurnMetrics(context.Background(), startTime, math.MaxUint32, time.Second, api.ContractSetChurnMetricsQueryOpts{})
+	cluster.tt.OK(err)
+
+	if len(cscMetrics) != 1 {
+		t.Fatalf("expected 1 metric, got %v", len(cscMetrics))
+	} else if m := cscMetrics[0]; m.Direction != api.ChurnDirAdded {
+		t.Fatalf("expected added churn, got %v", m.Direction)
+	} else if m.ContractID == (types.FileContractID{}) {
+		t.Fatal("expected non-zero FCID")
+	} else if m.Name != testContractSet {
+		t.Fatalf("expected contract set %v, got %v", testContractSet, m.Name)
+	} else if !m.Timestamp.After(startTime) {
+		t.Fatal("expected time to be after start time")
+	}
+
+	// Get contract metrics.
+	var cMetrics []api.ContractMetric
+	cluster.tt.Retry(100, 100*time.Millisecond, func() error {
+		// Retry fetching metrics since they are buffered.
+		cMetrics, err = cluster.Bus.ContractMetrics(context.Background(), startTime, math.MaxUint32, time.Second, api.ContractMetricsQueryOpts{})
+		cluster.tt.OK(err)
+		if len(cMetrics) != 1 {
+			return fmt.Errorf("expected 1 metric, got %v", len(cMetrics))
+		}
+		return nil
+	})
+
+	if len(cMetrics) != 1 {
+		t.Fatalf("expected 1 metric, got %v", len(cMetrics))
+	} else if m := cMetrics[0]; !startTime.Before(m.Timestamp) {
+		t.Fatalf("expected time to be after start time, got %v", m.Timestamp)
+	} else if m.ContractID == (types.FileContractID{}) {
+		t.Fatal("expected non-zero FCID")
+	} else if m.HostKey == (types.PublicKey{}) {
+		t.Fatal("expected non-zero Host")
+	} else if m.RemainingCollateral == (types.Currency{}) {
+		t.Fatal("expected non-zero RemainingCollateral")
+	} else if m.RemainingFunds == (types.Currency{}) {
+		t.Fatal("expected non-zero RemainingFunds")
+	} else if m.RevisionNumber == 0 {
+		t.Fatal("expected non-zero RevisionNumber")
+	} else if !m.UploadSpending.IsZero() {
+		t.Fatal("expected zero UploadSpending")
+	} else if !m.DownloadSpending.IsZero() {
+		t.Fatal("expected zero DownloadSpending")
+	} else if m.FundAccountSpending == (types.Currency{}) {
+		t.Fatal("expected non-zero FundAccountSpending")
+	} else if !m.DeleteSpending.IsZero() {
+		t.Fatal("expected zero DeleteSpending")
+	} else if !m.ListSpending.IsZero() {
+		t.Fatal("expected zero ListSpending")
 	}
 }

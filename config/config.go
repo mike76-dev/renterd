@@ -67,10 +67,11 @@ type (
 
 	// MySQL contains the configuration for an optional MySQL database.
 	MySQL struct {
-		URI      string `yaml:"URI"`
-		User     string `yaml:"user"`
-		Password string `yaml:"password"`
-		Database string `yaml:"database"`
+		URI             string `yaml:"URI"`
+		User            string `yaml:"user"`
+		Password        string `yaml:"password"`
+		Database        string `yaml:"database"`
+		MetricsDatabase string `yaml:"metricsDatabase"`
 	}
 
 	RemoteWorker struct {
@@ -111,7 +112,6 @@ type (
 		RevisionSubmissionBuffer       uint64        `yaml:"revisionSubmissionBuffer"`
 		ScannerInterval                time.Duration `yaml:"scannerInterval"`
 		ScannerBatchSize               uint64        `yaml:"scannerBatchSize"`
-		ScannerMinRecentFailures       uint64        `yaml:"scannerMinRecentFailures"`
 		ScannerNumThreads              uint64        `yaml:"scannerNumThreads"`
 		MigratorParallelSlabsPerWorker uint64        `yaml:"migratorParallelSlabsPerWorker"`
 	}

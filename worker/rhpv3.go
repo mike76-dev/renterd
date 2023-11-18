@@ -69,6 +69,9 @@ var (
 	// valid.
 	errPriceTableExpired = errors.New("price table requested is expired")
 
+	// errPriceTableGouging is returned when the host is price gouging.
+	errPriceTableGouging = errors.New("host price table gouging")
+
 	// errPriceTableNotFound is returned by the host when it can not find a
 	// price table that corresponds with the id we sent it.
 	errPriceTableNotFound = errors.New("price table not found")
@@ -89,8 +92,8 @@ func isClosedStream(err error) bool {
 	return isError(err, mux.ErrClosedStream) || isError(err, net.ErrClosed)
 }
 func isInsufficientFunds(err error) bool  { return isError(err, ErrInsufficientFunds) }
-func isMaxRevisionReached(err error) bool { return isError(err, errMaxRevisionReached) }
 func isPriceTableExpired(err error) bool  { return isError(err, errPriceTableExpired) }
+func isPriceTableGouging(err error) bool  { return isError(err, errPriceTableGouging) }
 func isPriceTableNotFound(err error) bool { return isError(err, errPriceTableNotFound) }
 func isSectorNotFound(err error) bool {
 	return isError(err, errSectorNotFound) || isError(err, errSectorNotFoundOld)
@@ -378,7 +381,7 @@ func (h *host) FundAccount(ctx context.Context, balance types.Currency, rev *typ
 			}
 			// send the new revision to the satellite
 			satellite.StaticSatellite.UpdateRevision(ctx, rhpv2.ContractRevision{Revision: *rev}, api.ContractSpending{FundAccount: cost})
-			h.contractSpendingRecorder.Record(rev.ParentID, rev.RevisionNumber, rev.Filesize, api.ContractSpending{FundAccount: cost})
+			h.contractSpendingRecorder.Record(*rev, api.ContractSpending{FundAccount: cost})
 			return nil
 		})
 	})
@@ -594,21 +597,32 @@ func (h *host) priceTable(ctx context.Context, rev *types.FileContractRevision) 
 	if err != nil {
 		return rhpv3.HostPriceTable{}, err
 	}
-	gc, err := GougingCheckerFromContext(ctx)
+	gc, err := GougingCheckerFromContext(ctx, false)
 	if err != nil {
 		return rhpv3.HostPriceTable{}, err
 	}
 	if breakdown := gc.Check(nil, &pt.HostPriceTable); breakdown.Gouging() {
-		return rhpv3.HostPriceTable{}, fmt.Errorf("host price table gouging: %v", breakdown)
+		return rhpv3.HostPriceTable{}, fmt.Errorf("%w: %v", errPriceTableGouging, breakdown)
 	}
 	return pt.HostPriceTable, nil
 }
 
-func (h *host) DownloadSector(ctx context.Context, w io.Writer, root types.Hash256, offset, length uint32) (err error) {
-	pt, err := h.priceTable(ctx, nil)
+func (h *host) DownloadSector(ctx context.Context, w io.Writer, root types.Hash256, offset, length uint32, overpay bool) (err error) {
+	pt, err := h.priceTables.fetch(ctx, h.HostKey(), nil)
 	if err != nil {
 		return err
 	}
+	hpt := pt.HostPriceTable
+
+	// check for download gouging specifically
+	gc, err := GougingCheckerFromContext(ctx, overpay)
+	if err != nil {
+		return err
+	}
+	if breakdown := gc.Check(nil, &hpt); breakdown.DownloadGouging() {
+		return fmt.Errorf("%w: %v", errPriceTableGouging, breakdown)
+	}
+
 	// return errBalanceInsufficient if balance insufficient
 	defer func() {
 		if isBalanceInsufficient(err) {
@@ -618,14 +632,14 @@ func (h *host) DownloadSector(ctx context.Context, w io.Writer, root types.Hash2
 
 	return h.acc.WithWithdrawal(ctx, func() (amount types.Currency, err error) {
 		err = h.transportPool.withTransportV3(ctx, h.HostKey(), h.siamuxAddr, func(ctx context.Context, t *transportV3) error {
-			cost, err := readSectorCost(pt, uint64(length))
+			cost, err := readSectorCost(hpt, uint64(length))
 			if err != nil {
 				return err
 			}
 
 			var refund types.Currency
 			payment := rhpv3.PayByEphemeralAccount(h.acc.id, cost, pt.HostBlockHeight+defaultWithdrawalExpiryBlocks, h.accountKey)
-			cost, refund, err = RPCReadSector(ctx, t, w, pt, &payment, offset, length, root)
+			cost, refund, err = RPCReadSector(ctx, t, w, hpt, &payment, offset, length, root)
 			amount = cost.Sub(refund)
 			return err
 		})
@@ -670,7 +684,7 @@ func (h *host) UploadSector(ctx context.Context, sector *[rhpv2.SectorSize]byte,
 	satellite.StaticSatellite.UpdateRevision(ctx, rhpv2.ContractRevision{Revision: rev}, api.ContractSpending{Uploads: cost})
 
 	// record spending
-	h.contractSpendingRecorder.Record(rev.ParentID, rev.RevisionNumber, rev.Filesize, api.ContractSpending{Uploads: cost})
+	h.contractSpendingRecorder.Record(rev, api.ContractSpending{Uploads: cost})
 	return root, nil
 }
 
@@ -1374,7 +1388,7 @@ func RPCRenew(ctx context.Context, rrr api.RHPRenewRequest, bus Bus, t *transpor
 	}
 
 	// Perform gouging checks.
-	gc, err := GougingCheckerFromContext(ctx)
+	gc, err := GougingCheckerFromContext(ctx, false)
 	if err != nil {
 		return rhpv2.ContractRevision{}, nil, fmt.Errorf("failed to get gouging checker: %w", err)
 	}

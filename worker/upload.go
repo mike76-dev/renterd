@@ -211,6 +211,8 @@ type (
 
 	sectorUploadResp struct {
 		req  *sectorUploadReq
+		fcid types.FileContractID
+		hk   types.PublicKey
 		root types.Hash256
 		err  error
 	}
@@ -279,7 +281,7 @@ func (w *worker) upload(ctx context.Context, r io.Reader, bucket, path string, o
 	}
 
 	// perform the upload
-	obj, partialSlabData, used, eTag, err := w.uploadManager.Upload(ctx, cr, up, lockingPriorityUpload)
+	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, cr, up, lockingPriorityUpload)
 	if err != nil {
 		return "", fmt.Errorf("couldn't upload object: %w", err)
 	}
@@ -294,7 +296,7 @@ func (w *worker) upload(ctx context.Context, r io.Reader, bucket, path string, o
 	}
 
 	// persist the object
-	err = w.bus.AddObject(ctx, bucket, path, up.contractSet, obj, used, api.AddObjectOptions{MimeType: mimeType, ETag: eTag})
+	err = w.bus.AddObject(ctx, bucket, path, up.contractSet, obj, api.AddObjectOptions{MimeType: mimeType, ETag: eTag})
 	if err != nil {
 		return "", fmt.Errorf("couldn't add object: %w", err)
 	}
@@ -337,7 +339,7 @@ func (w *worker) uploadMultiPart(ctx context.Context, r io.Reader, bucket, path,
 	}
 
 	// upload the part
-	obj, partialSlabData, used, eTag, err := w.uploadManager.Upload(ctx, r, up, lockingPriorityUpload)
+	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, r, up, lockingPriorityUpload)
 	if err != nil {
 		return "", fmt.Errorf("couldn't upload object: %w", err)
 	}
@@ -352,7 +354,7 @@ func (w *worker) uploadMultiPart(ctx context.Context, r io.Reader, bucket, path,
 	}
 
 	// persist the part
-	err = w.bus.AddMultipartPart(ctx, bucket, path, up.contractSet, eTag, uploadID, partNumber, obj.Slabs, obj.PartialSlabs, used)
+	err = w.bus.AddMultipartPart(ctx, bucket, path, up.contractSet, eTag, uploadID, partNumber, obj.Slabs, obj.PartialSlabs)
 	if err != nil {
 		return "", fmt.Errorf("couldn't add multi part: %w", err)
 	}
@@ -449,14 +451,14 @@ func (w *worker) uploadPackedSlab(ctx context.Context, ps api.PackedSlab, rs api
 
 	// upload packed slab
 	shards := encryptPartialSlab(ps.Data, ps.Key, uint8(rs.MinShards), uint8(rs.TotalShards))
-	sectors, used, err := w.uploadManager.UploadShards(ctx, shards, contracts, up.CurrentHeight, lockPriority)
+	sectors, err := w.uploadManager.UploadShards(ctx, shards, contracts, up.CurrentHeight, lockPriority)
 	if err != nil {
 		return fmt.Errorf("couldn't upload packed slab, err: %v", err)
 	}
 
 	// mark packed slab as uploaded
 	slab := api.UploadedPackedSlab{BufferID: ps.BufferID, Shards: sectors}
-	err = w.bus.MarkPackedSlabsUploaded(ctx, []api.UploadedPackedSlab{slab}, used)
+	err = w.bus.MarkPackedSlabsUploaded(ctx, []api.UploadedPackedSlab{slab})
 	if err != nil {
 		return fmt.Errorf("couldn't mark packed slabs uploaded, err: %v", err)
 	}
@@ -563,7 +565,7 @@ func (mgr *uploadManager) Stop() {
 	}
 }
 
-func (mgr *uploadManager) Upload(ctx context.Context, r io.Reader, up uploadParameters, lockPriority int) (_ object.Object, partialSlab []byte, used map[types.PublicKey]types.FileContractID, eTag string, err error) {
+func (mgr *uploadManager) Upload(ctx context.Context, r io.Reader, up uploadParameters, lockPriority int) (_ object.Object, partialSlab []byte, eTag string, err error) {
 	// cancel all in-flight requests when the upload is done
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -584,19 +586,19 @@ func (mgr *uploadManager) Upload(ctx context.Context, r io.Reader, up uploadPara
 	// create the cipher reader
 	cr, err := o.Encrypt(hr, up.encryptionOffset)
 	if err != nil {
-		return object.Object{}, nil, nil, "", err
+		return object.Object{}, nil, "", err
 	}
 
 	// fetch contracts
 	contracts, err := mgr.b.ContractSetContracts(ctx, up.contractSet)
 	if err != nil {
-		return object.Object{}, nil, nil, "", fmt.Errorf("couldn't fetch contracts from bus: %w", err)
+		return object.Object{}, nil, "", fmt.Errorf("couldn't fetch contracts from bus: %w", err)
 	}
 
 	// create the upload
 	u, finishFn, err := mgr.newUpload(ctx, up.rs.TotalShards, contracts, up.bh, lockPriority)
 	if err != nil {
-		return object.Object{}, nil, nil, "", err
+		return object.Object{}, nil, "", err
 	}
 	defer finishFn()
 
@@ -618,9 +620,9 @@ loop:
 	for {
 		select {
 		case <-mgr.stopChan:
-			return object.Object{}, nil, nil, "", errors.New("manager was stopped")
+			return object.Object{}, nil, "", errors.New("manager was stopped")
 		case <-ctx.Done():
-			return object.Object{}, nil, nil, "", errors.New("upload timed out")
+			return object.Object{}, nil, "", errors.New("upload timed out")
 		case nextSlabChan <- struct{}{}:
 			// read next slab's data
 			data := make([]byte, size)
@@ -638,7 +640,7 @@ loop:
 				}
 				continue
 			} else if err != nil && err != io.ErrUnexpectedEOF {
-				return object.Object{}, nil, nil, "", err
+				return object.Object{}, nil, "", err
 			}
 			if up.packing && errors.Is(err, io.ErrUnexpectedEOF) {
 				// If uploadPacking is true, we return the partial slab without
@@ -654,7 +656,7 @@ loop:
 			slabIndex++
 		case res := <-respChan:
 			if res.err != nil {
-				return object.Object{}, nil, nil, "", res.err
+				return object.Object{}, nil, "", res.err
 			}
 
 			// collect the response and potentially break out of the loop
@@ -674,46 +676,21 @@ loop:
 	for _, resp := range responses {
 		o.Slabs = append(o.Slabs, resp.slab)
 	}
-
-	// build host to contract map
-	h2c := make(map[types.PublicKey]types.FileContractID)
-	for _, contract := range contracts {
-		h2c[contract.HostKey] = contract.ID
-	}
-
-	// ask the manager for the renewals
-	c2r := mgr.renewalsMap()
-
-	// build used contracts list
-	usedContracts := make(map[types.PublicKey]types.FileContractID)
-	for _, slab := range o.Slabs {
-		for _, sector := range slab.Shards {
-			fcid, exists := h2c[sector.Host]
-			if !exists {
-				return object.Object{}, nil, nil, "", fmt.Errorf("couldn't find contract for host %v", sector.Host)
-			}
-			if renewed, exists := c2r[fcid]; exists {
-				usedContracts[sector.Host] = renewed
-			} else {
-				usedContracts[sector.Host] = fcid
-			}
-		}
-	}
-	return o, partialSlab, usedContracts, hr.Hash(), nil
+	return o, partialSlab, hr.Hash(), nil
 }
 
-func (mgr *uploadManager) UploadShards(ctx context.Context, shards [][]byte, contracts []api.ContractMetadata, bh uint64, lockPriority int) ([]object.Sector, map[types.PublicKey]types.FileContractID, error) {
+func (mgr *uploadManager) UploadShards(ctx context.Context, shards [][]byte, contracts []api.ContractMetadata, bh uint64, lockPriority int) ([]object.Sector, error) {
 	// initiate the upload
 	upload, finishFn, err := mgr.newUpload(ctx, len(shards), contracts, bh, lockPriority)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer finishFn()
 
 	// upload the shards
 	sectors, err := upload.uploadShards(ctx, shards, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// build host to contract map
@@ -721,25 +698,7 @@ func (mgr *uploadManager) UploadShards(ctx context.Context, shards [][]byte, con
 	for _, contract := range contracts {
 		h2c[contract.HostKey] = contract.ID
 	}
-
-	// ask the manager for the renewals
-	c2r := mgr.renewalsMap()
-
-	// build used contracts list
-	usedContracts := make(map[types.PublicKey]types.FileContractID)
-	for _, sector := range sectors {
-		fcid, exists := h2c[sector.Host]
-		if !exists {
-			return nil, nil, fmt.Errorf("couldn't find contract for host %v", sector.Host)
-		}
-		if renewed, exists := c2r[fcid]; exists {
-			usedContracts[sector.Host] = renewed
-		} else {
-			usedContracts[sector.Host] = fcid
-		}
-	}
-
-	return sectors, usedContracts, nil
+	return sectors, nil
 }
 func (mgr *uploadManager) launch(req *sectorUploadReq) error {
 	// recompute stats
@@ -1013,6 +972,7 @@ func (u *upload) newSlabUpload(ctx context.Context, shards [][]byte) (*slabUploa
 		overdriving: make(map[int]int, len(shards)),
 		remaining:   make(map[int]sectorCtx, len(shards)),
 		sectors:     make([]object.Sector, len(shards)),
+		errs:        make(HostErrorSet),
 	}
 
 	// prepare sector uploads
@@ -1123,7 +1083,7 @@ func (u *upload) uploadShards(ctx context.Context, shards [][]byte, nextSlabChan
 
 	// launch all shard uploads
 	for _, upload := range requests {
-		if err := slab.launch(upload); err != nil {
+		if _, err := slab.launch(upload); err != nil {
 			return nil, err
 		}
 	}
@@ -1161,9 +1121,11 @@ func (u *upload) uploadShards(ctx context.Context, shards [][]byte, nextSlabChan
 
 		// relaunch non-overdrive uploads
 		if !done && resp.err != nil && !resp.req.overdrive {
-			if err := slab.launch(resp.req); err != nil {
+			if overdriving, err := slab.launch(resp.req); err != nil {
 				u.mgr.logger.Errorf("failed to relaunch a sector upload, err %v", err)
-				break // fail the upload
+				if !overdriving {
+					break // fail the upload
+				}
 			}
 		}
 
@@ -1262,7 +1224,7 @@ outer:
 			if err != nil {
 				req.fail(err)
 			} else {
-				req.succeed(root)
+				req.succeed(root, u.hk, u.fcid)
 			}
 
 			// track the error, ignore gracefully closed streams and canceled overdrives
@@ -1408,10 +1370,12 @@ func (u *uploader) pop() *sectorUploadReq {
 	return nil
 }
 
-func (req *sectorUploadReq) succeed(root types.Hash256) {
+func (req *sectorUploadReq) succeed(root types.Hash256, hk types.PublicKey, fcid types.FileContractID) {
 	select {
 	case <-req.ctx.Done():
 	case req.responseChan <- sectorUploadResp{
+		fcid: fcid,
+		hk:   hk,
 		req:  req,
 		root: root,
 	}:
@@ -1453,7 +1417,7 @@ func (s *slabUpload) finish() ([]object.Sector, error) {
 
 	remaining := len(s.remaining)
 	if remaining > 0 {
-		return nil, fmt.Errorf("failed to upload slab: remaining=%d, inflight=%d, launched=%d uploaders=%d errors=%w", remaining, s.numInflight, s.numLaunched, s.mgr.numUploaders(), s.errs)
+		return nil, fmt.Errorf("failed to upload slab: remaining=%d, inflight=%d, launched=%d uploaders=%d errors=%d %w", remaining, s.numInflight, s.numLaunched, s.mgr.numUploaders(), len(s.errs), s.errs)
 	}
 	return s.sectors, nil
 }
@@ -1464,17 +1428,23 @@ func (s *slabUpload) inflight() uint64 {
 	return s.numInflight
 }
 
-func (s *slabUpload) launch(req *sectorUploadReq) error {
+func (s *slabUpload) launch(req *sectorUploadReq) (overdriving bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// nothing to do
+	if req == nil {
+		return false, nil
+	}
+
 	// launch the req
-	err := s.mgr.launch(req)
+	err = s.mgr.launch(req)
 	if err != nil {
+		overdriving = req.overdrive && s.overdriving[req.sectorIndex] > 0
 		span := trace.SpanFromContext(req.ctx)
 		span.RecordError(err)
 		span.End()
-		return err
+		return
 	}
 
 	// update the state
@@ -1483,9 +1453,9 @@ func (s *slabUpload) launch(req *sectorUploadReq) error {
 	if req.overdrive {
 		s.lastOverdrive = time.Now()
 		s.overdriving[req.sectorIndex]++
+		overdriving = true
 	}
-
-	return nil
+	return
 }
 
 func (s *slabUpload) overdrive(ctx context.Context, respChan chan sectorUploadResp) (resetTimer func()) {
@@ -1536,10 +1506,7 @@ func (s *slabUpload) overdrive(ctx context.Context, respChan chan sectorUploadRe
 				return
 			case <-timer.C:
 				if canOverdrive() {
-					req := s.nextRequest(respChan)
-					if req != nil {
-						_ = s.launch(req) // ignore error
-					}
+					_, _ = s.launch(s.nextRequest(respChan)) // ignore result
 				}
 				resetTimer()
 			}
@@ -1600,10 +1567,15 @@ func (s *slabUpload) receive(resp sectorUploadResp) (finished bool, next bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// update the state
+	if resp.req.overdrive {
+		s.overdriving[resp.req.sectorIndex]--
+	}
+
 	// failed reqs can't complete the upload
 	s.numInflight--
 	if resp.err != nil {
-		s.errs = append(s.errs, &HostError{resp.req.hk, resp.err})
+		s.errs[resp.req.hk] = resp.err
 		return false, false
 	}
 
@@ -1614,8 +1586,13 @@ func (s *slabUpload) receive(resp sectorUploadResp) (finished bool, next bool) {
 
 	// store the sector and call cancel on the sector ctx
 	s.sectors[resp.req.sectorIndex] = object.Sector{
-		Host: resp.req.hk,
-		Root: resp.root,
+		Contracts: map[types.PublicKey][]types.FileContractID{
+			resp.hk: {
+				resp.fcid,
+			},
+		},
+		LatestHost: resp.req.hk,
+		Root:       resp.root,
 	}
 	s.remaining[resp.req.sectorIndex].cancel()
 

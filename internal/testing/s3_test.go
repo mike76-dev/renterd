@@ -177,24 +177,21 @@ func TestS3Authentication(t *testing.T) {
 	defer cluster.Shutdown()
 	tt := cluster.tt
 
-	assertAuth := func(c *minio.Client, shouldWork bool) {
+	assertAuth := func(c *minio.Core, shouldWork bool) {
 		t.Helper()
-		resp := c.ListObjects(context.Background(), api.DefaultBucketName, minio.ListObjectsOptions{})
-		for obj := range resp {
-			err := obj.Err
-			if shouldWork && err != nil {
-				t.Fatal(err)
-			} else if !shouldWork && err == nil {
-				t.Fatal("expected error")
-			} else if !shouldWork && err != nil && !strings.Contains(err.Error(), "AccessDenied") {
-				t.Fatal("wrong error")
-			}
+		_, err := c.ListObjectsV2(api.DefaultBucketName, "/", "", "", "", 100)
+		if shouldWork && err != nil {
+			t.Fatal(err)
+		} else if !shouldWork && err == nil {
+			t.Fatal("expected error")
+		} else if !shouldWork && err != nil && !strings.Contains(err.Error(), "AccessDenied") {
+			t.Fatal("wrong error")
 		}
 	}
 
 	// Create client.
 	url := cluster.S3.EndpointURL().Host
-	s3Unauthenticated, err := minio.New(url, &minio.Options{
+	s3Unauthenticated, err := minio.NewCore(url, &minio.Options{
 		Creds: nil, // no authentication
 	})
 	tt.OK(err)
@@ -203,7 +200,7 @@ func TestS3Authentication(t *testing.T) {
 	assertAuth(s3Unauthenticated, false)
 
 	// Create client with credentials and try again..
-	s3Authenticated, err := minio.New(url, &minio.Options{
+	s3Authenticated, err := minio.NewCore(url, &minio.Options{
 		Creds: testS3Credentials,
 	})
 	tt.OK(err)
@@ -216,6 +213,13 @@ func TestS3Authentication(t *testing.T) {
 		PublicReadAccess: true,
 	}))
 
+	// Check that the policy was updated.
+	b, err := cluster.Bus.Bucket(context.Background(), api.DefaultBucketName)
+	tt.OK(err)
+	if b.Policy.PublicReadAccess != true {
+		t.Fatal("expected public read access")
+	}
+
 	// Listing should work now.
 	assertAuth(s3Unauthenticated, true)
 
@@ -223,6 +227,13 @@ func TestS3Authentication(t *testing.T) {
 	tt.OK(cluster.Bus.UpdateBucketPolicy(context.Background(), api.DefaultBucketName, api.BucketPolicy{
 		PublicReadAccess: false,
 	}))
+
+	// Check that the policy was updated.
+	b, err = cluster.Bus.Bucket(context.Background(), api.DefaultBucketName)
+	tt.OK(err)
+	if b.Policy.PublicReadAccess == true {
+		t.Fatal("expected no public read access")
+	}
 
 	// Listing should not work now.
 	assertAuth(s3Unauthenticated, false)
@@ -373,9 +384,6 @@ func TestS3MultipartUploads(t *testing.T) {
 	core := cluster.S3Core
 	tt := cluster.tt
 
-	// delete default bucket before testing.
-	tt.OK(cluster.Bus.DeleteBucket(context.Background(), api.DefaultBucketName))
-
 	// Create bucket.
 	tt.OK(s3.MakeBucket(context.Background(), "multipart", minio.MakeBucketOptions{}))
 
@@ -386,14 +394,22 @@ func TestS3MultipartUploads(t *testing.T) {
 		t.Fatal("expected non-empty upload ID")
 	}
 
+	// Start another one in the default bucket. This should not show up when
+	// listing the uploads in the 'multipart' bucket.
+	tt.OKAll(core.NewMultipartUpload(context.Background(), api.DefaultBucketName, "foo", minio.PutObjectOptions{}))
+
 	// List uploads
 	lmu, err := core.ListMultipartUploads(context.Background(), "multipart", "", "", "", "", 0)
 	tt.OK(err)
 	if len(lmu.Uploads) != 1 {
-		t.Fatal("expected 1 upload")
+		t.Fatal("expected 1 upload", len(lmu.Uploads))
 	} else if upload := lmu.Uploads[0]; upload.UploadID != uploadID || upload.Key != "foo" {
 		t.Fatal("unexpected upload:", upload.UploadID, upload.Key)
 	}
+
+	// delete default bucket for the remainder of the test. This makes sure we
+	// can delete the bucket even though it contains a multipart upload.
+	tt.OK(cluster.Bus.DeleteBucket(context.Background(), api.DefaultBucketName))
 
 	// Add 3 parts out of order to make sure the object is reconstructed
 	// correctly.
@@ -578,6 +594,64 @@ func TestS3SpecialChars(t *testing.T) {
 		tt.OK(res.Err)
 		if res.Key == objectKey {
 			t.Fatal("unexpected key:", res.Key)
+		}
+	}
+}
+
+func TestS3SettingsValidate(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	cluster := newTestCluster(t, clusterOptsDefault)
+	defer cluster.Shutdown()
+
+	tests := []struct {
+		id         string
+		key        string
+		shouldFail bool
+	}{
+		{
+			// Min length
+			id:         "id",
+			key:        "aaaaaaaaaaaaaaaa",
+			shouldFail: false,
+		},
+		{
+			// Max length
+			id:         "id",
+			key:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			shouldFail: false,
+		},
+		{
+			// Min length - 1
+			id:         "id",
+			key:        "aaaaaaaaaaaaaaa",
+			shouldFail: true,
+		},
+		{
+			// Max length + 1
+			id:         "id",
+			key:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			shouldFail: true,
+		},
+		{
+			// No ID
+			id:         "",
+			key:        "aaaaaaaaaaaaaaaa",
+			shouldFail: true,
+		},
+	}
+	for i, test := range tests {
+		err := cluster.Bus.UpdateSetting(context.Background(), api.SettingS3Authentication, api.S3AuthenticationSettings{
+			V4Keypairs: map[string]string{
+				test.id: test.key,
+			},
+		})
+		if err != nil && !test.shouldFail {
+			t.Errorf("%d: unexpected error: %v", i, err)
+		} else if err == nil && test.shouldFail {
+			t.Errorf("%d: expected error", i)
 		}
 	}
 }

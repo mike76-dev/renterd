@@ -147,10 +147,10 @@ type Bus interface {
 	UploadParams(ctx context.Context) (api.UploadParams, error)
 
 	Object(ctx context.Context, bucket, path string, opts api.GetObjectOptions) (api.ObjectsResponse, error)
-	AddObject(ctx context.Context, bucket, path, contractSet string, o object.Object, usedContracts map[types.PublicKey]types.FileContractID, opts api.AddObjectOptions) error
+	AddObject(ctx context.Context, bucket, path, contractSet string, o object.Object, opts api.AddObjectOptions) error
 	DeleteObject(ctx context.Context, bucket, path string, opts api.DeleteObjectOptions) error
 
-	AddMultipartPart(ctx context.Context, bucket, path, contractSet, ETag, uploadID string, partNumber int, slices []object.SlabSlice, partialSlabs []object.PartialSlab, usedContracts map[types.PublicKey]types.FileContractID) (err error)
+	AddMultipartPart(ctx context.Context, bucket, path, contractSet, ETag, uploadID string, partNumber int, slices []object.SlabSlice, partialSlabs []object.PartialSlab) (err error)
 	MultipartUpload(ctx context.Context, uploadID string) (resp api.MultipartUpload, err error)
 
 	AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) (slabs []object.PartialSlab, slabBufferMaxSizeSoftReached bool, err error)
@@ -159,18 +159,18 @@ type Bus interface {
 
 	DeleteHostSector(ctx context.Context, hk types.PublicKey, root types.Hash256) error
 
-	MarkPackedSlabsUploaded(ctx context.Context, slabs []api.UploadedPackedSlab, usedContracts map[types.PublicKey]types.FileContractID) error
+	MarkPackedSlabsUploaded(ctx context.Context, slabs []api.UploadedPackedSlab) error
 	PackedSlabsForUpload(ctx context.Context, lockingDuration time.Duration, minShards, totalShards uint8, set string, limit int) ([]api.PackedSlab, error)
 
 	Accounts(ctx context.Context) ([]api.Account, error)
-	UpdateSlab(ctx context.Context, s object.Slab, contractSet string, goodContracts map[types.PublicKey]types.FileContractID) error
+	UpdateSlab(ctx context.Context, s object.Slab, contractSet string) error
 
 	TrackUpload(ctx context.Context, uID api.UploadID) error
 	AddUploadingSector(ctx context.Context, uID api.UploadID, id types.FileContractID, root types.Hash256) error
 	FinishUpload(ctx context.Context, uID api.UploadID) error
 
 	WalletDiscard(ctx context.Context, txn types.Transaction) error
-	WalletFund(ctx context.Context, txn *types.Transaction, amount types.Currency) ([]types.Hash256, []types.Transaction, error)
+	WalletFund(ctx context.Context, txn *types.Transaction, amount types.Currency, useUnconfirmedTxns bool) ([]types.Hash256, []types.Transaction, error)
 	WalletPrepareForm(ctx context.Context, renterAddress types.Address, renterKey types.PublicKey, renterFunds, hostCollateral types.Currency, hostKey types.PublicKey, hostSettings rhpv2.HostSettings, endHeight uint64) (txns []types.Transaction, err error)
 	WalletPrepareRenew(ctx context.Context, revision types.FileContractRevision, hostAddress, renterAddress types.Address, renterKey types.PrivateKey, renterFunds, newCollateral types.Currency, pt rhpv3.HostPriceTable, endHeight, windowSize uint64) (api.WalletPrepareRenewResponse, error)
 	WalletSign(ctx context.Context, txn *types.Transaction, toSign []types.Hash256, cf types.CoveredFields) error
@@ -219,7 +219,7 @@ type hostV2 interface {
 type hostV3 interface {
 	hostV2
 
-	DownloadSector(ctx context.Context, w io.Writer, root types.Hash256, offset, length uint32) error
+	DownloadSector(ctx context.Context, w io.Writer, root types.Hash256, offset, length uint32, overpay bool) error
 	FetchPriceTable(ctx context.Context, rev *types.FileContractRevision) (hpt hostdb.HostPriceTable, err error)
 	FetchRevision(ctx context.Context, fetchTimeout time.Duration, blockHeight uint64) (types.FileContractRevision, error)
 	FundAccount(ctx context.Context, balance types.Currency, rev *types.FileContractRevision) error
@@ -400,6 +400,8 @@ func (w *worker) rhpScanHandler(jc jape.Context) {
 }
 
 func (w *worker) fetchContracts(ctx context.Context, metadatas []api.ContractMetadata, timeout time.Duration, blockHeight uint64) (contracts []api.Contract, errs HostErrorSet) {
+	errs = make(HostErrorSet)
+
 	// create requests channel
 	reqs := make(chan api.ContractMetadata)
 
@@ -414,7 +416,7 @@ func (w *worker) fetchContracts(ctx context.Context, metadatas []api.ContractMet
 			})
 			mu.Lock()
 			if err != nil {
-				errs = append(errs, &HostError{HostKey: md.HostKey, Err: err})
+				errs[md.HostKey] = err
 				contracts = append(contracts, api.Contract{
 					ContractMetadata: md,
 				})
@@ -527,7 +529,7 @@ func (w *worker) rhpFormHandler(jc jape.Context) {
 		// just used it to dial the host we know it's valid
 		hostSettings.NetAddress = hostIP
 
-		gc, err := GougingCheckerFromContext(ctx)
+		gc, err := GougingCheckerFromContext(ctx, false)
 		if err != nil {
 			return err
 		}
@@ -610,7 +612,7 @@ func (w *worker) rhpBroadcastHandler(jc jape.Context) {
 	}
 	// Fund the txn. We pass 0 here since we only need the wallet to fund
 	// the fee.
-	toSign, parents, err := w.bus.WalletFund(ctx, &txn, types.ZeroCurrency)
+	toSign, parents, err := w.bus.WalletFund(ctx, &txn, types.ZeroCurrency, true)
 	if jc.Check("failed to fund transaction", err) != nil {
 		return
 	}
@@ -924,17 +926,30 @@ func (w *worker) slabMigrateHandler(jc jape.Context) {
 	}
 
 	// migrate the slab
-	used, numShardsMigrated, err := migrateSlab(ctx, w.downloadManager, w.uploadManager, &slab, dlContracts, ulContracts, up.CurrentHeight, w.logger)
+	numShardsMigrated, surchargeApplied, err := migrateSlab(ctx, w.downloadManager, w.uploadManager, &slab, dlContracts, ulContracts, up.CurrentHeight, w.logger)
 	if jc.Check("couldn't migrate slabs", err) != nil {
+		jc.Encode(api.MigrateSlabResponse{
+			NumShardsMigrated: numShardsMigrated,
+			SurchargeApplied:  surchargeApplied,
+			Error:             err.Error(),
+		})
 		return
 	}
 
 	// update the slab
-	if jc.Check("couldn't update slab", w.bus.UpdateSlab(ctx, slab, up.ContractSet, used)) != nil {
+	if err := w.bus.UpdateSlab(ctx, slab, up.ContractSet); err != nil {
+		jc.Encode(api.MigrateSlabResponse{
+			NumShardsMigrated: numShardsMigrated,
+			SurchargeApplied:  surchargeApplied,
+			Error:             err.Error(),
+		})
 		return
 	}
 
-	jc.Encode(api.MigrateSlabResponse{NumShardsMigrated: numShardsMigrated})
+	jc.Encode(api.MigrateSlabResponse{
+		NumShardsMigrated: numShardsMigrated,
+		SurchargeApplied:  surchargeApplied,
+	})
 
 	// send the new slab to the satellite if the user has opted in
 	cfg, err := satellite.StaticSatellite.Config()

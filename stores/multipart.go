@@ -22,12 +22,12 @@ type (
 		Model
 
 		Key        []byte
-		UploadID   string `gorm:"uniqueIndex;NOT NULL;size:64"`
-		ObjectID   string `gorm:"index;NOT NULL"`
-		DBBucket   dbBucket
-		DBBucketID uint              `gorm:"index;NOT NULL"`
+		UploadID   string            `gorm:"uniqueIndex;NOT NULL;size:64"`
+		ObjectID   string            `gorm:"index:idx_multipart_uploads_object_id;NOT NULL"`
+		DBBucket   dbBucket          `gorm:"constraint:OnDelete:CASCADE"` // CASCADE to delete uploads when bucket is deleted
+		DBBucketID uint              `gorm:"index:idx_multipart_uploads_db_bucket_id;NOT NULL"`
 		Parts      []dbMultipartPart `gorm:"constraint:OnDelete:CASCADE"` // CASCADE to delete parts too
-		MimeType   string            `gorm:"index"`
+		MimeType   string            `gorm:"index:idx_multipart_uploads_mime_type"`
 	}
 
 	dbMultipartPart struct {
@@ -85,7 +85,21 @@ func (s *SQLStore) CreateMultipartUpload(ctx context.Context, bucket, path strin
 	}, err
 }
 
-func (s *SQLStore) AddMultipartPart(ctx context.Context, bucket, path, contractSet, eTag, uploadID string, partNumber int, slices []object.SlabSlice, partialSlabs []object.PartialSlab, usedContracts map[types.PublicKey]types.FileContractID) (err error) {
+func (s *SQLStore) AddMultipartPart(ctx context.Context, bucket, path, contractSet, eTag, uploadID string, partNumber int, slices []object.SlabSlice, partialSlabs []object.PartialSlab) (err error) {
+	// collect all used contracts
+	usedContracts := make(map[types.PublicKey]map[types.FileContractID]struct{})
+	for _, s := range slices {
+		for _, shard := range s.Shards {
+			for h, fcids := range shard.Contracts {
+				for _, fcid := range fcids {
+					if _, exists := usedContracts[h]; !exists {
+						usedContracts[h] = make(map[types.FileContractID]struct{})
+					}
+					usedContracts[h][fcid] = struct{}{}
+				}
+			}
+		}
+	}
 	return s.retryTransaction(func(tx *gorm.DB) error {
 		// Fetch contract set.
 		var cs dbContractSet
@@ -168,15 +182,15 @@ func (s *SQLStore) MultipartUploads(ctx context.Context, bucket, prefix, keyMark
 		limit++
 	}
 
-	prefixExpr := gorm.Expr("TRUE")
+	prefixExpr := exprTRUE
 	if prefix != "" {
 		prefixExpr = gorm.Expr("SUBSTR(object_id, 1, ?) = ?", utf8.RuneCountInString(prefix), prefix)
 	}
-	keyMarkerExpr := gorm.Expr("TRUE")
+	keyMarkerExpr := exprTRUE
 	if keyMarker != "" {
 		keyMarkerExpr = gorm.Expr("object_id > ?", keyMarker)
 	}
-	uploadIDMarkerExpr := gorm.Expr("TRUE")
+	uploadIDMarkerExpr := exprTRUE
 	if uploadIDMarker != "" {
 		uploadIDMarkerExpr = gorm.Expr("upload_id > ?", keyMarker)
 	}
@@ -186,7 +200,7 @@ func (s *SQLStore) MultipartUploads(ctx context.Context, bucket, prefix, keyMark
 		err := tx.
 			Model(&dbMultipartUpload{}).
 			Joins("DBBucket").
-			Where("? AND ? AND ?", prefixExpr, keyMarkerExpr, uploadIDMarkerExpr).
+			Where("? AND ? AND ? AND DBBucket.name = ?", prefixExpr, keyMarkerExpr, uploadIDMarkerExpr, bucket).
 			Limit(limit).
 			Find(&dbUploads).
 			Error
