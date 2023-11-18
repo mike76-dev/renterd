@@ -191,6 +191,8 @@ github.com/mike76-dev/sia-web/renterd v0.1.15 h1:+tHD6FKLvcVbzGYvRNLbYSqbGsHCa7Q
 github.com/mike76-dev/sia-web/renterd v0.1.15/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
 github.com/mike76-dev/sia-web/renterd v0.1.16 h1:4LlCwEPc+HC0uOrupxkvHNGneiQUklyEH5s8t2uFKBA=
 github.com/mike76-dev/sia-web/renterd v0.1.16/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
+github.com/mike76-dev/sia-web/renterd v0.1.17 h1:pBRFN0rAUUvWD9eRJ30E7g5aYYVTMFDdAbhxrmQQe0E=
+github.com/mike76-dev/sia-web/renterd v0.1.17/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
 github.com/minio/md5-simd v1.1.2 h1:Gdi1DZK69+ZVMoNHRXJyNcxrMA4dSxoYHZSQbirFg34=
 github.com/minio/md5-simd v1.1.2/go.mod h1:MzdKDxYpY2BT9XQFocsiZf/NKVtR7nkE4RoEpN+20RM=
 github.com/minio/minio-go/v7 v7.0.63 h1:GbZ2oCvaUdgT5640WJOpyDhhDxvknAJU2/T3yurwcbQ=
