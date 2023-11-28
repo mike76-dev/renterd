@@ -32,8 +32,8 @@ import (
 	"go.uber.org/zap"
 
 	// Satellite.
-	satellite "github.com/mike76-dev/renterd-satellite"
-	//"go.sia.tech/renterd/satellite"
+	//satellite "github.com/mike76-dev/renterd-satellite"
+	"go.sia.tech/renterd/satellite"
 )
 
 // Client re-exports the client from the client package.
@@ -2116,6 +2116,44 @@ func (b *bus) multipartHandlerCompletePOST(jc jape.Context) {
 	resp, err := b.ms.CompleteMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, req.UploadID, req.Parts)
 	if jc.Check("failed to complete multipart upload", err) != nil {
 		return
+	}
+	cfg, err := satellite.StaticSatellite.Config()
+	if jc.Check("couldn't fetch satellite config", err) != nil {
+		return
+	}
+	if cfg.Enabled {
+		ctx := jc.Request.Context()
+		rs, err := satellite.StaticSatellite.GetSettings(ctx)
+		if jc.Check("couldn't retrieve renter settings", err) != nil {
+			return
+		}
+		if rs.BackupFileMetadata {
+			obj, err := b.ms.Object(ctx, req.Bucket, req.Path)
+			if jc.Check("couldn't find object", err) != nil {
+				return
+			}
+			var partialSlabData []byte
+			for _, ps := range obj.PartialSlabs {
+				data, err := b.ms.FetchPartialSlab(ctx, ps.Key, ps.Offset, ps.Length)
+				if jc.Check("couldn't retrieve partial slab data", err) != nil {
+					return
+				}
+				partialSlabData = append(partialSlabData, data...)
+			}
+			err = satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
+				Key:          obj.Key,
+				Bucket:       req.Bucket,
+				Path:         req.Path,
+				ETag:         obj.ETag,
+				MimeType:     obj.MimeType,
+				Slabs:        obj.Slabs,
+				PartialSlabs: obj.PartialSlabs,
+				Data:         partialSlabData,
+			})
+			if jc.Check("couldn't send metadata to satellite", err) != nil {
+				return
+			}
+		}
 	}
 	jc.Encode(resp)
 }

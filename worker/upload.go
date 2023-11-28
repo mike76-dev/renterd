@@ -28,8 +28,8 @@ import (
 	"lukechampine.com/frand"
 
 	// Satellite.
-	satellite "github.com/mike76-dev/renterd-satellite"
-	//"go.sia.tech/renterd/satellite"
+	//satellite "github.com/mike76-dev/renterd-satellite"
+	"go.sia.tech/renterd/satellite"
 )
 
 const (
@@ -339,8 +339,20 @@ func (w *worker) uploadMultiPart(ctx context.Context, r io.Reader, bucket, path,
 		opt(&up)
 	}
 
+	// fetch satellite config
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		return "", err
+	}
+
+	// create a stream cipher
+	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	if err != nil {
+		return "", err
+	}
+
 	// upload the part
-	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, r, up, lockingPriorityUpload)
+	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, cr, up, lockingPriorityUpload)
 	if err != nil {
 		return "", fmt.Errorf("couldn't upload object: %w", err)
 	}

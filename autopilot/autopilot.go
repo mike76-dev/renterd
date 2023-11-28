@@ -27,8 +27,8 @@ import (
 	"lukechampine.com/frand"
 
 	// Satellite
-	satellite "github.com/mike76-dev/renterd-satellite"
-	//"go.sia.tech/renterd/satellite"
+	//satellite "github.com/mike76-dev/renterd-satellite"
+	"go.sia.tech/renterd/satellite"
 )
 
 type Bus interface {
@@ -207,26 +207,6 @@ func (ap *Autopilot) Run() error {
 	if online := ap.blockUntilOnline(); !online {
 		ap.logger.Error("autopilot stopped before it was able to come online")
 		return nil
-	}
-
-	// fetch satellite config
-	cfg, err := satellite.StaticSatellite.Config()
-	if err != nil {
-		ap.logger.Error("failed to fetch satellite config")
-	}
-
-	// request any missing contracts or file metadata from the satellite
-	if cfg.Enabled {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		satellite.StaticSatellite.RequestContracts(ctx)
-		err := ap.updateState(ctx)
-		if err != nil {
-			ap.logger.Errorf("failed to update state, err: %v", err)
-			cancel()
-			return nil
-		}
-		satellite.StaticSatellite.RequestMetadata(ctx, ap.State().cfg.Contracts.Set)
-		cancel()
 	}
 
 	var forceScan bool
