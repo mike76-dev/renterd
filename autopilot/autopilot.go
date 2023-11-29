@@ -226,6 +226,12 @@ func (ap *Autopilot) Run() error {
 			// reset forceScan
 			forceScan = false
 
+			// fetch satellite config
+			cfg, err := satellite.StaticSatellite.Config()
+			if err != nil {
+				ap.logger.Error("failed to fetch satellite config")
+			}
+
 			// block until consensus is synced
 			if synced, blocked, interrupted := ap.blockUntilSynced(ap.ticker.C); !synced {
 				if interrupted {
@@ -251,13 +257,15 @@ func (ap *Autopilot) Run() error {
 			}
 
 			// block until the autopilot is funded
-			if funded, interrupted := ap.blockUntilFunded(ap.ticker.C); !funded {
-				if interrupted {
-					close(tickerFired)
+			if !cfg.Enabled {
+				if funded, interrupted := ap.blockUntilFunded(ap.ticker.C); !funded {
+					if interrupted {
+						close(tickerFired)
+						return
+					}
+					ap.logger.Error("autopilot stopped before wallet got funded")
 					return
 				}
-				ap.logger.Error("autopilot stopped before wallet got funded")
-				return
 			}
 
 			// Trace/Log worker id chosen for this maintenance iteration.
@@ -311,10 +319,6 @@ func (ap *Autopilot) Run() error {
 			}
 
 			// migration
-			cfg, err := satellite.StaticSatellite.Config()
-			if err != nil {
-				ap.logger.Error("failed to fetch satellite config")
-			}
 			if cfg.Enabled {
 				sctx, cancel := context.WithTimeout(ctx, time.Minute)
 				rs, err := satellite.StaticSatellite.GetSettings(sctx)
