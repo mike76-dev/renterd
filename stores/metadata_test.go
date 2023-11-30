@@ -972,6 +972,7 @@ func TestSQLMetadataStore(t *testing.T) {
 	one := uint(1)
 	expectedObj := dbObject{
 		DBBucketID: 1,
+		Health:     1,
 		ObjectID:   objID,
 		Key:        obj1Key,
 		Size:       obj1.TotalSize(),
@@ -1390,6 +1391,11 @@ func TestObjectEntries(t *testing.T) {
 	}
 	if err := ss.overrideSlabHealth("/foo/baz/quux", 0.75); err != nil {
 		t.Fatal(err)
+	}
+
+	// update health of objects to match the overridden health of the slabs
+	if err := updateAllObjectsHealth(ss.db); err != nil {
+		t.Fatal()
 	}
 
 	tests := []struct {
@@ -2377,7 +2383,7 @@ func TestObjectsStats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(info, api.ObjectsStatsResponse{}) {
+	if !reflect.DeepEqual(info, api.ObjectsStatsResponse{MinHealth: 1}) {
 		t.Fatal("unexpected stats", info)
 	}
 
@@ -2555,8 +2561,8 @@ func TestPartialSlab(t *testing.T) {
 	assertBuffer(buffer1Name, 4, false, false)
 
 	// Use the added partial slab to create an object.
-	testObject := func(partialSlabs []object.PartialSlab) object.Object {
-		return object.Object{
+	testObject := func(partialSlabs []object.SlabSlice) object.Object {
+		obj := object.Object{
 			Key: object.GenerateEncryptionKey(),
 			Slabs: []object.SlabSlice{
 				{
@@ -2573,8 +2579,9 @@ func TestPartialSlab(t *testing.T) {
 					Length: rhpv2.SectorSize,
 				},
 			},
-			PartialSlabs: slabs,
 		}
+		obj.Slabs = append(obj.Slabs, partialSlabs...)
+		return obj
 	}
 	obj := testObject(slabs)
 	err = ss.UpdateObject(context.Background(), api.DefaultBucketName, "key", testContractSet, testETag, testMimeType, obj)
@@ -3283,16 +3290,15 @@ func TestMarkSlabUploadedAfterRenew(t *testing.T) {
 
 	// create a full buffered slab.
 	completeSize := bufferedSlabSize(1)
-	ps, _, err := ss.AddPartialSlab(context.Background(), frand.Bytes(completeSize), 1, 1, testContractSet)
+	slabs, _, err := ss.AddPartialSlab(context.Background(), frand.Bytes(completeSize), 1, 1, testContractSet)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// add it to an object to prevent it from getting pruned.
 	err = ss.UpdateObject(context.Background(), api.DefaultBucketName, "foo", testContractSet, "", "", object.Object{
-		Key:          object.GenerateEncryptionKey(),
-		Slabs:        nil,
-		PartialSlabs: ps,
+		Key:   object.GenerateEncryptionKey(),
+		Slabs: slabs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3387,6 +3393,11 @@ func TestListObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// update health of objects to match the overridden health of the slabs
+	if err := updateAllObjectsHealth(ss.db); err != nil {
+		t.Fatal()
+	}
+
 	tests := []struct {
 		prefix  string
 		sortBy  string
@@ -3463,10 +3474,11 @@ func TestDeleteHostSector(t *testing.T) {
 	}
 
 	// create a healthy slab with one sector that is uploaded to all contracts.
+	key, _ := object.GenerateEncryptionKey().MarshalBinary()
 	root := types.Hash256{1, 2, 3}
 	slab := dbSlab{
 		DBContractSetID:  1,
-		Key:              []byte(object.GenerateEncryptionKey().String()),
+		Key:              key,
 		Health:           1.0,
 		HealthValidUntil: time.Now().Add(time.Hour).Unix(),
 		TotalShards:      1,

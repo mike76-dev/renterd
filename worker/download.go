@@ -226,20 +226,7 @@ func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o o
 	for _, s := range o.Slabs {
 		ss = append(ss, slabSlice{
 			SlabSlice:   s,
-			PartialSlab: false,
-		})
-	}
-	for _, ps := range o.PartialSlabs {
-		// add fake slab for partial slabs
-		ss = append(ss, slabSlice{
-			SlabSlice: object.SlabSlice{
-				Slab: object.Slab{
-					Key: ps.Key,
-				},
-				Offset: ps.Offset,
-				Length: ps.Length,
-			},
-			PartialSlab: true,
+			PartialSlab: s.IsPartial(),
 		})
 	}
 	slabs := slabsForDownload(ss, offset, length)
@@ -258,7 +245,7 @@ func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o o
 		}
 		if slab != nil {
 			slabs[i].SlabSlice.Slab = *slab
-			slabs[i].PartialSlab = false
+			slabs[i].PartialSlab = slab.IsPartial()
 		} else {
 			slabs[i].Data = data
 		}

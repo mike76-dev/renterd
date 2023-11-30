@@ -154,7 +154,7 @@ type (
 		UpdateObject(ctx context.Context, bucketName, path, contractSet, ETag, mimeType string, o object.Object) error
 
 		AbortMultipartUpload(ctx context.Context, bucketName, path string, uploadID string) (err error)
-		AddMultipartPart(ctx context.Context, bucketName, path, contractSet, eTag, uploadID string, partNumber int, slices []object.SlabSlice, partialSlab []object.PartialSlab) (err error)
+		AddMultipartPart(ctx context.Context, bucketName, path, contractSet, eTag, uploadID string, partNumber int, slices []object.SlabSlice) (err error)
 		CompleteMultipartUpload(ctx context.Context, bucketName, path, uploadID string, parts []api.MultipartCompletedPart) (_ api.MultipartCompleteResponse, err error)
 		CreateMultipartUpload(ctx context.Context, bucketName, path string, ec object.EncryptionKey, mimeType string) (api.MultipartCreateResponse, error)
 		MultipartUpload(ctx context.Context, uploadID string) (resp api.MultipartUpload, _ error)
@@ -165,7 +165,7 @@ type (
 		PackedSlabsForUpload(ctx context.Context, lockingDuration time.Duration, minShards, totalShards uint8, set string, limit int) ([]api.PackedSlab, error)
 		SlabBuffers(ctx context.Context) ([]api.SlabBuffer, error)
 
-		AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) (slabs []object.PartialSlab, bufferSize int64, err error)
+		AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) (slabs []object.SlabSlice, bufferSize int64, err error)
 		FetchPartialSlab(ctx context.Context, key object.EncryptionKey, offset, length uint32) ([]byte, error)
 		Slab(ctx context.Context, key object.EncryptionKey) (object.Slab, error)
 		RefreshHealth(ctx context.Context) error
@@ -205,6 +205,8 @@ type (
 
 		ContractSetChurnMetrics(ctx context.Context, start time.Time, n uint64, interval time.Duration, opts api.ContractSetChurnMetricsQueryOpts) ([]api.ContractSetChurnMetric, error)
 		RecordContractSetChurnMetric(ctx context.Context, metrics ...api.ContractSetChurnMetric) error
+
+		WalletMetrics(ctx context.Context, start time.Time, n uint64, interval time.Duration, opts api.WalletMetricsQueryOpts) ([]api.WalletMetric, error)
 	}
 )
 
@@ -2047,9 +2049,9 @@ func (b *bus) metricsHandlerGET(jc jape.Context) {
 	switch key := jc.PathParam("key"); key {
 	case api.MetricContract:
 		var opts api.ContractMetricsQueryOpts
-		if jc.DecodeForm("fcid", &opts.ContractID) != nil {
+		if jc.DecodeForm("contractID", &opts.ContractID) != nil {
 			return
-		} else if jc.DecodeForm("host", &opts.HostKey) != nil {
+		} else if jc.DecodeForm("hostKey", &opts.HostKey) != nil {
 			return
 		} else if metrics, err := b.metrics(jc.Request.Context(), key, start, n, interval, opts); jc.Check("failed to get contract metrics", err) != nil {
 			return
@@ -2081,6 +2083,14 @@ func (b *bus) metricsHandlerGET(jc jape.Context) {
 			jc.Encode(metrics)
 			return
 		}
+	case api.MetricWallet:
+		var opts api.WalletMetricsQueryOpts
+		if metrics, err := b.metrics(jc.Request.Context(), key, start, n, interval, opts); jc.Check("failed to get wallet metrics", err) != nil {
+			return
+		} else {
+			jc.Encode(metrics)
+			return
+		}
 	default:
 		jc.Error(fmt.Errorf("unknown metric '%s'", key), http.StatusBadRequest)
 		return
@@ -2095,6 +2105,8 @@ func (b *bus) metrics(ctx context.Context, key string, start time.Time, n uint64
 		return b.mtrcs.ContractSetMetrics(ctx, start, n, interval, opts.(api.ContractSetMetricsQueryOpts))
 	case api.MetricContractSetChurn:
 		return b.mtrcs.ContractSetChurnMetrics(ctx, start, n, interval, opts.(api.ContractSetChurnMetricsQueryOpts))
+	case api.MetricWallet:
+		return b.mtrcs.WalletMetrics(ctx, start, n, interval, opts.(api.WalletMetricsQueryOpts))
 	}
 	return nil, nil
 }
@@ -2198,7 +2210,7 @@ func (b *bus) multipartHandlerUploadPartPUT(jc jape.Context) {
 		jc.Error(errors.New("upload_id must be non-empty"), http.StatusBadRequest)
 		return
 	}
-	err := b.ms.AddMultipartPart(jc.Request.Context(), req.Bucket, req.Path, req.ContractSet, req.ETag, req.UploadID, req.PartNumber, req.Slices, req.PartialSlabs)
+	err := b.ms.AddMultipartPart(jc.Request.Context(), req.Bucket, req.Path, req.ContractSet, req.ETag, req.UploadID, req.PartNumber, req.Slices)
 	if jc.Check("failed to upload part", err) != nil {
 		return
 	}

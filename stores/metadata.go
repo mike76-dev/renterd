@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -106,9 +107,10 @@ type (
 		DBBucket   dbBucket
 		ObjectID   string `gorm:"index;uniqueIndex:idx_object_bucket"`
 
-		Key   secretKey
-		Slabs []dbSlice `gorm:"constraint:OnDelete:CASCADE"` // CASCADE to delete slices too
-		Size  int64
+		Key    secretKey
+		Slabs  []dbSlice `gorm:"constraint:OnDelete:CASCADE"` // CASCADE to delete slices too
+		Health float64   `gorm:"index;default:1.0; NOT NULL"`
+		Size   int64
 
 		MimeType string `json:"index"`
 		Etag     string `gorm:"index"`
@@ -184,6 +186,7 @@ type (
 	rawObjectSector struct {
 		// object
 		ObjectID       uint
+		ObjectIndex    uint64
 		ObjectKey      []byte
 		ObjectName     string
 		ObjectSize     int64
@@ -410,16 +413,13 @@ func (raw rawObject) convert() (api.Object, error) {
 	// filter out slabs without slab ID and buffered slabs - this is expected
 	// for an empty object or objects that end with a partial slab.
 	var filtered rawObject
-	var partialSlabSectors []*rawObjectSector
 	minHealth := math.MaxFloat64
-	for i, sector := range raw {
-		if sector.SlabID != 0 && !sector.SlabBuffered {
+	for _, sector := range raw {
+		if sector.SlabID != 0 {
 			filtered = append(filtered, sector)
 			if sector.SlabHealth < minHealth {
 				minHealth = sector.SlabHealth
 			}
-		} else if sector.SlabBuffered {
-			partialSlabSectors = append(partialSlabSectors, &raw[i])
 		}
 	}
 
@@ -429,9 +429,6 @@ func (raw rawObject) convert() (api.Object, error) {
 		var start int
 		// create a helper function to add a slab and update the state
 		addSlab := func(end int) error {
-			if filtered[start].SlabBuffered {
-				return nil // ignore partial slabs
-			}
 			if slab, err := filtered[start:end].toSlabSlice(); err != nil {
 				return err
 			} else {
@@ -443,12 +440,12 @@ func (raw rawObject) convert() (api.Object, error) {
 
 		curr := filtered[0]
 		for j, sector := range filtered {
-			if sector.SectorIndex == 0 {
+			if sector.ObjectIndex == 0 {
+				return api.Object{}, api.ErrObjectCorrupted
+			} else if sector.SectorIndex == 0 && !sector.SlabBuffered {
 				return api.Object{}, api.ErrObjectCorrupted
 			}
-			if sector.SlabID != curr.SlabID ||
-				sector.SliceOffset != curr.SliceOffset ||
-				sector.SliceLength != curr.SliceLength {
+			if sector.ObjectIndex != curr.ObjectIndex {
 				if err := addSlab(j); err != nil {
 					return api.Object{}, err
 				}
@@ -458,38 +455,21 @@ func (raw rawObject) convert() (api.Object, error) {
 		if err := addSlab(len(filtered)); err != nil {
 			return api.Object{}, err
 		}
-	} else {
-		minHealth = 1 // empty object
-	}
-
-	// fetch a potential partial slab from the buffer.
-	var partialSlabs []object.PartialSlab
-	for _, pss := range partialSlabSectors {
-		var key object.EncryptionKey
-		if err := key.UnmarshalBinary(pss.SlabKey); err != nil {
-			return api.Object{}, err
-		}
-		partialSlabs = append(partialSlabs, object.PartialSlab{
-			Key:    key,
-			Offset: pss.SliceOffset,
-			Length: pss.SliceLength,
-		})
 	}
 
 	// return object
 	return api.Object{
 		ObjectMetadata: api.ObjectMetadata{
 			ETag:     raw[0].ObjectETag,
-			Health:   minHealth,
+			Health:   raw[0].ObjectHealth,
 			MimeType: raw[0].ObjectMimeType,
 			ModTime:  raw[0].ObjectModTime.UTC(),
 			Name:     raw[0].ObjectName,
 			Size:     raw[0].ObjectSize,
 		},
 		Object: object.Object{
-			Key:          key,
-			PartialSlabs: partialSlabs,
-			Slabs:        slabs,
+			Key:   key,
+			Slabs: slabs,
 		},
 	}, nil
 }
@@ -497,11 +477,22 @@ func (raw rawObject) convert() (api.Object, error) {
 func (raw rawObject) toSlabSlice() (slice object.SlabSlice, _ error) {
 	if len(raw) == 0 {
 		return object.SlabSlice{}, errors.New("no sectors found")
+	} else if raw[0].SlabBuffered && len(raw) != 1 {
+		return object.SlabSlice{}, errors.New("buffered slab with multiple sectors")
 	}
 
 	// unmarshal key
 	if err := slice.Slab.Key.UnmarshalBinary(raw[0].SlabKey); err != nil {
 		return object.SlabSlice{}, err
+	}
+
+	// handle partial slab
+	if raw[0].SlabBuffered {
+		slice.Offset = raw[0].SliceOffset
+		slice.Length = raw[0].SliceLength
+		slice.Slab.MinShards = raw[0].SlabMinShards
+		slice.Slab.Health = raw[0].SlabHealth
+		return
 	}
 
 	// hydrate all sectors
@@ -649,11 +640,12 @@ func (s *SQLStore) ObjectsStats(ctx context.Context) (api.ObjectsStatsResponse, 
 	// Number of objects.
 	var objInfo struct {
 		NumObjects       uint64
+		MinHealth        float64
 		TotalObjectsSize uint64
 	}
 	err := s.db.
 		Model(&dbObject{}).
-		Select("COUNT(*) AS NumObjects, SUM(size) AS TotalObjectsSize").
+		Select("COUNT(*) AS NumObjects, COALESCE(MIN(health), 1) as MinHealth, SUM(size) AS TotalObjectsSize").
 		Scan(&objInfo).
 		Error
 	if err != nil {
@@ -692,6 +684,7 @@ func (s *SQLStore) ObjectsStats(ctx context.Context) (api.ObjectsStatsResponse, 
 	}
 
 	return api.ObjectsStatsResponse{
+		MinHealth:         objInfo.MinHealth,
 		NumObjects:        objInfo.NumObjects,
 		TotalObjectsSize:  objInfo.TotalObjectsSize,
 		TotalSectorsSize:  totalSectors * rhpv2.SectorSize,
@@ -1085,14 +1078,12 @@ func (s *SQLStore) SearchObjects(ctx context.Context, bucket, substring string, 
 
 	var objects []api.ObjectMetadata
 	err := s.db.
-		Select("o.object_id as name, MAX(o.size) as size, MIN(sla.health) as health").
+		Select("o.object_id as name, o.size as size, o.health as health").
 		Model(&dbObject{}).
 		Table("objects o").
 		Joins("INNER JOIN buckets b ON o.db_bucket_id = b.id").
-		Joins("LEFT JOIN slices sli ON o.id = sli.`db_object_id`").
-		Joins("LEFT JOIN slabs sla ON sli.db_slab_id = sla.`id`").
 		Where("INSTR(o.object_id, ?) > 0 AND b.name = ?", substring, bucket).
-		Group("o.object_id").
+		Order("o.object_id ASC").
 		Offset(offset).
 		Limit(limit).
 		Scan(&objects).Error
@@ -1101,6 +1092,11 @@ func (s *SQLStore) SearchObjects(ctx context.Context, bucket, substring string, 
 	}
 
 	return objects, nil
+}
+
+func replaceAnyValue(query string) string {
+	re := regexp.MustCompile(`ANY_VALUE\((.*?)\)`)
+	return re.ReplaceAllString(query, "$1")
 }
 
 func (s *SQLStore) ObjectEntries(ctx context.Context, bucket, path, prefix, sortBy, sortDir, marker string, offset, limit int) (metadata []api.ObjectMetadata, hasMore bool, err error) {
@@ -1153,45 +1149,55 @@ func (s *SQLStore) ObjectEntries(ctx context.Context, bucket, path, prefix, sort
 		offset = 0
 	}
 
-	// build objects query & parameters
-	objectsQuery := fmt.Sprintf(`
-SELECT
-	MAX(etag) AS ETag,
-	MAX(created_at) AS ModTime,
-	CASE slashindex WHEN 0 THEN %s ELSE %s END AS name,
-	SUM(size) AS size,
-	MIN(health) as health,
-	MAX(mimeType) as MimeType
-FROM (
-	SELECT MAX(etag) AS etag, MAX(objects.created_at) AS created_at, MAX(size) AS size, MIN(slabs.health) as health, MAX(objects.mime_type) as mimeType, SUBSTR(object_id, ?) AS trimmed , INSTR(SUBSTR(object_id, ?), "/") AS slashindex
-	FROM objects
-	INNER JOIN buckets b ON objects.db_bucket_id = b.id
-	LEFT JOIN slices ON objects.id = slices.db_object_id
-	LEFT JOIN slabs ON slices.db_slab_id = slabs.id
-	WHERE SUBSTR(object_id, 1, ?) = ? AND b.name = ?
-	GROUP BY object_id
-) AS m
-GROUP BY name
-HAVING SUBSTR(name, 1, ?) = ? AND name != ?
-`,
-		sqlConcat(s.db, "?", "trimmed"),
-		sqlConcat(s.db, "?", "substr(trimmed, 1, slashindex)"),
+	onameExpr := fmt.Sprintf("CASE INSTR(SUBSTR(object_id, ?), '/') WHEN 0 THEN %s ELSE %s END",
+		sqlConcat(s.db, "?", "SUBSTR(object_id, ?)"),
+		sqlConcat(s.db, "?", "substr(SUBSTR(object_id, ?), 1, INSTR(SUBSTR(object_id, ?), '/'))"),
 	)
 
+	// build objects query & parameters
+	objectsQuery := fmt.Sprintf(`
+SELECT ETag, ModTime, oname as Name, Size, Health, MimeType
+FROM (
+	SELECT ANY_VALUE(etag) AS ETag,
+	MAX(objects.created_at) AS ModTime,
+	%s AS oname,
+	SUM(size) AS Size,
+	MIN(health) as Health,
+	ANY_VALUE(mime_type) as MimeType
+	FROM objects
+	INNER JOIN buckets b ON objects.db_bucket_id = b.id
+	WHERE SUBSTR(object_id, 1, ?) = ? AND b.name = ? AND SUBSTR(%s, 1, ?) = ? AND %s != ?
+	GROUP BY oname
+) baseQuery
+`,
+		onameExpr,
+		onameExpr,
+		onameExpr,
+	)
+
+	if isSQLite(s.db) {
+		objectsQuery = replaceAnyValue(objectsQuery)
+	}
+
 	objectsQueryParams := []interface{}{
-		path, // sqlConcat(s.db, "?", "trimmed"),
-		path, // sqlConcat(s.db, "?", "substr(trimmed, 1, slashindex)")
+		utf8.RuneCountInString(path) + 1,       // onameExpr
+		path, utf8.RuneCountInString(path) + 1, // onameExpr
+		path, utf8.RuneCountInString(path) + 1, utf8.RuneCountInString(path) + 1, // onameExpr
 
-		utf8.RuneCountInString(path) + 1, // SUBSTR(object_id, ?)
-		utf8.RuneCountInString(path) + 1, // INSTR(SUBSTR(object_id, ?), "/")
+		utf8.RuneCountInString(path), // WHERE SUBSTR(%s, 1, ?) = ? AND %s != ? AND b.name = ?
+		path,                         // WHERE SUBSTR(%s, 1, ?) = ? AND %s != ? AND b.name = ?
+		bucket,                       // WHERE SUBSTR(%s, 1, ?) = ? AND %s != ? AND b.name = ?
 
-		utf8.RuneCountInString(path), // WHERE SUBSTR(object_id, 1, ?) = ? AND b.name = ?
-		path,                         // WHERE SUBSTR(object_id, 1, ?) = ? AND b.name = ?
-		bucket,                       // WHERE SUBSTR(object_id, 1, ?) = ? AND b.name = ?
+		utf8.RuneCountInString(path) + 1,       // onameExpr
+		path, utf8.RuneCountInString(path) + 1, // onameExpr
+		path, utf8.RuneCountInString(path) + 1, utf8.RuneCountInString(path) + 1, // onameExpr
 
-		utf8.RuneCountInString(path + prefix), // HAVING SUBSTR(name, 1, ?) = ? AND name != ?
-		path + prefix,                         // HAVING SUBSTR(name, 1, ?) = ? AND name != ?
-		path,                                  // HAVING SUBSTR(name, 1, ?) = ? AND name != ?
+		utf8.RuneCountInString(path + prefix),  // WHERE SUBSTR(%s, 1, ?) = ? AND %s != ? AND b.name = ?
+		path + prefix,                          // WHERE SUBSTR(%s, 1, ?) = ? AND %s != ? AND b.name = ?
+		utf8.RuneCountInString(path) + 1,       // onameExpr
+		path, utf8.RuneCountInString(path) + 1, // onameExpr
+		path, utf8.RuneCountInString(path) + 1, utf8.RuneCountInString(path) + 1, // onameExpr
+		path, // WHERE SUBSTR(%s, 1, ?) = ? AND %s != ? AND b.name = ?
 	}
 
 	// build marker expr
@@ -1202,24 +1208,24 @@ HAVING SUBSTR(name, 1, ?) = ? AND name != ?
 		case api.ObjectSortByHealth:
 			var markerHealth float64
 			if err = s.db.
-				Raw(fmt.Sprintf(`SELECT health FROM (%s AND name >= ? ORDER BY name LIMIT 1) as n`, objectsQuery), append(objectsQueryParams, marker)...).
+				Raw(fmt.Sprintf(`SELECT Health FROM (%s WHERE Name >= ? ORDER BY Name LIMIT 1) as n`, objectsQuery), append(objectsQueryParams, marker)...).
 				Scan(&markerHealth).
 				Error; err != nil {
 				return
 			}
 
 			if sortDir == api.ObjectSortDirAsc {
-				markerExpr = "(health > ? OR (health = ? AND name > ?))"
+				markerExpr = "(Health > ? OR (Health = ? AND Name > ?))"
 				markerParams = []interface{}{markerHealth, markerHealth, marker}
 			} else {
-				markerExpr = "(health = ? AND name > ?) OR health < ?"
+				markerExpr = "(Health = ? AND Name > ?) OR Health < ?"
 				markerParams = []interface{}{markerHealth, marker, markerHealth}
 			}
 		case api.ObjectSortByName:
 			if sortDir == api.ObjectSortDirAsc {
-				markerExpr = "name > ?"
+				markerExpr = "Name > ?"
 			} else {
-				markerExpr = "name < ?"
+				markerExpr = "Name < ?"
 			}
 			markerParams = []interface{}{marker}
 		default:
@@ -1230,7 +1236,7 @@ HAVING SUBSTR(name, 1, ?) = ? AND name != ?
 	// build order clause
 	orderByClause := fmt.Sprintf("%s %s", sortBy, sortDir)
 	if sortBy == api.ObjectSortByHealth {
-		orderByClause += ", name"
+		orderByClause += ", Name"
 	}
 
 	var rows []rawObjectMetadata
@@ -1471,7 +1477,7 @@ func (s *SQLStore) FetchPartialSlab(ctx context.Context, ec object.EncryptionKey
 	return s.slabBufferMgr.FetchPartialSlab(ctx, ec, offset, length)
 }
 
-func (s *SQLStore) AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) ([]object.PartialSlab, int64, error) {
+func (s *SQLStore) AddPartialSlab(ctx context.Context, data []byte, minShards, totalShards uint8, contractSet string) ([]object.SlabSlice, int64, error) {
 	var contractSetID uint
 	if err := s.db.Raw("SELECT id FROM contract_sets WHERE name = ?", contractSet).Scan(&contractSetID).Error; err != nil {
 		return nil, 0, err
@@ -1697,7 +1703,7 @@ func (s *SQLStore) UpdateObject(ctx context.Context, bucket, path, contractSet, 
 		}
 
 		// Create all slices. This also creates any missing slabs or sectors.
-		if err := s.createSlices(tx, &obj.ID, nil, cs.ID, contracts, o.Slabs, o.PartialSlabs); err != nil {
+		if err := s.createSlices(tx, &obj.ID, nil, cs.ID, contracts, o.Slabs); err != nil {
 			return fmt.Errorf("failed to create slices: %w", err)
 		}
 		return nil
@@ -1907,17 +1913,35 @@ LIMIT ?
 			s.objectsMu.Lock()
 			defer s.objectsMu.Unlock()
 
+			// create temp table from the health query since we will reuse it
+			if err := tx.Exec("DROP TABLE IF EXISTS src").Error; err != nil {
+				return err
+			} else if err = tx.Exec("CREATE TEMPORARY TABLE src AS ?", healthQuery).Error; err != nil {
+				return err
+			}
+
 			var res *gorm.DB
 			if isSQLite(s.db) {
-				res = tx.Exec("UPDATE slabs SET health = src.health, health_valid_until = (?) FROM (?) AS src WHERE slabs.id=src.id", sqlRandomTimestamp(s.db, now, refreshHealthMinHealthValidity, refreshHealthMaxHealthValidity), healthQuery)
+				res = tx.Exec("UPDATE slabs SET health = src.health, health_valid_until = (?) FROM src WHERE slabs.id=src.id", sqlRandomTimestamp(s.db, now, refreshHealthMinHealthValidity, refreshHealthMaxHealthValidity))
 			} else {
-				res = tx.Exec("UPDATE slabs sla INNER JOIN (?) h ON sla.id = h.id SET sla.health = h.health, health_valid_until = (?)", healthQuery, sqlRandomTimestamp(s.db, now, refreshHealthMinHealthValidity, refreshHealthMaxHealthValidity))
+				res = tx.Exec("UPDATE slabs sla INNER JOIN src h ON sla.id = h.id SET sla.health = h.health, health_valid_until = (?)", sqlRandomTimestamp(s.db, now, refreshHealthMinHealthValidity, refreshHealthMaxHealthValidity))
 			}
 			if res.Error != nil {
 				return res.Error
 			}
 			rowsAffected = res.RowsAffected
-			return nil
+
+			// Update the health of the objects associated with the updated slabs.
+			if isSQLite(s.db) {
+				return tx.Exec(`UPDATE objects SET health = src.health FROM src
+								INNER JOIN slices ON slices.db_slab_id = src.id
+								WHERE slices.db_object_id = objects.id`).Error
+			} else {
+				return tx.Exec(`UPDATE objects
+								INNER JOIN slices sli ON sli.db_object_id = objects.id
+								INNER JOIN src s ON s.id = sli.db_slab_id
+								SET objects.health = s.health`).Error
+			}
 		})
 		if err != nil {
 			return err
@@ -1971,7 +1995,7 @@ func (s *SQLStore) UnhealthySlabs(ctx context.Context, healthCutoff float64, set
 	return slabs, nil
 }
 
-func (s *SQLStore) createSlices(tx *gorm.DB, objID, multiPartID *uint, contractSetID uint, contracts map[types.FileContractID]dbContract, slices []object.SlabSlice, partialSlabs []object.PartialSlab) error {
+func (s *SQLStore) createSlices(tx *gorm.DB, objID, multiPartID *uint, contractSetID uint, contracts map[types.FileContractID]dbContract, slices []object.SlabSlice) error {
 	if (objID == nil && multiPartID == nil) || (objID != nil && multiPartID != nil) {
 		return fmt.Errorf("either objID or multiPartID must be set")
 	}
@@ -1983,17 +2007,17 @@ func (s *SQLStore) createSlices(tx *gorm.DB, objID, multiPartID *uint, contractS
 			return fmt.Errorf("failed to marshal slab key: %w", err)
 		}
 		slab := &dbSlab{
-			Key:         slabKey,
-			MinShards:   ss.MinShards,
-			TotalShards: uint8(len(ss.Shards)),
+			Key:             slabKey,
+			DBContractSetID: contractSetID,
+			MinShards:       ss.MinShards,
+			TotalShards:     uint8(len(ss.Shards)),
 		}
 		err = tx.Where(dbSlab{Key: slabKey}).
-			Assign(dbSlab{
-				DBContractSetID: contractSetID,
-			}).
 			FirstOrCreate(&slab).Error
 		if err != nil {
 			return fmt.Errorf("failed to create slab %v/%v: %w", i+1, len(slices), err)
+		} else if slab.DBContractSetID != contractSetID {
+			return fmt.Errorf("slab already exists in another contract set %v != %v", slab.DBContractSetID, contractSetID)
 		}
 
 		// Create Slice.
@@ -2041,37 +2065,6 @@ func (s *SQLStore) createSlices(tx *gorm.DB, objID, multiPartID *uint, contractS
 			}
 		}
 	}
-
-	// Handle partial slabs. We create a slice for each partial slab.
-	if len(partialSlabs) == 0 {
-		return nil
-	}
-
-	for i, partialSlab := range partialSlabs {
-		key, err := partialSlab.Key.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		var buffer dbBufferedSlab
-		err = tx.Joins("DBSlab").
-			Take(&buffer, "DBSlab.key = ?", key).
-			Error
-		if err != nil {
-			return fmt.Errorf("failed to fetch buffered slab: %w", err)
-		}
-
-		err = tx.Create(&dbSlice{
-			DBObjectID:        objID,
-			ObjectIndex:       uint(len(slices) + i + 1),
-			DBMultipartPartID: multiPartID,
-			DBSlabID:          buffer.DBSlab.ID,
-			Offset:            partialSlab.Offset,
-			Length:            partialSlab.Length,
-		}).Error
-		if err != nil {
-			return fmt.Errorf("failed to create slice for partial slab: %w", err)
-		}
-	}
 	return nil
 }
 
@@ -2083,7 +2076,7 @@ func (s *SQLStore) object(ctx context.Context, txn *gorm.DB, bucket string, path
 	// accordingly
 	var rows rawObject
 	tx := s.db.
-		Select("o.id as ObjectID, o.key as ObjectKey, o.object_id as ObjectName, o.size as ObjectSize, o.mime_type as ObjectMimeType, o.created_at as ObjectModTime, o.etag as ObjectETag, sli.object_index, sli.offset as SliceOffset, sli.length as SliceLength, sla.id as SlabID, sla.health as SlabHealth, sla.key as SlabKey, sla.min_shards as SlabMinShards, bs.id IS NOT NULL AS SlabBuffered, sec.slab_index as SectorIndex, sec.root as SectorRoot, sec.latest_host as LatestHost, c.fcid as FCID, h.public_key as HostKey").
+		Select("o.id as ObjectID, o.health as ObjectHealth, sli.object_index as ObjectIndex, o.key as ObjectKey, o.object_id as ObjectName, o.size as ObjectSize, o.mime_type as ObjectMimeType, o.created_at as ObjectModTime, o.etag as ObjectETag, sli.object_index, sli.offset as SliceOffset, sli.length as SliceLength, sla.id as SlabID, sla.health as SlabHealth, sla.key as SlabKey, sla.min_shards as SlabMinShards, bs.id IS NOT NULL AS SlabBuffered, sec.slab_index as SectorIndex, sec.root as SectorRoot, sec.latest_host as LatestHost, c.fcid as FCID, h.public_key as HostKey").
 		Model(&dbObject{}).
 		Table("objects o").
 		Joins("INNER JOIN buckets b ON o.db_bucket_id = b.id").
@@ -2107,12 +2100,10 @@ func (s *SQLStore) object(ctx context.Context, txn *gorm.DB, bucket string, path
 
 func (s *SQLStore) objectHealth(ctx context.Context, tx *gorm.DB, objectID uint) (health float64, err error) {
 	if err = tx.
-		Select("COALESCE(MIN(sla.health), 1)").
+		Select("objects.health").
 		Model(&dbObject{}).
-		Table("objects o").
-		Joins("LEFT JOIN slices sli ON o.id = sli.`db_object_id`").
-		Joins("LEFT JOIN slabs sla ON sli.db_slab_id = sla.`id`").
-		Where("o.id = ?", objectID).
+		Table("objects").
+		Where("id", objectID).
 		Scan(&health).
 		Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		err = api.ErrObjectNotFound
@@ -2527,16 +2518,14 @@ func (s *SQLStore) ListObjects(ctx context.Context, bucket, prefix, sortBy, sort
 
 	var rows []rawObjectMetadata
 	if err := s.db.
-		Select("o.object_id as Name, MAX(o.size) as Size, MIN(sla.health) as Health, MAX(o.mime_type) as mimeType, MAX(o.created_at) as ModTime").
+		Select("o.object_id as Name, o.size as Size, o.health as Health, o.mime_type as mimeType, o.created_at as ModTime").
 		Model(&dbObject{}).
 		Table("objects o").
 		Joins("INNER JOIN buckets b ON o.db_bucket_id = b.id").
-		Joins("LEFT JOIN slices sli ON o.id = sli.`db_object_id`").
-		Joins("LEFT JOIN slabs sla ON sli.db_slab_id = sla.`id`").
 		Where("b.name = ? AND ? AND ?", bucket, prefixExpr, markerExpr).
-		Group("o.object_id").
 		Order(orderBy).
 		Order(markerOrderBy).
+		Order("Name ASC").
 		Limit(int(limit)).
 		Scan(&rows).Error; err != nil {
 		return api.ObjectsListResponse{}, err
@@ -2680,14 +2669,11 @@ func buildMarkerExpr(db *gorm.DB, bucket, prefix, marker, sortBy, sortDir string
 		var markerHealth float64
 		if marker != "" && sortBy == api.ObjectSortByHealth {
 			if err := db.
-				Select("MIN(sla.health)").
+				Select("o.health").
 				Model(&dbObject{}).
 				Table("objects o").
 				Joins("INNER JOIN buckets b ON o.db_bucket_id = b.id").
-				Joins("LEFT JOIN slices sli ON o.id = sli.`db_object_id`").
-				Joins("LEFT JOIN slabs sla ON sli.db_slab_id = sla.`id`").
 				Where("b.name = ? AND ? AND ?", bucket, buildPrefixExpr(prefix), gorm.Expr("o.object_id >= ?", marker)).
-				Group("o.object_id").
 				Limit(1).
 				Scan(&markerHealth).
 				Error; err != nil {
@@ -2729,6 +2715,17 @@ func buildPrefixExpr(prefix string) clause.Expr {
 	} else {
 		return exprTRUE
 	}
+}
+
+func updateAllObjectsHealth(tx *gorm.DB) error {
+	return tx.Exec(`
+UPDATE objects
+SET health = (
+	SELECT COALESCE(MIN(slabs.health), 1)
+	FROM slabs
+	INNER JOIN slices sli ON sli.db_slab_id = slabs.id
+	WHERE sli.db_object_id = objects.id)
+`).Error
 }
 
 func validateSort(sortBy, sortDir string) error {

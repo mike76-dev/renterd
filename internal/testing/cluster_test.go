@@ -31,18 +31,12 @@ import (
 	"lukechampine.com/frand"
 )
 
-const (
-	testEtag     = "d34db33f"
-	testMimeType = "application/octet-stream"
-)
-
 // TestNewTestCluster is a test for creating a cluster of Nodes for testing,
 // making sure that it forms contracts, renews contracts and shuts down.
 func TestNewTestCluster(t *testing.T) {
 	cluster := newTestCluster(t, clusterOptsDefault)
 	defer cluster.Shutdown()
 	b := cluster.Bus
-	w := cluster.Worker
 	tt := cluster.tt
 
 	// Upload packing should be disabled by default.
@@ -51,27 +45,6 @@ func TestNewTestCluster(t *testing.T) {
 	if ups.Enabled {
 		t.Fatalf("expected upload packing to be disabled by default, got %v", ups.Enabled)
 	}
-
-	// Try talking to the bus API by adding an object.
-	err = b.AddObject(context.Background(), api.DefaultBucketName, "foo", testAutopilotConfig.Contracts.Set, object.Object{
-		Key: object.GenerateEncryptionKey(),
-		Slabs: []object.SlabSlice{
-			{
-				Slab: object.Slab{
-					Key:       object.GenerateEncryptionKey(),
-					MinShards: 1,
-					Shards:    []object.Sector{}, // slab without sectors
-				},
-				Offset: 0,
-				Length: 0,
-			},
-		},
-	}, api.AddObjectOptions{MimeType: testMimeType, ETag: testEtag})
-	tt.OK(err)
-
-	// Try talking to the worker and request the object.
-	err = w.DeleteObject(context.Background(), api.DefaultBucketName, "foo", api.DeleteObjectOptions{})
-	tt.OK(err)
 
 	// See if autopilot is running by triggering the loop.
 	_, err = cluster.Autopilot.Trigger(false)
@@ -715,6 +688,9 @@ func TestUploadDownloadExtended(t *testing.T) {
 	}
 	if info.NumObjects != 4 {
 		t.Error("wrong number of objects", info.NumObjects, 4)
+	}
+	if info.MinHealth != 1 {
+		t.Errorf("expected minHealth of 1, got %v", info.MinHealth)
 	}
 
 	// download the data
@@ -1688,6 +1664,9 @@ func TestUploadPacking(t *testing.T) {
 		if os.TotalUploadedSize != uint64(totalRedundantSize) {
 			return fmt.Errorf("expected totalUploadedSize of %v, got %v", totalRedundantSize, os.TotalUploadedSize)
 		}
+		if os.MinHealth != 1 {
+			return fmt.Errorf("expected minHealth of 1, got %v", os.MinHealth)
+		}
 		return nil
 	})
 
@@ -1845,6 +1824,9 @@ func TestSlabBufferStats(t *testing.T) {
 		if os.TotalUploadedSize != 0 {
 			return fmt.Errorf("expected totalUploadedSize of 0, got %d", os.TotalUploadedSize)
 		}
+		if os.MinHealth != 1 {
+			t.Errorf("expected minHealth of 1, got %v", os.MinHealth)
+		}
 		return nil
 	})
 
@@ -1896,6 +1878,9 @@ func TestSlabBufferStats(t *testing.T) {
 		}
 		if os.TotalUploadedSize != 3*rhpv2.SectorSize {
 			return fmt.Errorf("expected totalUploadedSize of %d, got %d", 3*rhpv2.SectorSize, os.TotalUploadedSize)
+		}
+		if os.MinHealth != 1 {
+			t.Errorf("expected minHealth of 1, got %v", os.MinHealth)
 		}
 		return nil
 	})
@@ -2283,112 +2268,75 @@ func TestBusRecordedMetrics(t *testing.T) {
 	}
 }
 
-func TestSlabBufferPruning(t *testing.T) {
+func TestMultipartUploadWrappedByPartialSlabs(t *testing.T) {
 	if testing.Short() {
 		t.SkipNow()
 	}
 
-	// sanity check the default settings
-	if testAutopilotConfig.Contracts.Amount < uint64(testRedundancySettings.MinShards) {
-		t.Fatal("too few hosts to support the redundancy settings")
-	}
-
-	// set the redundancy settings to 5 out of 6 to to make sure a slab is 5
-	// sectors large and we can evenly divide it by 5 for the test.
-	rs := api.RedundancySettings{
-		MinShards:   5,
-		TotalShards: 6,
-	}
-	apCfg := testAutopilotConfig
-	apCfg.Contracts.Amount = uint64(rs.TotalShards)
-
-	// create a test cluster
 	cluster := newTestCluster(t, testClusterOptions{
-		autopilotSettings: &apCfg,
-		hosts:             rs.TotalShards,
-		uploadPacking:     true,
+		hosts:         testRedundancySettings.TotalShards,
+		uploadPacking: true,
 	})
 	defer cluster.Shutdown()
-
+	defer cluster.Shutdown()
+	b := cluster.Bus
 	w := cluster.Worker
+	slabSize := testRedundancySettings.SlabSizeNoRedundancy()
 	tt := cluster.tt
 
-	assertBuffer := func(size int) []api.SlabBuffer {
-		t.Helper()
-		buffers, err := cluster.Bus.SlabBuffers()
-		if err != nil {
-			t.Fatal(err)
-		} else if len(buffers) != 1 {
-			t.Fatalf("expected 1 slab buffer, got %v", len(buffers))
-		} else if buffers[0].Size != int64(size) {
-			t.Fatalf("expected buffer size of %v, got %v", size, buffers[0].Size)
-		}
-		return buffers
+	// start a new multipart upload. We upload the parts in reverse order
+	objPath := "/foo"
+	mpr, err := b.CreateMultipartUpload(context.Background(), api.DefaultBucketName, objPath, api.CreateMultipartOptions{Key: object.GenerateEncryptionKey()})
+	tt.OK(err)
+	if mpr.UploadID == "" {
+		t.Fatal("expected non-empty upload ID")
 	}
 
-	tt.OK(cluster.Bus.UpdateSetting(context.Background(), api.SettingRedundancy, rs))
-
-	// prepare 5 files which make up for a full slab.
-	slabSize := rhpv2.SectorSize * rs.MinShards
-	nObjects := 5
-	partSize := slabSize / nObjects
-	randData := func() []byte { return frand.Bytes(partSize) }
-	var data2, data4, data6, data7, data8 = randData(), randData(), randData(), randData(), randData()
-
-	// upload them and delete the files 1, 3 and 5 right after uploading again.
-	// There should always be 1 buffer up until the last upload.
-	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(randData()), api.DefaultBucketName, "1", api.UploadObjectOptions{}))
-	tt.OK(w.DeleteObject(context.Background(), api.DefaultBucketName, "1", api.DeleteObjectOptions{}))
-	assertBuffer(1 * partSize)
-
-	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data2), api.DefaultBucketName, "2", api.UploadObjectOptions{}))
-	assertBuffer(2 * partSize)
-
-	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(randData()), api.DefaultBucketName, "3", api.UploadObjectOptions{}))
-	tt.OK(w.DeleteObject(context.Background(), api.DefaultBucketName, "3", api.DeleteObjectOptions{}))
-	assertBuffer(3 * partSize)
-
-	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data4), api.DefaultBucketName, "4", api.UploadObjectOptions{}))
-	bufferName := assertBuffer(4 * partSize)[0].Filename
-
-	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(randData()), api.DefaultBucketName, "5", api.UploadObjectOptions{}))
-	tt.OK(w.DeleteObject(context.Background(), api.DefaultBucketName, "5", api.DeleteObjectOptions{}))
-
-	// wait until the worker tries to upload the buffer and prunes it in the
-	// process
-	tt.Retry(100, 100*time.Millisecond, func() error {
-		buffers, err := cluster.Bus.SlabBuffers()
-		if err != nil {
-			t.Fatal(err)
-		} else if len(buffers) != 1 {
-			return fmt.Errorf("expected 1 slab buffer, got %v", len(buffers))
-		} else if buffers[0].Filename == bufferName {
-			return fmt.Errorf("expected buffer got pruned")
-		} else if buffers[0].Complete {
-			return fmt.Errorf("expected buffer to be incomplete")
-		} else if buffers[0].Size != int64(3*partSize) {
-			return fmt.Errorf("expected buffer size of %v, got %v", 3*partSize, buffers[0].Size)
-		}
-		return nil
+	// upload a part that is a partial slab
+	part3Data := bytes.Repeat([]byte{3}, int(slabSize)/4)
+	resp3, err := w.UploadMultipartUploadPart(context.Background(), bytes.NewReader(part3Data), api.DefaultBucketName, objPath, mpr.UploadID, 3, api.UploadMultipartUploadPartOptions{
+		EncryptionOffset: int(slabSize + slabSize/4),
 	})
+	tt.OK(err)
 
-	// add 3 new objects to replace the deleted ones, this should fill the buffer
-	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data6), api.DefaultBucketName, "6", api.UploadObjectOptions{}))
-	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data7), api.DefaultBucketName, "7", api.UploadObjectOptions{}))
-	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(data8), api.DefaultBucketName, "8", api.UploadObjectOptions{}))
+	// upload a part that is exactly a full slab
+	part2Data := bytes.Repeat([]byte{2}, int(slabSize))
+	resp2, err := w.UploadMultipartUploadPart(context.Background(), bytes.NewReader(part2Data), api.DefaultBucketName, objPath, mpr.UploadID, 2, api.UploadMultipartUploadPartOptions{
+		EncryptionOffset: int(slabSize / 4),
+	})
+	tt.OK(err)
 
-	// download data and check integrity
-	assertIntegrity := func(path string, expectedData []byte) {
-		t.Helper()
-		buffer := bytes.Buffer{}
-		tt.OK(w.DownloadObject(context.Background(), &buffer, api.DefaultBucketName, path, api.DownloadObjectOptions{}))
-		if !bytes.Equal(buffer.Bytes(), expectedData) {
-			t.Fatalf("unexpected data for %v: %v", path, cmp.Diff(buffer.Bytes(), expectedData))
-		}
+	// upload another part the same size as the first one
+	part1Data := bytes.Repeat([]byte{1}, int(slabSize)/4)
+	resp1, err := w.UploadMultipartUploadPart(context.Background(), bytes.NewReader(part1Data), api.DefaultBucketName, objPath, mpr.UploadID, 1, api.UploadMultipartUploadPartOptions{
+		EncryptionOffset: 0,
+	})
+	tt.OK(err)
+
+	// finish the upload
+	tt.OKAll(b.CompleteMultipartUpload(context.Background(), api.DefaultBucketName, objPath, mpr.UploadID, []api.MultipartCompletedPart{
+		{
+			PartNumber: 1,
+			ETag:       resp1.ETag,
+		},
+		{
+			PartNumber: 2,
+			ETag:       resp2.ETag,
+		},
+		{
+			PartNumber: 3,
+			ETag:       resp3.ETag,
+		},
+	}))
+
+	// download the object and verify its integrity
+	dst := new(bytes.Buffer)
+	tt.OK(w.DownloadObject(context.Background(), dst, api.DefaultBucketName, objPath, api.DownloadObjectOptions{}))
+	expectedData := append(part1Data, append(part2Data, part3Data...)...)
+	receivedData := dst.Bytes()
+	if len(receivedData) != len(expectedData) {
+		t.Fatalf("expected %v bytes, got %v", len(expectedData), len(receivedData))
+	} else if !bytes.Equal(receivedData, expectedData) {
+		t.Fatal("unexpected data")
 	}
-	assertIntegrity("2", data2)
-	assertIntegrity("4", data4)
-	assertIntegrity("6", data6)
-	assertIntegrity("7", data7)
-	assertIntegrity("8", data8)
 }
