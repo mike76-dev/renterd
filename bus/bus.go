@@ -2165,22 +2165,28 @@ func (b *bus) multipartHandlerCompletePOST(jc jape.Context) {
 				return
 			}
 			var partialSlabData []byte
-			for _, ps := range obj.PartialSlabs {
-				data, err := b.ms.FetchPartialSlab(ctx, ps.Key, ps.Offset, ps.Length)
+			for i, slab := range obj.Slabs {
+				fmt.Printf("DEBUG: slab %d: key %v, offset %v, length %v, shards: %v\n", i, slab.Key, slab.Offset, slab.Length, len(slab.Shards)) //TODO
+				if !slab.IsPartial() {
+					continue
+				}
+				data, err := b.ms.FetchPartialSlab(ctx, slab.Key, slab.Offset, slab.Length)
 				if jc.Check("couldn't retrieve partial slab data", err) != nil {
 					return
 				}
+				fmt.Printf("DEBUG: slab %d: %v\n", i, data[:80]) //TODO
 				partialSlabData = append(partialSlabData, data...)
 			}
+			fmt.Println("DEBUG: total partial slab data:", len(partialSlabData)) //TODO
+			fmt.Println("DEBUG: partial slab data:", partialSlabData[:256])      //TODO
 			err = satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
-				Key:          obj.Key,
-				Bucket:       req.Bucket,
-				Path:         req.Path,
-				ETag:         obj.ETag,
-				MimeType:     obj.MimeType,
-				Slabs:        obj.Slabs,
-				PartialSlabs: obj.PartialSlabs,
-				Data:         partialSlabData,
+				Key:      obj.Key,
+				Bucket:   req.Bucket,
+				Path:     req.Path,
+				ETag:     obj.ETag,
+				MimeType: obj.MimeType,
+				Slabs:    obj.Slabs,
+				Data:     partialSlabData,
 			})
 			if jc.Check("couldn't send metadata to satellite", err) != nil {
 				return

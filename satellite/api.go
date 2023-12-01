@@ -85,14 +85,13 @@ type RenterSettings struct {
 
 // FileMetadata contains the uploaded file metadata.
 type FileMetadata struct {
-	Key          object.EncryptionKey `json:"key"`
-	Bucket       string               `json:"bucket"`
-	Path         string               `json:"path"`
-	ETag         string               `json:"etag"`
-	MimeType     string               `json:"mime"`
-	Slabs        []object.SlabSlice   `json:"slabs"`
-	PartialSlabs []object.PartialSlab `json:"partialSlabs"`
-	Data         []byte               `json:"data"`
+	Key      object.EncryptionKey `json:"key"`
+	Bucket   string               `json:"bucket"`
+	Path     string               `json:"path"`
+	ETag     string               `json:"etag"`
+	MimeType string               `json:"mime"`
+	Slabs    []object.SlabSlice   `json:"slabs"`
+	Data     []byte               `json:"data"`
 }
 
 // SaveMetadataRequest is the request type for the SaveMetadata RPC.

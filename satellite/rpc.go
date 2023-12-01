@@ -44,8 +44,6 @@ var (
 	specifierRequestSlabs     = types.NewSpecifier("RequestSlabs")
 	specifierShareContracts   = types.NewSpecifier("ShareContracts")
 	specifierUploadFile       = types.NewSpecifier("UploadFile")
-	specifierCreateMultipart  = types.NewSpecifier("CreateMultipart")
-	specifierAbortMultipart   = types.NewSpecifier("AbortMultipart")
 )
 
 // generateKeyPair generates the keypair from a given seed.
@@ -789,36 +787,38 @@ func (s *Satellite) transferMetadata(ctx context.Context) {
 				s.logger.Error(fmt.Sprintf("couldn't find object %s: %s", entry.Name, err))
 				continue
 			}
-			var data []byte
-			if len(resp.Object.PartialSlabs) > 0 {
-				ps := resp.Object.PartialSlabs[0]
-				data, err = s.bus.FetchPartialSlab(ctx, ps.Key, ps.Offset, ps.Length)
+			var partialSlabData []byte
+			for _, slab := range resp.Object.Slabs {
+				if !slab.IsPartial() {
+					continue
+				}
+				data, err := s.bus.FetchPartialSlab(ctx, slab.Key, slab.Offset, slab.Length)
 				if err != nil && strings.Contains(err.Error(), api.ErrObjectNotFound.Error()) {
 					// Check if the slab was already uploaded.
-					slab, err := s.bus.Slab(ctx, ps.Key)
+					ss, err := s.bus.Slab(ctx, slab.Key)
 					if err != nil {
 						s.logger.Error(fmt.Sprintf("failed to fetch uploaded partial slab: %v", err))
 						continue
 					}
 					resp.Object.Slabs = append(resp.Object.Slabs, object.SlabSlice{
-						Slab:   slab,
-						Offset: ps.Offset,
-						Length: ps.Length,
+						Slab:   ss,
+						Offset: slab.Offset,
+						Length: slab.Length,
 					})
 				} else if err != nil {
 					s.logger.Error(fmt.Sprintf("failed to fetch partial slab: %v", err))
 					continue
 				}
+				partialSlabData = append(partialSlabData, data...)
 			}
 			StaticSatellite.SaveMetadata(ctx, FileMetadata{
-				Key:          resp.Object.Key,
-				Bucket:       bucket.Name,
-				Path:         entry.Name,
-				ETag:         resp.Object.ETag,
-				MimeType:     resp.Object.MimeType,
-				Slabs:        resp.Object.Slabs,
-				PartialSlabs: resp.Object.PartialSlabs,
-				Data:         data,
+				Key:      resp.Object.Key,
+				Bucket:   bucket.Name,
+				Path:     entry.Name,
+				ETag:     resp.Object.ETag,
+				MimeType: resp.Object.MimeType,
+				Slabs:    resp.Object.Slabs,
+				Data:     partialSlabData,
 			})
 		}
 	}
@@ -856,14 +856,13 @@ func (s *Satellite) saveMetadataHandler(jc jape.Context) {
 	smr := saveMetadataRequest{
 		PubKey: pk,
 		Metadata: encodedFileMetadata{
-			Key:          fmr.Metadata.Key,
-			Bucket:       encryptedBucket,
-			Path:         encryptedPath,
-			ETag:         fmr.Metadata.ETag,
-			MimeType:     encryptedMimeType,
-			Slabs:        fmr.Metadata.Slabs,
-			PartialSlabs: fmr.Metadata.PartialSlabs,
-			Data:         fmr.Metadata.Data,
+			Key:      fmr.Metadata.Key,
+			Bucket:   encryptedBucket,
+			Path:     encryptedPath,
+			ETag:     fmr.Metadata.ETag,
+			MimeType: encryptedMimeType,
+			Slabs:    fmr.Metadata.Slabs,
+			Data:     fmr.Metadata.Data,
 		},
 	}
 
@@ -1041,16 +1040,14 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 	var objects []object.Object
 	for _, fm := range rf.metadata {
 		obj := object.Object{
-			Key:          fm.Key,
-			Slabs:        fm.Slabs,
-			PartialSlabs: fm.PartialSlabs,
+			Key: fm.Key,
 		}
 		h2c := make(map[types.PublicKey]types.FileContractID)
 		for _, c := range contracts {
 			h2c[c.HostKey] = c.ID
 		}
 		used := make(map[types.PublicKey]types.FileContractID)
-		for _, s := range obj.Slabs {
+		for _, s := range fm.Slabs {
 			for _, ss := range s.Shards {
 				used[ss.LatestHost] = h2c[ss.LatestHost]
 			}
@@ -1087,30 +1084,36 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 				continue
 			}
 		}
+		var ms, ts int
 		if len(fm.Data) > 0 {
 			// Deduct redundancy params from the first slab. If there are
 			// no complete slabs, use the current redundancy settings.
-			ms := gp.RedundancySettings.MinShards
-			ts := gp.RedundancySettings.TotalShards
+			ms = gp.RedundancySettings.MinShards
+			ts = gp.RedundancySettings.TotalShards
 			if len(fm.Slabs) > 0 {
 				ms = int(fm.Slabs[0].MinShards)
 				ts = len(fm.Slabs[0].Shards)
 			}
-			ps, _, err := s.bus.AddPartialSlab(ctx, fm.Data, uint8(ms), uint8(ts), set)
-			if err != nil {
-				s.logger.Error(fmt.Sprintf("couldn't add partial slab: %s", err))
-				continue
-			}
-			obj.PartialSlabs = ps
 		}
-		for i, slab := range obj.Slabs {
-			for j, shard := range slab.Shards {
-				shard.Contracts = map[types.PublicKey][]types.FileContractID{
-					shard.LatestHost: {
-						used[shard.LatestHost],
-					},
+		for _, slab := range fm.Slabs {
+			if slab.IsPartial() {
+				ps, _, err := s.bus.AddPartialSlab(ctx, fm.Data[:slab.Length], uint8(ms), uint8(ts), set)
+				if err != nil {
+					s.logger.Error(fmt.Sprintf("couldn't add partial slab: %s", err))
+					continue
 				}
-				obj.Slabs[i].Shards[j] = shard
+				obj.Slabs = append(obj.Slabs, ps...)
+				fm.Data = fm.Data[slab.Length:]
+			} else {
+				for i, shard := range slab.Shards {
+					shard.Contracts = map[types.PublicKey][]types.FileContractID{
+						shard.LatestHost: {
+							used[shard.LatestHost],
+						},
+					}
+					slab.Shards[i] = shard
+				}
+				obj.Slabs = append(obj.Slabs, slab)
 			}
 		}
 		if err := s.bus.AddObject(ctx, bucket, path, set, obj, api.AddObjectOptions{

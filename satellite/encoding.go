@@ -484,14 +484,13 @@ func (rs *renterSignature) DecodeFrom(d *types.Decoder) {
 // encodedFileMetadata contains the file metadata with certain
 // fields encoded.
 type encodedFileMetadata struct {
-	Key          object.EncryptionKey `json:"key"`
-	Bucket       [255]byte            `json:"bucket"`
-	Path         [255]byte            `json:"path"`
-	ETag         string               `json:"etag"`
-	MimeType     [255]byte            `json:"mime"`
-	Slabs        []object.SlabSlice   `json:"slabs"`
-	PartialSlabs []object.PartialSlab `json:"partialSlabs"`
-	Data         []byte               `json:"data"`
+	Key      object.EncryptionKey `json:"key"`
+	Bucket   [255]byte            `json:"bucket"`
+	Path     [255]byte            `json:"path"`
+	ETag     string               `json:"etag"`
+	MimeType [255]byte            `json:"mime"`
+	Slabs    []object.SlabSlice   `json:"slabs"`
+	Data     []byte               `json:"data"`
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -502,28 +501,19 @@ func (fm *encodedFileMetadata) EncodeTo(e *types.Encoder) {
 	e.Write(fm.Path[:])
 	e.WriteString(fm.ETag)
 	e.Write(fm.MimeType[:])
-	e.WritePrefix(len(fm.Slabs) + len(fm.PartialSlabs))
+	e.WritePrefix(len(fm.Slabs))
 	for _, s := range fm.Slabs {
 		key, _ := hex.DecodeString(strings.TrimPrefix(s.Key.String(), "key:"))
 		e.Write(key[:])
 		e.WriteUint64(uint64(s.MinShards))
 		e.WriteUint64(uint64(s.Offset))
 		e.WriteUint64(uint64(s.Length))
-		e.WriteBool(false)
+		e.WriteBool(s.IsPartial())
 		e.WritePrefix(len(s.Shards))
 		for _, ss := range s.Shards {
 			e.Write(ss.LatestHost[:])
 			e.Write(ss.Root[:])
 		}
-	}
-	for _, ps := range fm.PartialSlabs {
-		key, _ := hex.DecodeString(strings.TrimPrefix(ps.Key.String(), "key:"))
-		e.Write(key[:])
-		e.WriteUint64(0)
-		e.WriteUint64(uint64(ps.Offset))
-		e.WriteUint64(uint64(ps.Length))
-		e.WriteBool(true)
-		e.WritePrefix(0)
 	}
 }
 
@@ -547,29 +537,22 @@ func (fm *encodedFileMetadata) DecodeFrom(d *types.Decoder) {
 		length := uint32(d.ReadUint64())
 		partial := d.ReadBool()
 		numShards := d.ReadPrefix()
-		if partial {
-			ps := object.PartialSlab{
-				Key:    key,
-				Offset: offset,
-				Length: length,
-			}
-			fm.PartialSlabs = append(fm.PartialSlabs, ps)
-		} else {
-			s := object.SlabSlice{
-				Slab: object.Slab{
-					Key:       key,
-					MinShards: minShards,
-				},
-				Offset: offset,
-				Length: length,
-			}
+		s := object.SlabSlice{
+			Slab: object.Slab{
+				Key:       key,
+				MinShards: minShards,
+			},
+			Offset: offset,
+			Length: length,
+		}
+		if !partial {
 			s.Shards = make([]object.Sector, numShards)
 			for j := 0; j < numShards; j++ {
 				d.Read(s.Shards[j].LatestHost[:])
 				d.Read(s.Shards[j].Root[:])
 			}
-			fm.Slabs = append(fm.Slabs, s)
 		}
+		fm.Slabs = append(fm.Slabs, s)
 	}
 }
 

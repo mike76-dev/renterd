@@ -263,13 +263,13 @@ func (w *worker) upload(ctx context.Context, r io.Reader, bucket, path string, o
 	}
 
 	// create a stream cipher
-	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	/*cr, err := cfg.EncryptionKey.Encrypt(r, 0)
 	if err != nil {
 		return "", err
-	}
+	}*/
 
 	// perform the upload
-	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, cr, up, lockingPriorityUpload)
+	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, r, up, lockingPriorityUpload) //TODO
 	if err != nil {
 		return "", fmt.Errorf("couldn't upload object: %w", err)
 	}
@@ -303,14 +303,13 @@ func (w *worker) upload(ctx context.Context, r io.Reader, bucket, path string, o
 		rs, err := satellite.StaticSatellite.GetSettings(ctx)
 		if err == nil && rs.BackupFileMetadata {
 			err = satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
-				Key:          obj.Key,
-				Bucket:       bucket,
-				Path:         path,
-				ETag:         eTag,
-				MimeType:     mimeType,
-				Slabs:        obj.Slabs,
-				PartialSlabs: obj.PartialSlabs,
-				Data:         partialSlabData,
+				Key:      obj.Key,
+				Bucket:   bucket,
+				Path:     path,
+				ETag:     eTag,
+				MimeType: mimeType,
+				Slabs:    obj.Slabs,
+				Data:     partialSlabData,
 			})
 			if err != nil {
 				w.logger.Errorf("couldn't send metadata to satellite: %v", err)
@@ -329,19 +328,19 @@ func (w *worker) uploadMultiPart(ctx context.Context, r io.Reader, bucket, path,
 	}
 
 	// fetch satellite config
-	cfg, err := satellite.StaticSatellite.Config()
+	/*cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return "", err
-	}
+	}*/
 
 	// create a stream cipher
-	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	/*cr, err := cfg.EncryptionKey.Encrypt(r, 0)
 	if err != nil {
 		return "", err
-	}
+	}*/
 
 	// upload the part
-	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, cr, up, lockingPriorityUpload)
+	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, r, up, lockingPriorityUpload)
 	if err != nil {
 		return "", fmt.Errorf("couldn't upload object: %w", err)
 	}
