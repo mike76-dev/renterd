@@ -21,8 +21,10 @@ import (
 	"go.sia.tech/renterd/tracing"
 	"go.uber.org/zap"
 	"lukechampine.com/frand"
+
 	// Satellite.
 	//satellite "github.com/mike76-dev/renterd-satellite"
+	"go.sia.tech/renterd/satellite"
 )
 
 const (
@@ -204,7 +206,6 @@ func newDownloader(host hostV3) *downloader {
 }
 
 func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o object.Object, offset, length uint64, contracts []api.ContractMetadata) (err error) {
-	fmt.Printf("DEBUG: DownloadObject called, offset %v, length %v\n", offset, length) //TODO
 	// add tracing
 	ctx, span := tracing.Tracer.Start(ctx, "download")
 	defer func() {
@@ -213,13 +214,13 @@ func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o o
 	}()
 
 	// fetch satellite config
-	/*cfg, err := satellite.StaticSatellite.Config()
+	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return err
-	}*/
+	}
 
 	// create stream cipher
-	//masterCw := cfg.EncryptionKey.Decrypt(w, 0)
+	masterCw := cfg.EncryptionKey.Decrypt(w, 0)
 
 	// create identifier
 	id := newID()
@@ -232,26 +233,21 @@ func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o o
 			PartialSlab: s.IsPartial(),
 		})
 	}
-	fmt.Printf("DEBUG: calculated slabs: %+v\n", ss) //TODO
 	slabs := slabsForDownload(ss, offset, length)
-	fmt.Printf("DEBUG: slabs for download: %+v\n", slabs) //TODO
 	if len(slabs) == 0 {
 		return nil
 	}
 
 	// go through the slabs and fetch any partial slab data from the store.
 	for i := range slabs {
-		fmt.Printf("DEBUG: slab %v, key %v, offset %v, length %v, partial %v\n", i, slabs[i].Key, slabs[i].Offset, slabs[i].Length, slabs[i].PartialSlab) //TODO
 		if !slabs[i].PartialSlab {
 			continue
 		}
 		data, slab, err := mgr.pss.PartialSlab(ctx, slabs[i].SlabSlice.Key, slabs[i].SlabSlice.Offset, slabs[i].SlabSlice.Length)
-		fmt.Printf("DEBUG: fetched data: %v %v\n", len(data), data[:80]) //TODO
 		if err != nil {
 			return fmt.Errorf("failed to fetch partial slab data: %w", err)
 		}
 		if slab != nil {
-			fmt.Println("DEBUG: non-nil slab returned, replacing") //TODO
 			slabs[i].SlabSlice.Slab = *slab
 			slabs[i].PartialSlab = slab.IsPartial()
 		} else {
@@ -269,7 +265,7 @@ func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o o
 	}
 
 	// create the cipher writer
-	cw := o.Key.Decrypt(w, offset) //TODO
+	cw := o.Key.Decrypt(masterCw, offset)
 
 	// create next slab chan
 	nextSlabChan := make(chan struct{})
@@ -363,7 +359,6 @@ outer:
 					s := slabs[respIndex]
 					if s.PartialSlab {
 						// Partial slab.
-						fmt.Printf("DEBUG: partial slab %v: %v\n", respIndex, s.Data[:80]) //TODO
 						_, err = cw.Write(s.Data)
 						if err != nil {
 							mgr.logger.Errorf("failed to send partial slab", respIndex, err)
@@ -372,7 +367,6 @@ outer:
 					} else {
 						// Regular slab.
 						slabs[respIndex].Decrypt(next.shards)
-						fmt.Printf("DEBUG: slab %v: %v shards\n", respIndex, len(next.shards)) //TODO
 						err := slabs[respIndex].Recover(cw, next.shards)
 						if err != nil {
 							mgr.logger.Errorf("failed to recover slab %v: %v", respIndex, err)

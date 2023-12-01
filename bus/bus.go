@@ -2178,8 +2178,7 @@ func (b *bus) multipartHandlerCompletePOST(jc jape.Context) {
 				return
 			}
 			var partialSlabData []byte
-			for i, slab := range obj.Slabs {
-				fmt.Printf("DEBUG: slab %d: key %v, offset %v, length %v, shards: %v\n", i, slab.Key, slab.Offset, slab.Length, len(slab.Shards)) //TODO
+			for _, slab := range obj.Slabs {
 				if !slab.IsPartial() {
 					continue
 				}
@@ -2187,11 +2186,8 @@ func (b *bus) multipartHandlerCompletePOST(jc jape.Context) {
 				if jc.Check("couldn't retrieve partial slab data", err) != nil {
 					return
 				}
-				fmt.Printf("DEBUG: slab %d: %v\n", i, data[:80]) //TODO
 				partialSlabData = append(partialSlabData, data...)
 			}
-			fmt.Println("DEBUG: total partial slab data:", len(partialSlabData)) //TODO
-			fmt.Println("DEBUG: partial slab data:", partialSlabData[:256])      //TODO
 			err = satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
 				Key:      obj.Key,
 				Bucket:   req.Bucket,

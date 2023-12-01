@@ -264,13 +264,13 @@ func (w *worker) upload(ctx context.Context, r io.Reader, contracts []api.Contra
 	}
 
 	// create a stream cipher
-	/*cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
 	if err != nil {
 		return "", err
-	}*/
+	}
 
 	// perform the upload
-	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, r, contracts, up, lockingPriorityUpload)
+	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, cr, contracts, up, lockingPriorityUpload)
 	if err != nil {
 		return "", fmt.Errorf("couldn't upload object: %w", err)
 	}
@@ -329,19 +329,19 @@ func (w *worker) uploadMultiPart(ctx context.Context, r io.Reader, contracts []a
 	}
 
 	// fetch satellite config
-	/*cfg, err := satellite.StaticSatellite.Config()
+	cfg, err := satellite.StaticSatellite.Config()
 	if err != nil {
 		return "", err
-	}*/
+	}
 
 	// create a stream cipher
-	/*cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
 	if err != nil {
 		return "", err
-	}*/
+	}
 
 	// upload the part
-	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, r, contracts, up, lockingPriorityUpload)
+	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, cr, contracts, up, lockingPriorityUpload)
 	if err != nil {
 		return "", fmt.Errorf("couldn't upload object: %w", err)
 	}
