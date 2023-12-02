@@ -992,7 +992,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 			return err
 		}
 
-		if err := stream.ReadResponse(&rf, 65536); err != nil {
+		if err := stream.ReadResponse(&rf, 4e7); err != nil {
 			return err
 		}
 
