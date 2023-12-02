@@ -585,6 +585,7 @@ func (smr *saveMetadataRequest) DecodeFrom(d *types.Decoder) {
 // renterFiles is a collection of FileMetadata.
 type renterFiles struct {
 	metadata []encodedFileMetadata
+	more     bool
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -606,6 +607,7 @@ func (rf *renterFiles) DecodeFrom(d *types.Decoder) {
 		rf.metadata = append(rf.metadata, fm)
 		num--
 	}
+	rf.more = d.ReadBool()
 }
 
 // encodedBucketFiles contains a list of filepaths within a single bucket.

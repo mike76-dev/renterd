@@ -983,44 +983,53 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 	}
 	addr := net.JoinHostPort(host, cfg.MuxPort)
 
-	var rf renterFiles
+	var metadata []encodedFileMetadata
 	err = withTransportV3(ctx, cfg.PublicKey, addr, func(t *rhpv3.Transport) (err error) {
 		stream := t.DialStream()
-		stream.SetDeadline(time.Now().Add(30 * time.Second))
-
+		stream.SetDeadline(time.Now().Add(5 * time.Second))
 		if err := stream.WriteRequest(specifierRequestMetadata, &rmr); err != nil {
 			return err
 		}
 
-		if err := stream.ReadResponse(&rf, 4e7); err != nil {
-			return err
-		}
-
-		for i := range rf.metadata {
-			var resp uploadResponse
-			if jc.Check("couldn't read response", stream.ReadResponse(&resp, 1024)) != nil {
+		for {
+			stream.SetDeadline(time.Now().Add(30 * time.Second))
+			var rf renterFiles
+			if err := stream.ReadResponse(&rf, 1048576); err != nil {
 				return err
 			}
 
-			if resp.DataSize == 0 {
-				continue
+			start := len(metadata)
+			metadata = append(metadata, rf.metadata...)
+			for i := range rf.metadata {
+				var resp uploadResponse
+				if jc.Check("couldn't read response", stream.ReadResponse(&resp, 1024)) != nil {
+					return err
+				}
+
+				if resp.DataSize == 0 {
+					continue
+				}
+
+				ud := uploadData{
+					More: true,
+				}
+				maxLen := uint64(1048576) + 8 + 1
+				offset := 0
+				for ud.More {
+					if jc.Check("couldn't read data", stream.ReadResponse(&ud, maxLen)) != nil {
+						return err
+					}
+					copy(metadata[start+i].Data[offset:], ud.Data)
+					offset += len(ud.Data)
+					resp.DataSize = uint64(len(ud.Data))
+					if jc.Check("couldn't write response", stream.WriteResponse(&resp)) != nil {
+						return err
+					}
+				}
 			}
 
-			ud := uploadData{
-				More: true,
-			}
-			maxLen := uint64(1048576) + 8 + 1
-			offset := 0
-			for ud.More {
-				if jc.Check("couldn't read data", stream.ReadResponse(&ud, maxLen)) != nil {
-					return err
-				}
-				copy(rf.metadata[i].Data[offset:], ud.Data)
-				offset += len(ud.Data)
-				resp.DataSize = uint64(len(ud.Data))
-				if jc.Check("couldn't write response", stream.WriteResponse(&resp)) != nil {
-					return err
-				}
+			if !rf.more {
+				break
 			}
 		}
 
@@ -1038,7 +1047,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 	}
 
 	var objects []object.Object
-	for _, fm := range rf.metadata {
+	for _, fm := range metadata {
 		obj := object.Object{
 			Key: fm.Key,
 		}
