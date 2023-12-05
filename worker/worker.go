@@ -817,40 +817,6 @@ func (w *worker) rhpFundHandler(jc jape.Context) {
 	}))
 }
 
-func (w *worker) rhpRegistryReadHandler(jc jape.Context) {
-	var rrrr api.RHPRegistryReadRequest
-	if jc.Decode(&rrrr) != nil {
-		return
-	}
-	var value rhpv3.RegistryValue
-	err := w.transportPoolV3.withTransportV3(jc.Request.Context(), rrrr.HostKey, rrrr.SiamuxAddr, func(ctx context.Context, t *transportV3) (err error) {
-		value, err = RPCReadRegistry(ctx, t, &rrrr.Payment, rrrr.RegistryKey)
-		return
-	})
-	if jc.Check("couldn't read registry", err) != nil {
-		return
-	}
-	jc.Encode(value)
-}
-
-func (w *worker) rhpRegistryUpdateHandler(jc jape.Context) {
-	var rrur api.RHPRegistryUpdateRequest
-	if jc.Decode(&rrur) != nil {
-		return
-	}
-	var pt rhpv3.HostPriceTable   // TODO
-	rc := pt.UpdateRegistryCost() // TODO: handle refund
-	cost, _ := rc.Total()
-	// TODO: refactor to a w.RegistryUpdate method that calls host.RegistryUpdate.
-	payment := preparePayment(w.accounts.deriveAccountKey(rrur.HostKey), cost, pt.HostBlockHeight)
-	err := w.transportPoolV3.withTransportV3(jc.Request.Context(), rrur.HostKey, rrur.SiamuxAddr, func(ctx context.Context, t *transportV3) (err error) {
-		return RPCUpdateRegistry(ctx, t, &payment, rrur.RegistryKey, rrur.RegistryValue)
-	})
-	if jc.Check("couldn't update registry", err) != nil {
-		return
-	}
-}
-
 func (w *worker) rhpSyncHandler(jc jape.Context) {
 	ctx := jc.Request.Context()
 
@@ -1437,7 +1403,8 @@ func (w *worker) idHandlerGET(jc jape.Context) {
 
 func (w *worker) memoryGET(jc jape.Context) {
 	jc.Encode(api.MemoryResponse{
-		Upload: w.uploadManager.mm.Status(),
+		Download: w.downloadManager.mm.Status(),
+		Upload:   w.uploadManager.mm.Status(),
 	})
 }
 
@@ -1453,19 +1420,19 @@ func (w *worker) accountHandlerGET(jc jape.Context) {
 func (w *worker) stateHandlerGET(jc jape.Context) {
 	jc.Encode(api.WorkerStateResponse{
 		ID:        w.id,
-		StartTime: w.startTime,
+		StartTime: api.TimeRFC3339(w.startTime),
 		BuildState: api.BuildState{
 			Network:   build.NetworkName(),
 			Version:   build.Version(),
 			Commit:    build.Commit(),
 			OS:        runtime.GOOS,
-			BuildTime: build.BuildTime(),
+			BuildTime: api.TimeRFC3339(build.BuildTime()),
 		},
 	})
 }
 
 // New returns an HTTP handler that serves the worker API.
-func New(masterKey [32]byte, id string, b Bus, contractLockingDuration, busFlushInterval, downloadOverdriveTimeout, uploadOverdriveTimeout time.Duration, downloadMaxOverdrive, uploadMaxMemory, uploadMaxOverdrive uint64, allowPrivateIPs bool, l *zap.Logger) (*worker, error) {
+func New(masterKey [32]byte, id string, b Bus, contractLockingDuration, busFlushInterval, downloadOverdriveTimeout, uploadOverdriveTimeout time.Duration, downloadMaxOverdrive, downloadMaxMemory, uploadMaxMemory, uploadMaxOverdrive uint64, allowPrivateIPs bool, l *zap.Logger) (*worker, error) {
 	if contractLockingDuration == 0 {
 		return nil, errors.New("contract lock duration must be positive")
 	}
@@ -1495,12 +1462,16 @@ func New(masterKey [32]byte, id string, b Bus, contractLockingDuration, busFlush
 	w.initAccounts(b)
 	w.initContractSpendingRecorder()
 	w.initPriceTables()
-	w.initDownloadManager(downloadMaxOverdrive, downloadOverdriveTimeout, l.Sugar().Named("downloadmanager"))
-	mm, err := newMemoryManager(w.logger, uploadMaxMemory)
+	dmm, err := newMemoryManager(w.logger, downloadMaxMemory)
 	if err != nil {
 		return nil, err
 	}
-	w.initUploadManager(mm, uploadMaxOverdrive, uploadOverdriveTimeout, l.Sugar().Named("uploadmanager"))
+	w.initDownloadManager(dmm, downloadMaxOverdrive, downloadOverdriveTimeout, l.Sugar().Named("downloadmanager"))
+	umm, err := newMemoryManager(w.logger, uploadMaxMemory)
+	if err != nil {
+		return nil, err
+	}
+	w.initUploadManager(umm, uploadMaxOverdrive, uploadOverdriveTimeout, l.Sugar().Named("uploadmanager"))
 	return w, nil
 }
 
@@ -1522,8 +1493,6 @@ func (w *worker) Handler() http.Handler {
 		"POST   /rhp/fund":                   w.rhpFundHandler,
 		"POST   /rhp/sync":                   w.rhpSyncHandler,
 		"POST   /rhp/pricetable":             w.rhpPriceTableHandler,
-		"POST   /rhp/registry/read":          w.rhpRegistryReadHandler,
-		"POST   /rhp/registry/update":        w.rhpRegistryUpdateHandler,
 
 		"GET    /stats/downloads": w.downloadsStatsHandlerGET,
 		"GET    /stats/uploads":   w.uploadsStatsHandlerGET,
