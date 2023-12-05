@@ -1311,6 +1311,22 @@ func (w *worker) multipartUploadHandlerPUT(jc jape.Context) {
 		return
 	}
 
+	cfg, err := satellite.StaticSatellite.Config()
+	if jc.Check("couldn't fetch satellite config", err) != nil {
+		return
+	}
+	if cfg.Enabled {
+		ctx := jc.Request.Context()
+		rs, err := satellite.StaticSatellite.GetSettings(ctx)
+		if jc.Check("couldn't retrieve renter settings", err) != nil {
+			return
+		}
+		if rs.ProxyUploads {
+			jc.Check("couldn't upload part", satellite.UploadPart(jc.Request.Body, uploadID, partNumber))
+			return
+		}
+	}
+
 	// built options
 	opts := []UploadOption{
 		WithBlockHeight(up.CurrentHeight),

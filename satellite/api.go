@@ -110,3 +110,16 @@ type BucketFiles struct {
 	Name  string   `json:"name"`
 	Paths []string `json:"paths"`
 }
+
+// CreateMultipartRequest is the request type for the CreateMultipart RPC.
+type CreateMultipartRequest struct {
+	Key      object.EncryptionKey `json:"key"`
+	Bucket   string               `json:"bucket"`
+	Path     string               `json:"path"`
+	MimeType string               `json:"mime"`
+}
+
+// CreateMultipartResponse is the response type for the CreateMultipart RPC.
+type CreateMultipartResponse struct {
+	UploadID string `json:"uploadID"`
+}

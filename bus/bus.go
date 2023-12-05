@@ -2135,6 +2135,29 @@ func (b *bus) multipartHandlerCreatePOST(jc jape.Context) {
 		key = object.NoOpKey
 	}
 
+	cfg, err := satellite.StaticSatellite.Config()
+	if jc.Check("couldn't fetch satellite config", err) != nil {
+		return
+	}
+	if cfg.Enabled {
+		ctx := jc.Request.Context()
+		rs, err := satellite.StaticSatellite.GetSettings(ctx)
+		if jc.Check("couldn't retrieve renter settings", err) != nil {
+			return
+		}
+		if rs.ProxyUploads {
+			id, err := satellite.StaticSatellite.CreateMultipart(ctx, key, req.Bucket, req.Path, req.MimeType)
+			if jc.Check("couldn't register multipart upload", err) != nil {
+				return
+			}
+			resp := api.MultipartCreateResponse{
+				UploadID: id,
+			}
+			jc.Encode(resp)
+			return
+		}
+	}
+
 	resp, err := b.ms.CreateMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, key, req.MimeType)
 	if jc.Check("failed to create multipart upload", err) != nil {
 		return
@@ -2147,21 +2170,7 @@ func (b *bus) multipartHandlerAbortPOST(jc jape.Context) {
 	if jc.Decode(&req) != nil {
 		return
 	}
-	err := b.ms.AbortMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, req.UploadID)
-	if jc.Check("failed to abort multipart upload", err) != nil {
-		return
-	}
-}
 
-func (b *bus) multipartHandlerCompletePOST(jc jape.Context) {
-	var req api.MultipartCompleteRequest
-	if jc.Decode(&req) != nil {
-		return
-	}
-	resp, err := b.ms.CompleteMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, req.UploadID, req.Parts)
-	if jc.Check("failed to complete multipart upload", err) != nil {
-		return
-	}
 	cfg, err := satellite.StaticSatellite.Config()
 	if jc.Check("couldn't fetch satellite config", err) != nil {
 		return
@@ -2172,34 +2181,75 @@ func (b *bus) multipartHandlerCompletePOST(jc jape.Context) {
 		if jc.Check("couldn't retrieve renter settings", err) != nil {
 			return
 		}
-		if rs.BackupFileMetadata {
-			obj, err := b.ms.Object(ctx, req.Bucket, req.Path)
-			if jc.Check("couldn't find object", err) != nil {
+		if rs.ProxyUploads {
+			satellite.StaticSatellite.AbortMultipart(ctx, req.UploadID)
+			return
+		}
+	}
+
+	err = b.ms.AbortMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, req.UploadID)
+	if jc.Check("failed to abort multipart upload", err) != nil {
+		return
+	}
+}
+
+func (b *bus) multipartHandlerCompletePOST(jc jape.Context) {
+	var req api.MultipartCompleteRequest
+	if jc.Decode(&req) != nil {
+		return
+	}
+
+	cfg, err := satellite.StaticSatellite.Config()
+	if jc.Check("couldn't fetch satellite config", err) != nil {
+		return
+	}
+	ctx := jc.Request.Context()
+	var rs satellite.RenterSettings
+	if cfg.Enabled {
+		rs, err = satellite.StaticSatellite.GetSettings(ctx)
+		if jc.Check("couldn't retrieve renter settings", err) != nil {
+			return
+		}
+		if rs.ProxyUploads {
+			if jc.Check("failed to complete multipart upload", satellite.StaticSatellite.CompleteMultipart(ctx, req.UploadID)) != nil {
 				return
 			}
-			var partialSlabData []byte
-			for _, slab := range obj.Slabs {
-				if !slab.IsPartial() {
-					continue
-				}
-				data, err := b.ms.FetchPartialSlab(ctx, slab.Key, slab.Offset, slab.Length)
-				if jc.Check("couldn't retrieve partial slab data", err) != nil {
-					return
-				}
-				partialSlabData = append(partialSlabData, data...)
+			jc.Encode(api.MultipartCompleteResponse{})
+			return
+		}
+	}
+
+	resp, err := b.ms.CompleteMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, req.UploadID, req.Parts)
+	if jc.Check("failed to complete multipart upload", err) != nil {
+		return
+	}
+	if cfg.Enabled && rs.BackupFileMetadata {
+		obj, err := b.ms.Object(ctx, req.Bucket, req.Path)
+		if jc.Check("couldn't find object", err) != nil {
+			return
+		}
+		var partialSlabData []byte
+		for _, slab := range obj.Slabs {
+			if !slab.IsPartial() {
+				continue
 			}
-			err = satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
-				Key:      obj.Key,
-				Bucket:   req.Bucket,
-				Path:     req.Path,
-				ETag:     obj.ETag,
-				MimeType: obj.MimeType,
-				Slabs:    obj.Slabs,
-				Data:     partialSlabData,
-			})
-			if jc.Check("couldn't send metadata to satellite", err) != nil {
+			data, err := b.ms.FetchPartialSlab(ctx, slab.Key, slab.Offset, slab.Length)
+			if jc.Check("couldn't retrieve partial slab data", err) != nil {
 				return
 			}
+			partialSlabData = append(partialSlabData, data...)
+		}
+		err = satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
+			Key:      obj.Key,
+			Bucket:   req.Bucket,
+			Path:     req.Path,
+			ETag:     obj.ETag,
+			MimeType: obj.MimeType,
+			Slabs:    obj.Slabs,
+			Data:     partialSlabData,
+		})
+		if jc.Check("couldn't send metadata to satellite", err) != nil {
+			return
 		}
 	}
 	jc.Encode(resp)

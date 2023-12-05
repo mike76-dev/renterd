@@ -3,6 +3,7 @@ package satellite
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -30,20 +31,24 @@ const (
 )
 
 var (
-	specifierRequestContracts = types.NewSpecifier("RequestContracts")
-	specifierFormContracts    = types.NewSpecifier("FormContracts")
-	specifierRenewContracts   = types.NewSpecifier("RenewContracts")
-	specifierUpdateRevision   = types.NewSpecifier("UpdateRevision")
-	specifierFormContract     = types.NewSpecifier("FormContract")
-	specifierRenewContract    = types.NewSpecifier("RenewContract")
-	specifierGetSettings      = types.NewSpecifier("GetSettings")
-	specifierUpdateSettings   = types.NewSpecifier("UpdateSettings")
-	specifierSaveMetadata     = types.NewSpecifier("SaveMetadata")
-	specifierRequestMetadata  = types.NewSpecifier("RequestMetadata")
-	specifierUpdateSlab       = types.NewSpecifier("UpdateSlab")
-	specifierRequestSlabs     = types.NewSpecifier("RequestSlabs")
-	specifierShareContracts   = types.NewSpecifier("ShareContracts")
-	specifierUploadFile       = types.NewSpecifier("UploadFile")
+	specifierRequestContracts  = types.NewSpecifier("RequestContracts")
+	specifierFormContracts     = types.NewSpecifier("FormContracts")
+	specifierRenewContracts    = types.NewSpecifier("RenewContracts")
+	specifierUpdateRevision    = types.NewSpecifier("UpdateRevision")
+	specifierFormContract      = types.NewSpecifier("FormContract")
+	specifierRenewContract     = types.NewSpecifier("RenewContract")
+	specifierGetSettings       = types.NewSpecifier("GetSettings")
+	specifierUpdateSettings    = types.NewSpecifier("UpdateSettings")
+	specifierSaveMetadata      = types.NewSpecifier("SaveMetadata")
+	specifierRequestMetadata   = types.NewSpecifier("RequestMetadata")
+	specifierUpdateSlab        = types.NewSpecifier("UpdateSlab")
+	specifierRequestSlabs      = types.NewSpecifier("RequestSlabs")
+	specifierShareContracts    = types.NewSpecifier("ShareContracts")
+	specifierUploadFile        = types.NewSpecifier("UploadFile")
+	specifierCreateMultipart   = types.NewSpecifier("CreateMultipart")
+	specifierAbortMultipart    = types.NewSpecifier("AbortMultipart")
+	specifierUploadPart        = types.NewSpecifier("UploadPart")
+	specifierCompleteMultipart = types.NewSpecifier("FinishMultipart")
 )
 
 // generateKeyPair generates the keypair from a given seed.
@@ -1468,4 +1473,261 @@ func decodeString(key object.EncryptionKey, ciphertext [255]byte) (string, error
 	}
 
 	return string(b[:i]), nil
+}
+
+// createMultipartHandler handles the POST /multipart/create requests.
+func (s *Satellite) createMultipartHandler(jc jape.Context) {
+	cfg := s.store.getConfig()
+	if !cfg.Enabled {
+		s.logger.Error("couldn't register multipart upload: satellite disabled")
+		jc.Check("ERROR", errors.New("satellite disabled"))
+		return
+	}
+	ctx := jc.Request.Context()
+	var req CreateMultipartRequest
+	if jc.Decode(&req) != nil {
+		return
+	}
+
+	pk, sk := generateKeyPair(cfg.RenterSeed)
+
+	encryptedBucket, err := encodeString(cfg.EncryptionKey, req.Bucket)
+	if jc.Check("couldn't encode bucket", err) != nil {
+		return
+	}
+
+	encryptedPath, err := encodeString(cfg.EncryptionKey, req.Path)
+	if jc.Check("couldn't encode path", err) != nil {
+		return
+	}
+
+	encryptedMimeType, err := encodeString(cfg.EncryptionKey, req.MimeType)
+	if jc.Check("couldn't encode MIME type", err) != nil {
+		return
+	}
+
+	rmr := registerMultipartRequest{
+		PubKey:   pk,
+		Key:      req.Key,
+		Bucket:   encryptedBucket,
+		Path:     encryptedPath,
+		MimeType: encryptedMimeType,
+	}
+
+	h := types.NewHasher()
+	rmr.EncodeToWithoutSignature(h.E)
+	rmr.Signature = sk.SignHash(h.Sum())
+
+	var resp registerMultipartResponse
+	err = withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
+		if err := t.WriteRequest(specifierCreateMultipart, &rmr); err != nil {
+			return err
+		}
+
+		if err := t.ReadResponse(&resp, 1024); err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if jc.Check("couldn't register multipart upload", err) != nil {
+		s.logger.Error(fmt.Sprintf("couldn't register multipart upload: %s", err))
+		return
+	}
+
+	response := CreateMultipartResponse{
+		UploadID: hex.EncodeToString(resp.UploadID[:]),
+	}
+
+	s.logger.Debug(fmt.Sprintf("successfully registered multipart upload %s", response.UploadID))
+	jc.Encode(response)
+}
+
+// abortMultipartHandler handles the POST /multipart/abort requests.
+func (s *Satellite) abortMultipartHandler(jc jape.Context) {
+	cfg := s.store.getConfig()
+	if !cfg.Enabled {
+		s.logger.Error("couldn't delete multipart upload: satellite disabled")
+		jc.Check("ERROR", errors.New("satellite disabled"))
+		return
+	}
+	ctx := jc.Request.Context()
+	var req CreateMultipartResponse
+	if jc.Decode(&req) != nil {
+		return
+	}
+	id, err := hex.DecodeString(req.UploadID)
+	if jc.Check("couldn't marshal upload ID", err) != nil {
+		s.logger.Error(fmt.Sprintf("couldn't marshal upload ID: %s", err))
+		return
+	}
+
+	pk, sk := generateKeyPair(cfg.RenterSeed)
+
+	dmr := deleteMultipartRequest{
+		PubKey: pk,
+	}
+	copy(dmr.UploadID[:], id)
+
+	h := types.NewHasher()
+	dmr.EncodeToWithoutSignature(h.E)
+	dmr.Signature = sk.SignHash(h.Sum())
+
+	err = withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
+		if err := t.WriteRequest(specifierAbortMultipart, &dmr); err != nil {
+			return err
+		}
+
+		var resp rhpv2.RPCError
+		if err := t.ReadResponse(&resp, 1024); err != nil {
+			return err
+		}
+
+		if resp.Description != "" {
+			return errors.New(resp.Description)
+		}
+
+		return nil
+	})
+
+	if jc.Check("couldn't delete multipart upload", err) != nil {
+		s.logger.Error(fmt.Sprintf("couldn't delete multipart upload: %s", err))
+		return
+	}
+
+	s.logger.Debug(fmt.Sprintf("multipart upload %s aborted", req.UploadID))
+}
+
+// UploadPart uploads a part of an S3 multipart upload to the satellite.
+func UploadPart(r io.Reader, id string, part int) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg, err := StaticSatellite.Config()
+	if err != nil {
+		return err
+	}
+	if !cfg.Enabled {
+		return errors.New("couldn't upload part: satellite disabled")
+	}
+
+	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	if err != nil {
+		return err
+	}
+
+	pk, sk := generateKeyPair(cfg.RenterSeed)
+
+	uid, err := hex.DecodeString(id)
+	if err != nil {
+		return err
+	}
+
+	req := uploadPartRequest{
+		PubKey:     pk,
+		PartNumber: part,
+	}
+	copy(req.UploadID[:], uid)
+	h := types.NewHasher()
+	req.EncodeToWithoutSignature(h.E)
+	req.Signature = sk.SignHash(h.Sum())
+
+	host, _, err := net.SplitHostPort(cfg.Address)
+	if err != nil {
+		return err
+	}
+	addr := net.JoinHostPort(host, cfg.MuxPort)
+
+	err = withTransportV3(ctx, cfg.PublicKey, addr, func(t *rhpv3.Transport) (err error) {
+		stream := t.DialStream()
+		stream.SetDeadline(time.Now().Add(5 * time.Second))
+		err = stream.WriteRequest(specifierUploadPart, &req)
+		if err != nil {
+			return err
+		}
+
+		dataLen := uint64(1048576)
+		buf := make([]byte, dataLen)
+		var resp uploadResponse
+		var ud uploadData
+
+		for {
+			stream.SetDeadline(time.Now().Add(30 * time.Second))
+			numBytes, err := io.ReadFull(cr, buf)
+			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+				return err
+			}
+			ud.Data = buf[:numBytes]
+			ud.More = err == nil
+			if err := stream.WriteResponse(&ud); err != nil {
+				return err
+			}
+			if err := stream.ReadResponse(&resp, 1024); err != nil {
+				return err
+			}
+			if !ud.More {
+				break
+			}
+		}
+
+		return nil
+	})
+
+	return err
+}
+
+// completeMultipartHandler handles the POST /multipart/complete requests.
+func (s *Satellite) completeMultipartHandler(jc jape.Context) {
+	cfg := s.store.getConfig()
+	if !cfg.Enabled {
+		s.logger.Error("couldn't complete multipart upload: satellite disabled")
+		jc.Check("ERROR", errors.New("satellite disabled"))
+		return
+	}
+	ctx := jc.Request.Context()
+	var req CreateMultipartResponse
+	if jc.Decode(&req) != nil {
+		return
+	}
+	id, err := hex.DecodeString(req.UploadID)
+	if jc.Check("couldn't marshal upload ID", err) != nil {
+		s.logger.Error(fmt.Sprintf("couldn't marshal upload ID: %s", err))
+		return
+	}
+
+	pk, sk := generateKeyPair(cfg.RenterSeed)
+
+	cmr := completeMultipartRequest{
+		PubKey: pk,
+	}
+	copy(cmr.UploadID[:], id)
+
+	h := types.NewHasher()
+	cmr.EncodeToWithoutSignature(h.E)
+	cmr.Signature = sk.SignHash(h.Sum())
+
+	err = withTransportV2(ctx, cfg.PublicKey, cfg.Address, func(t *rhpv2.Transport) (err error) {
+		if err := t.WriteRequest(specifierCompleteMultipart, &cmr); err != nil {
+			return err
+		}
+
+		var resp rhpv2.RPCError
+		if err := t.ReadResponse(&resp, 1024); err != nil {
+			return err
+		}
+
+		if resp.Description != "" {
+			return errors.New(resp.Description)
+		}
+
+		return nil
+	})
+
+	if jc.Check("couldn't complete multipart upload", err) != nil {
+		s.logger.Error(fmt.Sprintf("couldn't complete multipart upload: %s", err))
+		return
+	}
+
+	s.logger.Debug(fmt.Sprintf("multipart upload %s completed", req.UploadID))
 }

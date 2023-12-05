@@ -172,6 +172,38 @@ func (c *Client) RequestSlabs(ctx context.Context, set string) (slabs []object.S
 	return
 }
 
+// CreateMultipart registers a new multipart upload with the satellite
+// and returns the upload ID.
+func (c *Client) CreateMultipart(ctx context.Context, key object.EncryptionKey, bucket, path, mimeType string) (string, error) {
+	req := CreateMultipartRequest{
+		Key:      key,
+		Bucket:   bucket,
+		Path:     path,
+		MimeType: mimeType,
+	}
+	var resp CreateMultipartResponse
+	err := c.c.WithContext(ctx).POST("/multipart/create", req, &resp)
+	return resp.UploadID, err
+}
+
+// AbortMultipart deletes an incomplete multipart upload on the satellite.
+func (c *Client) AbortMultipart(ctx context.Context, id string) error {
+	req := CreateMultipartResponse{
+		UploadID: id,
+	}
+	err := c.c.WithContext(ctx).POST("/multipart/abort", req, nil)
+	return err
+}
+
+// CompleteMultipart completes an incomplete multipart upload on the satellite.
+func (c *Client) CompleteMultipart(ctx context.Context, id string) error {
+	req := CreateMultipartResponse{
+		UploadID: id,
+	}
+	err := c.c.WithContext(ctx).POST("/multipart/complete", req, nil)
+	return err
+}
+
 // NewClient returns a client that communicates with a renterd satellite server
 // listening on the specified address.
 func NewClient(addr, password string) *Client {

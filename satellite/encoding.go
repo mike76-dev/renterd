@@ -843,3 +843,128 @@ func (ud *uploadData) DecodeFrom(d *types.Decoder) {
 	ud.Data = d.ReadBytes()
 	ud.More = d.ReadBool()
 }
+
+// registerMultipartRequest is used to register a new S3 multipart upload.
+type registerMultipartRequest struct {
+	PubKey    types.PublicKey
+	Key       object.EncryptionKey
+	Bucket    [255]byte
+	Path      [255]byte
+	MimeType  [255]byte
+	Signature types.Signature
+}
+
+// EncodeTo implements types.ProtocolObject.
+func (rmr *registerMultipartRequest) EncodeTo(e *types.Encoder) {
+	rmr.EncodeToWithoutSignature(e)
+	rmr.Signature.EncodeTo(e)
+}
+
+// EncodeToWithoutSignature does the same as EncodeTo but
+// leaves the signature out.
+func (rmr *registerMultipartRequest) EncodeToWithoutSignature(e *types.Encoder) {
+	e.Write(rmr.PubKey[:])
+	key, _ := hex.DecodeString(strings.TrimPrefix(rmr.Key.String(), "key:"))
+	e.Write(key[:])
+	e.Write(rmr.Bucket[:])
+	e.Write(rmr.Path[:])
+	e.Write(rmr.MimeType[:])
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (rmr *registerMultipartRequest) DecodeFrom(d *types.Decoder) {
+	// Nothing to do here.
+}
+
+// registerMultipartResponse is the response type for registerMultipartRequest.
+type registerMultipartResponse struct {
+	UploadID types.Hash256
+}
+
+// EncodeTo implements types.ProtocolObject.
+func (rmr *registerMultipartResponse) EncodeTo(e *types.Encoder) {
+	// Nothing to do here.
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (rmr *registerMultipartResponse) DecodeFrom(d *types.Decoder) {
+	d.Read(rmr.UploadID[:])
+}
+
+// deleteMultipartRequest is used to abort an incomplete S3 multipart upload.
+type deleteMultipartRequest struct {
+	PubKey    types.PublicKey
+	UploadID  types.Hash256
+	Signature types.Signature
+}
+
+// EncodeTo implements types.ProtocolObject.
+func (dmr *deleteMultipartRequest) EncodeTo(e *types.Encoder) {
+	dmr.EncodeToWithoutSignature(e)
+	dmr.Signature.EncodeTo(e)
+}
+
+// EncodeToWithoutSignature does the same as EncodeTo but
+// leaves the signature out.
+func (dmr *deleteMultipartRequest) EncodeToWithoutSignature(e *types.Encoder) {
+	e.Write(dmr.PubKey[:])
+	e.Write(dmr.UploadID[:])
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (dmr *deleteMultipartRequest) DecodeFrom(d *types.Decoder) {
+	// Nothing to do here.
+}
+
+// uploadPartRequest is used to upload a part of a multipart upload
+// to the satellite via RHP3.
+type uploadPartRequest struct {
+	PubKey     types.PublicKey
+	UploadID   types.Hash256
+	PartNumber int
+	Signature  types.Signature
+}
+
+// EncodeTo implements types.ProtocolObject.
+func (upr *uploadPartRequest) EncodeTo(e *types.Encoder) {
+	upr.EncodeToWithoutSignature(e)
+	upr.Signature.EncodeTo(e)
+}
+
+// EncodeToWithoutSignature does the same as EncodeTo but
+// leaves the signature out.
+func (upr *uploadPartRequest) EncodeToWithoutSignature(e *types.Encoder) {
+	e.Write(upr.PubKey[:])
+	e.Write(upr.UploadID[:])
+	e.WriteUint64(uint64(upr.PartNumber))
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (upr *uploadPartRequest) DecodeFrom(d *types.Decoder) {
+	// Nothing to do here.
+}
+
+// completeMultipartRequest is used to complete an S3 multipart upload.
+type completeMultipartRequest struct {
+	PubKey    types.PublicKey
+	UploadID  types.Hash256
+	Signature types.Signature
+}
+
+// EncodeTo implements types.ProtocolObject.
+func (cmr *completeMultipartRequest) EncodeTo(e *types.Encoder) {
+	cmr.EncodeToWithoutSignature(e)
+	cmr.Signature.EncodeTo(e)
+}
+
+// EncodeToWithoutSignature does the same as EncodeTo but
+// leaves the signature out.
+func (cmr *completeMultipartRequest) EncodeToWithoutSignature(e *types.Encoder) {
+	e.Write(cmr.PubKey[:])
+	e.Write(cmr.UploadID[:])
+}
+
+// DecodeFrom implements types.ProtocolObject.
+func (cmr *completeMultipartRequest) DecodeFrom(d *types.Decoder) {
+	// Nothing to do here.
+}
