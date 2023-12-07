@@ -22,6 +22,7 @@ import (
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/build"
 	"go.sia.tech/renterd/object"
+	"go.sia.tech/renterd/satellite/encrypt"
 	"go.sia.tech/renterd/stats"
 	"go.sia.tech/renterd/tracing"
 	"go.uber.org/zap"
@@ -233,7 +234,7 @@ func (w *worker) initUploadManager(mm *memoryManager, maxOverdrive uint64, overd
 	w.uploadManager = newUploadManager(w.bus, w, w, mm, maxOverdrive, overdriveTimeout, logger)
 }
 
-func (w *worker) upload(ctx context.Context, r io.Reader, contracts []api.ContractMetadata, bucket, path string, opts ...UploadOption) (string, error) {
+func (w *worker) upload(ctx context.Context, r io.Reader, length uint64, contracts []api.ContractMetadata, bucket, path string, opts ...UploadOption) (string, error) {
 	//  build upload parameters
 	up := defaultParameters()
 	for _, opt := range opts {
@@ -262,7 +263,7 @@ func (w *worker) upload(ctx context.Context, r io.Reader, contracts []api.Contra
 	}
 
 	// create a stream cipher
-	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	cr, err := encrypt.Encrypt(r, cfg.EncryptionKey, length)
 	if err != nil {
 		return "", err
 	}
@@ -319,7 +320,7 @@ func (w *worker) upload(ctx context.Context, r io.Reader, contracts []api.Contra
 	return eTag, nil
 }
 
-func (w *worker) uploadMultiPart(ctx context.Context, r io.Reader, contracts []api.ContractMetadata, bucket, path, uploadID string, partNumber int, opts ...UploadOption) (string, error) {
+func (w *worker) uploadMultiPart(ctx context.Context, r io.Reader, length uint64, contracts []api.ContractMetadata, bucket, path, uploadID string, partNumber int, opts ...UploadOption) (string, error) {
 	//  build upload parameters
 	up := defaultParameters()
 	for _, opt := range opts {
@@ -333,7 +334,7 @@ func (w *worker) uploadMultiPart(ctx context.Context, r io.Reader, contracts []a
 	}
 
 	// create a stream cipher
-	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	cr, err := encrypt.Encrypt(r, cfg.EncryptionKey, length)
 	if err != nil {
 		return "", err
 	}

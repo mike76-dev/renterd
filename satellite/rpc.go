@@ -20,6 +20,7 @@ import (
 	"go.sia.tech/jape"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/object"
+	"go.sia.tech/renterd/satellite/encrypt"
 
 	"golang.org/x/crypto/blake2b"
 )
@@ -1310,7 +1311,7 @@ func newMimeReader(r io.Reader) (mimeType string, recycled io.Reader, err error)
 }
 
 // UploadObject uploads a file to the satellite.
-func UploadObject(r io.Reader, bucket, path, mimeType string) error {
+func UploadObject(r io.Reader, length uint64, bucket, path, mimeType string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1336,7 +1337,7 @@ func UploadObject(r io.Reader, bucket, path, mimeType string) error {
 		}
 	}
 
-	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	cr, err := encrypt.Encrypt(r, cfg.EncryptionKey, length)
 	if err != nil {
 		return err
 	}
@@ -1600,7 +1601,7 @@ func (s *Satellite) abortMultipartHandler(jc jape.Context) {
 }
 
 // UploadPart uploads a part of an S3 multipart upload to the satellite.
-func UploadPart(r io.Reader, id string, part int) error {
+func UploadPart(r io.Reader, length uint64, id string, part int) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1612,7 +1613,7 @@ func UploadPart(r io.Reader, id string, part int) error {
 		return errors.New("couldn't upload part: satellite disabled")
 	}
 
-	cr, err := cfg.EncryptionKey.Encrypt(r, 0)
+	cr, err := encrypt.Encrypt(r, cfg.EncryptionKey, length)
 	if err != nil {
 		return err
 	}

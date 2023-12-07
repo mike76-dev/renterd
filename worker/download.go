@@ -18,6 +18,7 @@ import (
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/object"
+	"go.sia.tech/renterd/satellite/encrypt"
 	"go.sia.tech/renterd/stats"
 	"go.sia.tech/renterd/tracing"
 	"go.uber.org/zap"
@@ -220,7 +221,10 @@ func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o o
 	}
 
 	// create stream cipher
-	masterCw := cfg.EncryptionKey.Decrypt(w, 0)
+	masterCw, err := encrypt.Decrypt(w, cfg.EncryptionKey)
+	if err != nil {
+		return err
+	}
 
 	// create identifier
 	id := newID()
