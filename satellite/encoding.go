@@ -485,10 +485,10 @@ func (rs *renterSignature) DecodeFrom(d *types.Decoder) {
 // fields encoded.
 type encodedFileMetadata struct {
 	Key      object.EncryptionKey `json:"key"`
-	Bucket   [255]byte            `json:"bucket"`
-	Path     [255]byte            `json:"path"`
+	Bucket   []byte               `json:"bucket"`
+	Path     []byte               `json:"path"`
 	ETag     string               `json:"etag"`
-	MimeType [255]byte            `json:"mime"`
+	MimeType []byte               `json:"mime"`
 	Slabs    []object.SlabSlice   `json:"slabs"`
 	Data     []byte               `json:"data"`
 }
@@ -497,10 +497,10 @@ type encodedFileMetadata struct {
 func (fm *encodedFileMetadata) EncodeTo(e *types.Encoder) {
 	key, _ := hex.DecodeString(strings.TrimPrefix(fm.Key.String(), "key:"))
 	e.Write(key[:])
-	e.Write(fm.Bucket[:])
-	e.Write(fm.Path[:])
+	e.WriteBytes(fm.Bucket)
+	e.WriteBytes(fm.Path)
 	e.WriteString(fm.ETag)
-	e.Write(fm.MimeType[:])
+	e.WriteBytes(fm.MimeType)
 	e.WritePrefix(len(fm.Slabs))
 	for _, s := range fm.Slabs {
 		key, _ := hex.DecodeString(strings.TrimPrefix(s.Key.String(), "key:"))
@@ -522,10 +522,10 @@ func (fm *encodedFileMetadata) DecodeFrom(d *types.Decoder) {
 	var key types.Hash256
 	d.Read(key[:])
 	fm.Key.UnmarshalText([]byte(strings.TrimPrefix(key.String(), "h:")))
-	d.Read(fm.Bucket[:])
-	d.Read(fm.Path[:])
+	fm.Bucket = d.ReadBytes()
+	fm.Path = d.ReadBytes()
 	fm.ETag = d.ReadString()
-	d.Read(fm.MimeType[:])
+	fm.MimeType = d.ReadBytes()
 	numSlabs := d.ReadPrefix()
 	for i := 0; i < numSlabs; i++ {
 		var k types.Hash256
@@ -612,8 +612,8 @@ func (rf *renterFiles) DecodeFrom(d *types.Decoder) {
 
 // encodedBucketFiles contains a list of filepaths within a single bucket.
 type encodedBucketFiles struct {
-	Name  [255]byte   `json:"name"`
-	Paths [][255]byte `json:"paths"`
+	Name  []byte   `json:"name"`
+	Paths [][]byte `json:"paths"`
 }
 
 // requestMetadataRequest is used to request file metadata.
@@ -635,10 +635,10 @@ func (rmr *requestMetadataRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	e.Write(rmr.PubKey[:])
 	e.WritePrefix(len(rmr.PresentObjects))
 	for _, po := range rmr.PresentObjects {
-		e.Write(po.Name[:])
+		e.WriteBytes(po.Name)
 		e.WritePrefix(len(po.Paths))
 		for _, p := range po.Paths {
-			e.Write(p[:])
+			e.WriteBytes(p)
 		}
 	}
 }
@@ -784,9 +784,9 @@ func (sr *shareRequest) DecodeFrom(d *types.Decoder) {
 // uploadRequest is used to upload a file to the satellite via RHP3.
 type uploadRequest struct {
 	PubKey    types.PublicKey
-	Bucket    [255]byte
-	Path      [255]byte
-	MimeType  [255]byte
+	Bucket    []byte
+	Path      []byte
+	MimeType  []byte
 	Signature types.Signature
 }
 
@@ -800,9 +800,9 @@ func (ur *uploadRequest) EncodeTo(e *types.Encoder) {
 // leaves the signature out.
 func (ur *uploadRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	e.Write(ur.PubKey[:])
-	e.Write(ur.Bucket[:])
-	e.Write(ur.Path[:])
-	e.Write(ur.MimeType[:])
+	e.WriteBytes(ur.Bucket)
+	e.WriteBytes(ur.Path)
+	e.WriteBytes(ur.MimeType)
 }
 
 // DecodeFrom implements types.ProtocolObject.
@@ -848,9 +848,9 @@ func (ud *uploadData) DecodeFrom(d *types.Decoder) {
 type registerMultipartRequest struct {
 	PubKey    types.PublicKey
 	Key       object.EncryptionKey
-	Bucket    [255]byte
-	Path      [255]byte
-	MimeType  [255]byte
+	Bucket    []byte
+	Path      []byte
+	MimeType  []byte
 	Signature types.Signature
 }
 
@@ -866,9 +866,9 @@ func (rmr *registerMultipartRequest) EncodeToWithoutSignature(e *types.Encoder) 
 	e.Write(rmr.PubKey[:])
 	key, _ := hex.DecodeString(strings.TrimPrefix(rmr.Key.String(), "key:"))
 	e.Write(key[:])
-	e.Write(rmr.Bucket[:])
-	e.Write(rmr.Path[:])
-	e.Write(rmr.MimeType[:])
+	e.WriteBytes(rmr.Bucket)
+	e.WriteBytes(rmr.Path)
+	e.WriteBytes(rmr.MimeType)
 }
 
 // DecodeFrom implements types.ProtocolObject.

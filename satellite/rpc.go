@@ -1436,44 +1436,30 @@ func UploadObject(r io.Reader, length uint64, bucket, path, mimeType string) err
 }
 
 // encodeString encrypts a string with the encryption key.
-func encodeString(key object.EncryptionKey, str string) (ciphertext [255]byte, err error) {
-	if len(str) > 255 {
-		err = errors.New("string length exceeds 255 bytes")
-		return
-	}
-
-	var plaintext [255]byte
-	copy(plaintext[:], []byte(str))
-	rs, err := key.Encrypt(bytes.NewReader(plaintext[:]), 0)
+func encodeString(key object.EncryptionKey, str string) (ciphertext []byte, err error) {
+	rs, err := encrypt.Encrypt(bytes.NewReader([]byte(str)), key, uint64(len(str)))
 	if err != nil {
 		return
 	}
 
-	ct, err := io.ReadAll(rs)
-	if err != nil {
-		return
-	}
-
-	copy(ciphertext[:], ct)
+	ciphertext, err = io.ReadAll(rs)
 	return
 }
 
 // decodeString decrypts a string encrypted with the encryption key.
-func decodeString(key object.EncryptionKey, ciphertext [255]byte) (string, error) {
+func decodeString(key object.EncryptionKey, ciphertext []byte) (string, error) {
 	var out bytes.Buffer
-	ws := key.Decrypt(&out, 0)
-	_, err := ws.Write(ciphertext[:])
+	ws, err := encrypt.Decrypt(&out, key)
 	if err != nil {
 		return "", err
 	}
 
-	b := out.Bytes()
-	i := bytes.Index(b, []byte{0})
-	if i < 0 {
-		i = len(b)
+	_, err = ws.Write(ciphertext)
+	if err != nil {
+		return "", err
 	}
 
-	return string(b[:i]), nil
+	return out.String(), nil
 }
 
 // createMultipartHandler handles the POST /multipart/create requests.
