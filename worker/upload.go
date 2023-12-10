@@ -234,7 +234,7 @@ func (w *worker) initUploadManager(mm *memoryManager, maxOverdrive uint64, overd
 	w.uploadManager = newUploadManager(w.bus, w, w, mm, maxOverdrive, overdriveTimeout, logger)
 }
 
-func (w *worker) upload(ctx context.Context, r io.Reader, length uint64, contracts []api.ContractMetadata, bucket, path string, opts ...UploadOption) (string, error) {
+func (w *worker) upload(ctx context.Context, r io.Reader, contracts []api.ContractMetadata, bucket, path string, opts ...UploadOption) (string, error) {
 	//  build upload parameters
 	up := defaultParameters()
 	for _, opt := range opts {
@@ -263,13 +263,15 @@ func (w *worker) upload(ctx context.Context, r io.Reader, length uint64, contrac
 	}
 
 	// create a stream cipher
-	cr, err := encrypt.Encrypt(r, cfg.EncryptionKey, length)
-	if err != nil {
-		return "", err
+	if cfg.Encrypt {
+		r, err = encrypt.Encrypt(r, cfg.EncryptionKey)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	// perform the upload
-	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, cr, contracts, up, lockingPriorityUpload)
+	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, r, contracts, up, lockingPriorityUpload)
 	if err != nil {
 		return "", fmt.Errorf("couldn't upload object: %w", err)
 	}
@@ -310,7 +312,7 @@ func (w *worker) upload(ctx context.Context, r io.Reader, length uint64, contrac
 				MimeType: mimeType,
 				Slabs:    obj.Slabs,
 				Data:     partialSlabData,
-			})
+			}, true)
 			if err != nil {
 				w.logger.Errorf("couldn't send metadata to satellite: %v", err)
 			}
@@ -320,7 +322,7 @@ func (w *worker) upload(ctx context.Context, r io.Reader, length uint64, contrac
 	return eTag, nil
 }
 
-func (w *worker) uploadMultiPart(ctx context.Context, r io.Reader, length uint64, contracts []api.ContractMetadata, bucket, path, uploadID string, partNumber int, opts ...UploadOption) (string, error) {
+func (w *worker) uploadMultiPart(ctx context.Context, r io.Reader, contracts []api.ContractMetadata, bucket, path, uploadID string, partNumber int, opts ...UploadOption) (string, error) {
 	//  build upload parameters
 	up := defaultParameters()
 	for _, opt := range opts {
@@ -334,13 +336,15 @@ func (w *worker) uploadMultiPart(ctx context.Context, r io.Reader, length uint64
 	}
 
 	// create a stream cipher
-	cr, err := encrypt.Encrypt(r, cfg.EncryptionKey, length)
-	if err != nil {
-		return "", err
+	if cfg.Encrypt {
+		r, err = encrypt.Encrypt(r, cfg.EncryptionKey)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	// upload the part
-	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, cr, contracts, up, lockingPriorityUpload)
+	obj, partialSlabData, eTag, err := w.uploadManager.Upload(ctx, r, contracts, up, lockingPriorityUpload)
 	if err != nil {
 		return "", fmt.Errorf("couldn't upload object: %w", err)
 	}

@@ -37,9 +37,10 @@ type UpdateRevisionRequest struct {
 
 // Config contains the satellite configuration parameters.
 type Config struct {
-	Enabled bool `json:"enabled"`
-	SatelliteInfo
+	Enabled       bool                 `json:"enabled"`
+	Encrypt       bool                 `json:"encrypt"`
 	EncryptionKey object.EncryptionKey `json:"encryptionKey"`
+	SatelliteInfo
 }
 
 // SatelliteInfo contains the information about the satellite.
@@ -53,6 +54,19 @@ type SatelliteInfo struct {
 // SatellitesAllResponse is the response type for the /satellites request.
 type SatellitesAllResponse struct {
 	Satellites map[types.PublicKey]SatelliteInfo `json:"satellites"`
+}
+
+// ObjectPutRequest is the request type for the PUT /object requests.
+type ObjectPutRequest struct {
+	Bucket string   `json:"bucket"`
+	Path   string   `json:"path"`
+	Parts  []uint64 `json:"parts"`
+}
+
+// ObjectResponse is the response type for the GET /object request.
+type ObjectResponse struct {
+	Found bool     `json:"found"`
+	Parts []uint64 `json:"parts"`
 }
 
 // FormContractRequest is the request type for the FormContract RPC.
@@ -90,6 +104,7 @@ type FileMetadata struct {
 	Path     string               `json:"path"`
 	ETag     string               `json:"etag"`
 	MimeType string               `json:"mime"`
+	Parts    []uint64             `json:"parts"`
 	Slabs    []object.SlabSlice   `json:"slabs"`
 	Data     []byte               `json:"data"`
 }
@@ -97,6 +112,7 @@ type FileMetadata struct {
 // SaveMetadataRequest is the request type for the SaveMetadata RPC.
 type SaveMetadataRequest struct {
 	Metadata FileMetadata `json:"metadata"`
+	New      bool         `json:"new"`
 }
 
 // UpdateSlabRequest is the request type for the UpdateSlab RPC.

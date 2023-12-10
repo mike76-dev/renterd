@@ -14,12 +14,13 @@ import (
 
 // ephemeralStore implements a satellite store in memory.
 type ephemeralStore struct {
-	mu         sync.Mutex
-	config     Config
-	satellites map[types.PublicKey]SatelliteInfo
+	mu               sync.Mutex
+	config           Config
+	satellites       map[types.PublicKey]SatelliteInfo
+	encryptedObjects map[string][]uint64
 }
 
-// config returns the satellite config.
+// getConfig returns the satellite config.
 func (s *ephemeralStore) getConfig() Config {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -43,7 +44,7 @@ func (s *ephemeralStore) setConfig(c Config) error {
 	return nil
 }
 
-// satellites returns the map of the satellites.
+// getSatellites returns the map of the satellites.
 func (s *ephemeralStore) getSatellites() map[types.PublicKey]SatelliteInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -67,6 +68,30 @@ func (s *ephemeralStore) addSatellite(si SatelliteInfo) error {
 	return nil
 }
 
+// getObject returns the information about an encrypted object.
+func (s *ephemeralStore) getObject(bucket, path string) ([]uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parts, exists := s.encryptedObjects[bucket+":"+path]
+	return parts, exists
+}
+
+// addObject adds the information about an encrypted object.
+func (s *ephemeralStore) addObject(bucket, path string, parts []uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.encryptedObjects[bucket+":"+path] = parts
+	return nil
+}
+
+// deleteObject deletes the information about an encrypted object.
+func (s *ephemeralStore) deleteObject(bucket, path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.encryptedObjects, bucket+":"+path)
+	return nil
+}
+
 // ProcessConsensusChange implements chain.Subscriber.
 func (s *ephemeralStore) ProcessConsensusChange(cc modules.ConsensusChange) {
 	panic("not implemented")
@@ -75,7 +100,8 @@ func (s *ephemeralStore) ProcessConsensusChange(cc modules.ConsensusChange) {
 // newEphemeralStore returns a new EphemeralStore.
 func newEphemeralStore() *ephemeralStore {
 	return &ephemeralStore{
-		satellites: make(map[types.PublicKey]SatelliteInfo),
+		satellites:       make(map[types.PublicKey]SatelliteInfo),
+		encryptedObjects: make(map[string][]uint64),
 	}
 }
 
@@ -87,8 +113,9 @@ type jsonStore struct {
 }
 
 type jsonPersistData struct {
-	Config     Config                            `json:"config"`
-	Satellites map[types.PublicKey]SatelliteInfo `json:"satellites"`
+	Config           Config                            `json:"config"`
+	Satellites       map[types.PublicKey]SatelliteInfo `json:"satellites"`
+	EncryptedObjects map[string][]uint64               `json:"encryptedObjects"`
 }
 
 func (s *jsonStore) save() error {
@@ -97,6 +124,7 @@ func (s *jsonStore) save() error {
 	var p jsonPersistData
 	p.Config = s.config
 	p.Satellites = s.satellites
+	p.EncryptedObjects = s.encryptedObjects
 	js, _ := json.MarshalIndent(p, "", "  ")
 
 	// Atomic save.
@@ -129,6 +157,9 @@ func (s *jsonStore) load() error {
 	}
 	s.config = p.Config
 	s.satellites = p.Satellites
+	if p.EncryptedObjects != nil {
+		s.encryptedObjects = p.EncryptedObjects
+	}
 	if s.config.EncryptionKey == (object.EncryptionKey{}) {
 		s.config.EncryptionKey = object.GenerateEncryptionKey()
 		return s.save()
@@ -146,6 +177,18 @@ func (s *jsonStore) setConfig(c Config) error {
 // addSatellite adds a new satellite to the map.
 func (s *jsonStore) addSatellite(si SatelliteInfo) error {
 	s.ephemeralStore.addSatellite(si)
+	return s.save()
+}
+
+// addObject adds the information about an encrypted object.
+func (s *jsonStore) addObject(bucket, path string, parts []uint64) error {
+	s.ephemeralStore.addObject(bucket, path, parts)
+	return s.save()
+}
+
+// deleteObject deletes the information about an encrypted object.
+func (s *jsonStore) deleteObject(bucket, path string) error {
+	s.ephemeralStore.deleteObject(bucket, path)
 	return s.save()
 }
 

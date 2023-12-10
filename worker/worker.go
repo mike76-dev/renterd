@@ -1060,10 +1060,13 @@ func (w *worker) objectsHandlerGET(jc jape.Context) {
 		return
 	}
 
+	// check if the object is encrypted
+	or, _ := satellite.StaticSatellite.GetObject(bucket, path)
+
 	// create a download function
 	downloadFn := func(wr io.Writer, offset, length int64) (err error) {
 		ctx = WithGougingChecker(ctx, w.bus, gp)
-		err = w.downloadManager.DownloadObject(ctx, wr, res.Object.Object, uint64(offset), uint64(length), contracts)
+		err = w.downloadManager.DownloadObject(ctx, wr, res.Object.Object, or.Parts, uint64(offset), uint64(length), contracts)
 		if err != nil && !errors.Is(err, errDownloadManagerStopped) {
 			w.registerAlert(newDownloadFailedAlert(bucket, path, prefix, marker, offset, length, int64(len(contracts)), err))
 		}
@@ -1121,19 +1124,13 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 		return
 	}
 
-	// decode the content length
-	length := jc.Request.ContentLength
-	if length < 0 {
-		length = 0
-	}
-
 	// fetch the satellite settings
 	settings, err := satellite.StaticSatellite.GetSettings(ctx)
 	if jc.Check("couldn't fetch satellite settings", err) != nil {
 		return
 	}
 	if settings.ProxyUploads {
-		jc.Check("couldn't upload object", satellite.UploadObject(jc.Request.Body, uint64(length), bucket, jc.PathParam("path"), mimeType))
+		jc.Check("couldn't upload object", satellite.UploadObject(jc.Request.Body, bucket, jc.PathParam("path"), mimeType))
 		return
 	}
 
@@ -1181,7 +1178,7 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 	}
 
 	// upload the object
-	eTag, err := w.upload(ctx, jc.Request.Body, uint64(length), contracts, bucket, path, opts...)
+	eTag, err := w.upload(ctx, jc.Request.Body, contracts, bucket, path, opts...)
 	if err := jc.Check("couldn't upload object", err); err != nil {
 		if !errors.Is(err, errUploadManagerStopped) {
 			w.registerAlert(newUploadFailedAlert(bucket, path, up.ContractSet, mimeType, rs.MinShards, rs.TotalShards, len(contracts), up.UploadPacking, false, err))
@@ -1287,12 +1284,6 @@ func (w *worker) multipartUploadHandlerPUT(jc jape.Context) {
 		return
 	}
 
-	// decode the content length
-	length := jc.Request.ContentLength
-	if length < 0 {
-		length = 0
-	}
-
 	cfg, err := satellite.StaticSatellite.Config()
 	if jc.Check("couldn't fetch satellite config", err) != nil {
 		return
@@ -1304,7 +1295,7 @@ func (w *worker) multipartUploadHandlerPUT(jc jape.Context) {
 			return
 		}
 		if rs.ProxyUploads {
-			jc.Check("couldn't upload part", satellite.UploadPart(jc.Request.Body, uint64(length), uploadID, partNumber))
+			jc.Check("couldn't upload part", satellite.UploadPart(jc.Request.Body, uploadID, partNumber))
 			return
 		}
 	}
@@ -1338,7 +1329,7 @@ func (w *worker) multipartUploadHandlerPUT(jc jape.Context) {
 	}
 
 	// upload the multipart
-	eTag, err := w.uploadMultiPart(ctx, jc.Request.Body, uint64(length), contracts, bucket, path, uploadID, partNumber, opts...)
+	eTag, err := w.uploadMultiPart(ctx, jc.Request.Body, contracts, bucket, path, uploadID, partNumber, opts...)
 	if jc.Check("couldn't upload object", err) != nil {
 		if !errors.Is(err, errUploadManagerStopped) {
 			w.registerAlert(newUploadFailedAlert(bucket, path, up.ContractSet, "", rs.MinShards, rs.TotalShards, len(contracts), up.UploadPacking, true, err))

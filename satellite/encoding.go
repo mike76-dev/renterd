@@ -484,13 +484,14 @@ func (rs *renterSignature) DecodeFrom(d *types.Decoder) {
 // encodedFileMetadata contains the file metadata with certain
 // fields encoded.
 type encodedFileMetadata struct {
-	Key      object.EncryptionKey `json:"key"`
-	Bucket   []byte               `json:"bucket"`
-	Path     []byte               `json:"path"`
-	ETag     string               `json:"etag"`
-	MimeType []byte               `json:"mime"`
-	Slabs    []object.SlabSlice   `json:"slabs"`
-	Data     []byte               `json:"data"`
+	Key       object.EncryptionKey `json:"key"`
+	Bucket    []byte               `json:"bucket"`
+	Path      []byte               `json:"path"`
+	ETag      string               `json:"etag"`
+	MimeType  []byte               `json:"mime"`
+	Encrypted string               `json:"encrypted"`
+	Slabs     []object.SlabSlice   `json:"slabs"`
+	Data      []byte               `json:"data"`
 }
 
 // EncodeTo implements types.ProtocolObject.
@@ -501,6 +502,7 @@ func (fm *encodedFileMetadata) EncodeTo(e *types.Encoder) {
 	e.WriteBytes(fm.Path)
 	e.WriteString(fm.ETag)
 	e.WriteBytes(fm.MimeType)
+	e.WriteString(fm.Encrypted)
 	e.WritePrefix(len(fm.Slabs))
 	for _, s := range fm.Slabs {
 		key, _ := hex.DecodeString(strings.TrimPrefix(s.Key.String(), "key:"))
@@ -526,6 +528,7 @@ func (fm *encodedFileMetadata) DecodeFrom(d *types.Decoder) {
 	fm.Path = d.ReadBytes()
 	fm.ETag = d.ReadString()
 	fm.MimeType = d.ReadBytes()
+	fm.Encrypted = d.ReadString()
 	numSlabs := d.ReadPrefix()
 	for i := 0; i < numSlabs; i++ {
 		var k types.Hash256
@@ -787,6 +790,7 @@ type uploadRequest struct {
 	Bucket    []byte
 	Path      []byte
 	MimeType  []byte
+	Encrypted bool
 	Signature types.Signature
 }
 
@@ -803,6 +807,7 @@ func (ur *uploadRequest) EncodeToWithoutSignature(e *types.Encoder) {
 	e.WriteBytes(ur.Bucket)
 	e.WriteBytes(ur.Path)
 	e.WriteBytes(ur.MimeType)
+	e.WriteBool(ur.Encrypted)
 }
 
 // DecodeFrom implements types.ProtocolObject.
@@ -851,6 +856,7 @@ type registerMultipartRequest struct {
 	Bucket    []byte
 	Path      []byte
 	MimeType  []byte
+	Encrypted bool
 	Signature types.Signature
 }
 
@@ -869,6 +875,7 @@ func (rmr *registerMultipartRequest) EncodeToWithoutSignature(e *types.Encoder) 
 	e.WriteBytes(rmr.Bucket)
 	e.WriteBytes(rmr.Path)
 	e.WriteBytes(rmr.MimeType)
+	e.WriteBool(rmr.Encrypted)
 }
 
 // DecodeFrom implements types.ProtocolObject.

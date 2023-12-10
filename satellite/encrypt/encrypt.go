@@ -1,40 +1,24 @@
 package encrypt
 
 import (
-	"encoding/binary"
-	"encoding/hex"
 	"io"
-	"strings"
 
 	"go.sia.tech/renterd/object"
 )
 
 // RangeReader encrypts an incoming byte stream.
 type RangeReader struct {
-	r             io.Reader
-	c             *Cipher
-	length        uint64
-	lengthWritten bool
+	r io.Reader
+	c *Cipher
 }
 
 // NewRangeReader returns a new RangeReader.
-func NewRangeReader(r io.Reader, c *Cipher, length uint64) *RangeReader {
-	return &RangeReader{r, c, length, false}
+func NewRangeReader(r io.Reader, c *Cipher) *RangeReader {
+	return &RangeReader{r, c}
 }
 
 // Read implements io.Reader.
 func (r *RangeReader) Read(dst []byte) (total int, err error) {
-	// Encode data length.
-	if !r.lengthWritten {
-		l := make([]byte, 8)
-		binary.LittleEndian.PutUint64(l, r.length)
-		r.c.XORKeyStream(l, l)
-		copy(dst[:8], l)
-		dst = dst[8:]
-		total = 8
-		r.lengthWritten = true
-	}
-
 	buf := make([]byte, len(dst))
 	n, err := r.r.Read(buf)
 	if n > 0 {
@@ -51,38 +35,30 @@ func (r *RangeReader) Read(dst []byte) (total int, err error) {
 
 // RangeWriter decrypts the incoming data and puts it into a stream.
 type RangeWriter struct {
-	w         io.Writer
-	c         *Cipher
-	length    uint64
-	bytesRead uint64
+	w           io.Writer
+	c           *Cipher
+	parts       []uint64
+	currentPart int
+	bytesRead   uint64
 }
 
 // NewRangeWriter returns a new RangeWriter.
-func NewRangeWriter(w io.Writer, c *Cipher) *RangeWriter {
-	return &RangeWriter{w, c, 0, 0}
+func NewRangeWriter(w io.Writer, c *Cipher, parts []uint64) *RangeWriter {
+	return &RangeWriter{w, c, parts, 0, 0}
 }
 
 // Write implements io.Writer.
 func (w *RangeWriter) Write(src []byte) (total int, err error) {
 	for len(src) > 0 {
-		// Decode part length.
-		if w.length == 0 && w.bytesRead == 0 {
-			if len(src) < 8 {
-				return total, io.EOF
-			}
-			l := make([]byte, 8)
-			copy(l, src[:8])
-			w.c.XORKeyStream(l, l)
-			w.length = binary.LittleEndian.Uint64(l)
-			src = src[8:]
-			total += 8
-		}
-
-		// Read 'length' bytes of data.
-		// If length is zero, read till the end.
 		var size int
-		if w.length > 0 && w.length-w.bytesRead < uint64(len(src)) {
-			size = int(w.length - w.bytesRead)
+		if len(w.parts) > 0 {
+			if w.currentPart >= len(w.parts) {
+				panic("data is larger than expected")
+			}
+			size = int(w.parts[w.currentPart] - w.bytesRead)
+			if size > len(src) {
+				size = len(src)
+			}
 		} else {
 			size = len(src)
 		}
@@ -98,11 +74,11 @@ func (w *RangeWriter) Write(src []byte) (total int, err error) {
 			total += n
 			w.bytesRead += uint64(n)
 			src = src[n:]
-			if w.length > 0 && w.bytesRead >= w.length {
+			if len(w.parts) > 0 && w.bytesRead >= w.parts[w.currentPart] {
 				// Next part: reset the state.
 				w.c.Reset()
 				w.bytesRead = 0
-				w.length = 0
+				w.currentPart++
 			}
 		}
 	}
@@ -110,32 +86,30 @@ func (w *RangeWriter) Write(src []byte) (total int, err error) {
 	return total, nil
 }
 
-// Encrypt returns a RangeReader that encrypts r with the given length.
-func Encrypt(r io.Reader, key object.EncryptionKey, length uint64) (*RangeReader, error) {
-	s := strings.TrimPrefix(key.String(), "key:")
-	ec, err := hex.DecodeString(s)
+// Encrypt returns a RangeReader that encrypts r.
+func Encrypt(r io.Reader, key object.EncryptionKey) (*RangeReader, error) {
+	ec, err := key.MarshalBinary()
 	if err != nil {
 		return nil, err
 	}
 
 	nonce := make([]byte, 24)
 	c, _ := NewUnauthenticatedCipher(ec, nonce)
-	rr := NewRangeReader(r, c, length)
+	rr := NewRangeReader(r, c)
 
 	return rr, nil
 }
 
 // Decrypt returns a RangeWriter that decrypts w.
-func Decrypt(w io.Writer, key object.EncryptionKey) (*RangeWriter, error) {
-	s := strings.TrimPrefix(key.String(), "key:")
-	ec, err := hex.DecodeString(s)
+func Decrypt(w io.Writer, key object.EncryptionKey, parts []uint64) (*RangeWriter, error) {
+	ec, err := key.MarshalBinary()
 	if err != nil {
 		return nil, err
 	}
 
 	nonce := make([]byte, 24)
 	c, _ := NewUnauthenticatedCipher(ec, nonce)
-	rw := NewRangeWriter(w, c)
+	rw := NewRangeWriter(w, c, parts)
 
 	return rw, nil
 }

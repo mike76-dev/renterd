@@ -18,15 +18,14 @@ import (
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/object"
+	"go.sia.tech/renterd/satellite"
 	"go.sia.tech/renterd/satellite/encrypt"
 	"go.sia.tech/renterd/stats"
 	"go.sia.tech/renterd/tracing"
 	"go.uber.org/zap"
 	"lukechampine.com/frand"
-
 	// Satellite.
 	//satellite "github.com/mike76-dev/renterd-satellite"
-	"go.sia.tech/renterd/satellite"
 )
 
 const (
@@ -206,7 +205,7 @@ func newDownloader(host hostV3) *downloader {
 	}
 }
 
-func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o object.Object, offset, length uint64, contracts []api.ContractMetadata) (err error) {
+func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o object.Object, parts []uint64, offset, length uint64, contracts []api.ContractMetadata) (err error) {
 	// add tracing
 	ctx, span := tracing.Tracer.Start(ctx, "download")
 	defer func() {
@@ -221,9 +220,11 @@ func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o o
 	}
 
 	// create stream cipher
-	masterCw, err := encrypt.Decrypt(w, cfg.EncryptionKey)
-	if err != nil {
-		return err
+	if parts != nil {
+		w, err = encrypt.Decrypt(w, cfg.EncryptionKey, parts)
+		if err != nil {
+			return err
+		}
 	}
 
 	// create identifier
@@ -269,7 +270,7 @@ func (mgr *downloadManager) DownloadObject(ctx context.Context, w io.Writer, o o
 	}
 
 	// buffer the writer
-	bw := bufio.NewWriter(masterCw)
+	bw := bufio.NewWriter(w)
 	defer bw.Flush()
 
 	// create the cipher writer

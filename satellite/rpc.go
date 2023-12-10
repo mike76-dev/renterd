@@ -9,7 +9,9 @@ import (
 	"io"
 	"mime"
 	"net"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -825,7 +827,7 @@ func (s *Satellite) transferMetadata(ctx context.Context) {
 				MimeType: resp.Object.MimeType,
 				Slabs:    resp.Object.Slabs,
 				Data:     partialSlabData,
-			})
+			}, false)
 		}
 	}
 }
@@ -844,31 +846,78 @@ func (s *Satellite) saveMetadataHandler(jc jape.Context) {
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 
-	encryptedBucket, err := encodeString(cfg.EncryptionKey, fmr.Metadata.Bucket)
-	if jc.Check("couldn't encode bucket", err) != nil {
-		return
+	var encrypted string
+	parts, exists := s.store.getObject(fmr.Metadata.Bucket, url.PathEscape(strings.TrimPrefix(fmr.Metadata.Path, "/")))
+	if fmr.New {
+		if exists {
+			err := s.store.deleteObject(fmr.Metadata.Bucket, url.PathEscape(strings.TrimPrefix(fmr.Metadata.Path, "/")))
+			if jc.Check("couldn't delete old object information", err) != nil {
+				return
+			}
+		}
+		if cfg.Encrypt {
+			if len(fmr.Metadata.Parts) > 0 {
+				for i, part := range fmr.Metadata.Parts {
+					if i > 0 {
+						encrypted += ","
+					}
+					encrypted += fmt.Sprintf("%d", part)
+				}
+				err := s.store.addObject(fmr.Metadata.Bucket, url.PathEscape(strings.TrimPrefix(fmr.Metadata.Path, "/")), fmr.Metadata.Parts)
+				if jc.Check("couldn't save object information", err) != nil {
+					return
+				}
+			} else {
+				var length uint64
+				for _, slab := range fmr.Metadata.Slabs {
+					length += uint64(slab.Length)
+				}
+				encrypted = fmt.Sprintf("%d", length)
+				err := s.store.addObject(fmr.Metadata.Bucket, url.PathEscape(strings.TrimPrefix(fmr.Metadata.Path, "/")), []uint64{length})
+				if jc.Check("couldn't save object information", err) != nil {
+					return
+				}
+			}
+		}
+	} else if exists {
+		for i := range parts {
+			if i > 0 {
+				encrypted += ","
+			}
+			encrypted += fmt.Sprintf("%d", parts[i])
+		}
 	}
 
-	encryptedPath, err := encodeString(cfg.EncryptionKey, fmr.Metadata.Path)
-	if jc.Check("couldn't encode path", err) != nil {
-		return
-	}
-
-	encryptedMimeType, err := encodeString(cfg.EncryptionKey, fmr.Metadata.MimeType)
-	if jc.Check("couldn't encode MIME type", err) != nil {
-		return
+	encryptedBucket := []byte(fmr.Metadata.Bucket)
+	encryptedPath := []byte(fmr.Metadata.Path)
+	encryptedMimeType := []byte(fmr.Metadata.MimeType)
+	var err error
+	if cfg.Encrypt {
+		encryptedBucket, err = encodeString(cfg.EncryptionKey, fmr.Metadata.Bucket)
+		if jc.Check("couldn't encode bucket", err) != nil {
+			return
+		}
+		encryptedPath, err = encodeString(cfg.EncryptionKey, fmr.Metadata.Path)
+		if jc.Check("couldn't encode path", err) != nil {
+			return
+		}
+		encryptedMimeType, err = encodeString(cfg.EncryptionKey, fmr.Metadata.MimeType)
+		if jc.Check("couldn't encode MIME type", err) != nil {
+			return
+		}
 	}
 
 	smr := saveMetadataRequest{
 		PubKey: pk,
 		Metadata: encodedFileMetadata{
-			Key:      fmr.Metadata.Key,
-			Bucket:   encryptedBucket,
-			Path:     encryptedPath,
-			ETag:     fmr.Metadata.ETag,
-			MimeType: encryptedMimeType,
-			Slabs:    fmr.Metadata.Slabs,
-			Data:     fmr.Metadata.Data,
+			Key:       fmr.Metadata.Key,
+			Bucket:    encryptedBucket,
+			Path:      encryptedPath,
+			ETag:      fmr.Metadata.ETag,
+			MimeType:  encryptedMimeType,
+			Encrypted: encrypted,
+			Slabs:     fmr.Metadata.Slabs,
+			Data:      fmr.Metadata.Data,
 		},
 	}
 
@@ -922,6 +971,28 @@ func (s *Satellite) saveMetadataHandler(jc jape.Context) {
 	}
 }
 
+// parseParts is a helper function that converts a comma-separated
+// number string to a number slice.
+func parseParts(s string) (parts []uint64) {
+	for len(s) > 0 {
+		i := strings.Index(s, ",")
+		if i < 0 {
+			i = len(s)
+		}
+		num, err := strconv.ParseUint(s[:i], 10, 64)
+		if err != nil {
+			return nil
+		}
+		parts = append(parts, num)
+		if len(s) > i+1 {
+			s = s[i+1:]
+		} else {
+			s = ""
+		}
+	}
+	return
+}
+
 // requestMetadataHandler handles the GET /metadata requests.
 func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 	cfg := s.store.getConfig()
@@ -953,6 +1024,8 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 	if jc.Check("couldn't get buckets", err) != nil {
 		return
 	}
+
+	objs := make(map[string][][]byte)
 	for _, bucket := range buckets {
 		resp, err := s.bus.ListObjects(ctx, bucket.Name, api.ListObjectOptions{
 			Limit: -1,
@@ -960,23 +1033,34 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 		if jc.Check("couldn't requests present objects", err) != nil {
 			return
 		}
-		if len(resp.Objects) > 0 {
-			encryptedBucket, err := encodeString(cfg.EncryptionKey, bucket.Name)
-			if jc.Check("couldn't encode bucket", err) != nil {
-				return
-			}
-			bf := encodedBucketFiles{
-				Name: encryptedBucket,
-			}
-			for _, entry := range resp.Objects {
+
+		encryptedBucket, err := encodeString(cfg.EncryptionKey, bucket.Name)
+		if jc.Check("couldn't encode bucket", err) != nil {
+			return
+		}
+		for _, entry := range resp.Objects {
+			_, found := s.store.getObject(bucket.Name, url.PathEscape(strings.TrimPrefix(entry.Name, "/")))
+			if found {
 				encryptedPath, err := encodeString(cfg.EncryptionKey, entry.Name)
 				if jc.Check("couldn't encode path", err) != nil {
 					return
 				}
-				bf.Paths = append(bf.Paths, encryptedPath)
+				b := objs[string(encryptedBucket)]
+				b = append(b, encryptedPath)
+				objs[string(encryptedBucket)] = b
+			} else {
+				b := objs[bucket.Name]
+				b = append(b, []byte(entry.Name))
+				objs[bucket.Name] = b
 			}
-			rmr.PresentObjects = append(rmr.PresentObjects, bf)
 		}
+	}
+
+	for b, files := range objs {
+		rmr.PresentObjects = append(rmr.PresentObjects, encodedBucketFiles{
+			Name:  []byte(b),
+			Paths: files,
+		})
 	}
 
 	h := types.NewHasher()
@@ -998,6 +1082,11 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 		}
 
 		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			stream.SetDeadline(time.Now().Add(30 * time.Second))
 			var rf renterFiles
 			if err := stream.ReadResponse(&rf, 1048576); err != nil {
@@ -1067,20 +1156,30 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 				used[ss.LatestHost] = h2c[ss.LatestHost]
 			}
 		}
-		bucket, err := decodeString(cfg.EncryptionKey, fm.Bucket)
-		if err != nil {
-			s.logger.Error(fmt.Sprintf("couldn't decode bucket: %s", err))
-			continue
-		}
-		path, err := decodeString(cfg.EncryptionKey, fm.Path)
-		if err != nil {
-			s.logger.Error(fmt.Sprintf("couldn't decode path: %s", err))
-			continue
-		}
-		mimeType, err := decodeString(cfg.EncryptionKey, fm.MimeType)
-		if err != nil {
-			s.logger.Error(fmt.Sprintf("couldn't decode MIME type: %s", err))
-			continue
+		bucket := string(fm.Bucket)
+		path := string(fm.Path)
+		mimeType := string(fm.MimeType)
+		parts := parseParts(fm.Encrypted)
+		if len(parts) > 0 {
+			bucket, err = decodeString(cfg.EncryptionKey, fm.Bucket)
+			if err != nil {
+				s.logger.Error(fmt.Sprintf("couldn't decode bucket: %s", err))
+				continue
+			}
+			path, err = decodeString(cfg.EncryptionKey, fm.Path)
+			if err != nil {
+				s.logger.Error(fmt.Sprintf("couldn't decode path: %s", err))
+				continue
+			}
+			mimeType, err = decodeString(cfg.EncryptionKey, fm.MimeType)
+			if err != nil {
+				s.logger.Error(fmt.Sprintf("couldn't decode MIME type: %s", err))
+				continue
+			}
+			err = s.store.addObject(bucket, url.PathEscape(strings.TrimPrefix(path, "/")), parts)
+			if jc.Check("couldn't save object information", err) != nil {
+				return
+			}
 		}
 
 		_, err = s.bus.Bucket(ctx, bucket)
@@ -1311,7 +1410,7 @@ func newMimeReader(r io.Reader) (mimeType string, recycled io.Reader, err error)
 }
 
 // UploadObject uploads a file to the satellite.
-func UploadObject(r io.Reader, length uint64, bucket, path, mimeType string) error {
+func UploadObject(r io.Reader, bucket, path, mimeType string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1337,33 +1436,39 @@ func UploadObject(r io.Reader, length uint64, bucket, path, mimeType string) err
 		}
 	}
 
-	cr, err := encrypt.Encrypt(r, cfg.EncryptionKey, length)
-	if err != nil {
-		return err
+	if cfg.Encrypt {
+		r, err = encrypt.Encrypt(r, cfg.EncryptionKey)
+		if err != nil {
+			return err
+		}
 	}
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 
-	encryptedBucket, err := encodeString(cfg.EncryptionKey, bucket)
-	if err != nil {
-		return errors.New("couldn't encode bucket")
-	}
-
-	encryptedPath, err := encodeString(cfg.EncryptionKey, path)
-	if err != nil {
-		return errors.New("couldn't encode path")
-	}
-
-	encryptedMimeType, err := encodeString(cfg.EncryptionKey, mimeType)
-	if err != nil {
-		return errors.New("couldn't encode MIME type")
+	encryptedBucket := []byte(bucket)
+	encryptedPath := []byte(path)
+	encryptedMimeType := []byte(mimeType)
+	if cfg.Encrypt {
+		encryptedBucket, err = encodeString(cfg.EncryptionKey, bucket)
+		if err != nil {
+			return err
+		}
+		encryptedPath, err = encodeString(cfg.EncryptionKey, path)
+		if err != nil {
+			return err
+		}
+		encryptedMimeType, err = encodeString(cfg.EncryptionKey, mimeType)
+		if err != nil {
+			return err
+		}
 	}
 
 	req := uploadRequest{
-		PubKey:   pk,
-		Bucket:   encryptedBucket,
-		Path:     encryptedPath,
-		MimeType: encryptedMimeType,
+		PubKey:    pk,
+		Bucket:    encryptedBucket,
+		Path:      encryptedPath,
+		MimeType:  encryptedMimeType,
+		Encrypted: cfg.Encrypt,
 	}
 	h := types.NewHasher()
 	req.EncodeToWithoutSignature(h.E)
@@ -1396,7 +1501,7 @@ func UploadObject(r io.Reader, length uint64, bucket, path, mimeType string) err
 		incompleteChunk := resp.DataSize % dataLen
 		completeChunks := resp.DataSize - incompleteChunk
 		for total < completeChunks {
-			_, err := io.ReadFull(cr, buf)
+			_, err := io.ReadFull(r, buf)
 			if err != nil {
 				return stream.WriteResponse(&ud)
 			}
@@ -1404,7 +1509,7 @@ func UploadObject(r io.Reader, length uint64, bucket, path, mimeType string) err
 		}
 		if incompleteChunk > 0 {
 			buf := make([]byte, incompleteChunk)
-			_, err := io.ReadFull(cr, buf)
+			_, err := io.ReadFull(r, buf)
 			if err != nil {
 				return stream.WriteResponse(&ud)
 			}
@@ -1412,7 +1517,7 @@ func UploadObject(r io.Reader, length uint64, bucket, path, mimeType string) err
 
 		for {
 			stream.SetDeadline(time.Now().Add(30 * time.Second))
-			numBytes, err := io.ReadFull(cr, buf)
+			numBytes, err := io.ReadFull(r, buf)
 			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 				return err
 			}
@@ -1437,7 +1542,7 @@ func UploadObject(r io.Reader, length uint64, bucket, path, mimeType string) err
 
 // encodeString encrypts a string with the encryption key.
 func encodeString(key object.EncryptionKey, str string) (ciphertext []byte, err error) {
-	rs, err := encrypt.Encrypt(bytes.NewReader([]byte(str)), key, uint64(len(str)))
+	rs, err := encrypt.Encrypt(bytes.NewReader([]byte(str)), key)
 	if err != nil {
 		return
 	}
@@ -1449,7 +1554,7 @@ func encodeString(key object.EncryptionKey, str string) (ciphertext []byte, err 
 // decodeString decrypts a string encrypted with the encryption key.
 func decodeString(key object.EncryptionKey, ciphertext []byte) (string, error) {
 	var out bytes.Buffer
-	ws, err := encrypt.Decrypt(&out, key)
+	ws, err := encrypt.Decrypt(&out, key, nil)
 	if err != nil {
 		return "", err
 	}
@@ -1478,27 +1583,32 @@ func (s *Satellite) createMultipartHandler(jc jape.Context) {
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 
-	encryptedBucket, err := encodeString(cfg.EncryptionKey, req.Bucket)
-	if jc.Check("couldn't encode bucket", err) != nil {
-		return
-	}
-
-	encryptedPath, err := encodeString(cfg.EncryptionKey, req.Path)
-	if jc.Check("couldn't encode path", err) != nil {
-		return
-	}
-
-	encryptedMimeType, err := encodeString(cfg.EncryptionKey, req.MimeType)
-	if jc.Check("couldn't encode MIME type", err) != nil {
-		return
+	encryptedBucket := []byte(req.Bucket)
+	encryptedPath := []byte(req.Path)
+	encryptedMimeType := []byte(req.MimeType)
+	var err error
+	if cfg.Encrypt {
+		encryptedBucket, err = encodeString(cfg.EncryptionKey, req.Bucket)
+		if jc.Check("couldn't encode bucket", err) != nil {
+			return
+		}
+		encryptedPath, err = encodeString(cfg.EncryptionKey, req.Path)
+		if jc.Check("couldn't encode path", err) != nil {
+			return
+		}
+		encryptedMimeType, err = encodeString(cfg.EncryptionKey, req.MimeType)
+		if jc.Check("couldn't encode MIME type", err) != nil {
+			return
+		}
 	}
 
 	rmr := registerMultipartRequest{
-		PubKey:   pk,
-		Key:      req.Key,
-		Bucket:   encryptedBucket,
-		Path:     encryptedPath,
-		MimeType: encryptedMimeType,
+		PubKey:    pk,
+		Key:       req.Key,
+		Bucket:    encryptedBucket,
+		Path:      encryptedPath,
+		MimeType:  encryptedMimeType,
+		Encrypted: cfg.Encrypt,
 	}
 
 	h := types.NewHasher()
@@ -1587,7 +1697,7 @@ func (s *Satellite) abortMultipartHandler(jc jape.Context) {
 }
 
 // UploadPart uploads a part of an S3 multipart upload to the satellite.
-func UploadPart(r io.Reader, length uint64, id string, part int) error {
+func UploadPart(r io.Reader, id string, part int) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1599,9 +1709,11 @@ func UploadPart(r io.Reader, length uint64, id string, part int) error {
 		return errors.New("couldn't upload part: satellite disabled")
 	}
 
-	cr, err := encrypt.Encrypt(r, cfg.EncryptionKey, length)
-	if err != nil {
-		return err
+	if cfg.Encrypt {
+		r, err = encrypt.Encrypt(r, cfg.EncryptionKey)
+		if err != nil {
+			return err
+		}
 	}
 
 	pk, sk := generateKeyPair(cfg.RenterSeed)
@@ -1641,7 +1753,7 @@ func UploadPart(r io.Reader, length uint64, id string, part int) error {
 
 		for {
 			stream.SetDeadline(time.Now().Add(30 * time.Second))
-			numBytes, err := io.ReadFull(cr, buf)
+			numBytes, err := io.ReadFull(r, buf)
 			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 				return err
 			}

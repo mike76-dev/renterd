@@ -3,6 +3,8 @@ package satellite
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 
 	rhpv2 "go.sia.tech/core/rhp/v2"
 	"go.sia.tech/core/types"
@@ -100,6 +102,34 @@ func (c *Client) GetSatellites() (satellites map[types.PublicKey]SatelliteInfo, 
 	return
 }
 
+// GetObject retrieves the information about an encrypted object.
+func (c *Client) GetObject(bucket, path string) (or ObjectResponse, err error) {
+	values := make(url.Values)
+	values.Set("bucket", bucket)
+	values.Set("path", url.PathEscape(strings.TrimPrefix(path, "/")))
+	err = c.c.GET(fmt.Sprintf("/object?"+values.Encode()), &or)
+	return
+}
+
+// AddObject adds the information about an encrypted object.
+func (c *Client) AddObject(bucket, path string, parts []uint64) error {
+	path = url.PathEscape(strings.TrimPrefix(path, "/"))
+	req := ObjectPutRequest{
+		Bucket: bucket,
+		Path:   path,
+		Parts:  parts,
+	}
+	return c.c.PUT("/object", &req)
+}
+
+// DeleteObject deletes the information about an encrypted object.
+func (c *Client) DeleteObject(bucket, path string) error {
+	values := make(url.Values)
+	values.Set("bucket", bucket)
+	values.Set("path", url.PathEscape(strings.TrimPrefix(path, "/")))
+	return c.c.DELETE(fmt.Sprintf("/object?" + values.Encode()))
+}
+
 // FormContract requests the satellite to form a contract with the
 // specified host and adds it to the contract set.
 func (c *Client) FormContract(ctx context.Context, hpk types.PublicKey, endHeight uint64, storage uint64, upload uint64, download uint64) (api.ContractMetadata, error) {
@@ -142,9 +172,10 @@ func (c *Client) UpdateSettings(ctx context.Context, settings RenterSettings) er
 }
 
 // SaveMetadata sends the file metadata to the satellite.
-func (c *Client) SaveMetadata(ctx context.Context, fm FileMetadata) error {
+func (c *Client) SaveMetadata(ctx context.Context, fm FileMetadata, isNew bool) error {
 	req := SaveMetadataRequest{
 		Metadata: fm,
+		New:      isNew,
 	}
 	err := c.c.WithContext(ctx).POST("/metadata", req, nil)
 	return err
