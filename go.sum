@@ -197,6 +197,8 @@ github.com/mike76-dev/sia-web/renterd v0.1.17 h1:pBRFN0rAUUvWD9eRJ30E7g5aYYVTMFD
 github.com/mike76-dev/sia-web/renterd v0.1.17/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
 github.com/mike76-dev/sia-web/renterd v0.1.18 h1:yXLS8DGKEHGfe2sh2o/XCQuwFpi85EAHxo4+Rx8SvEM=
 github.com/mike76-dev/sia-web/renterd v0.1.18/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
+github.com/mike76-dev/sia-web/renterd v0.1.19 h1:JiZLAmBAaUl9SrGgPaYVcF2poAekWFpkFxmRi6R3TvQ=
+github.com/mike76-dev/sia-web/renterd v0.1.19/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
 github.com/minio/md5-simd v1.1.2 h1:Gdi1DZK69+ZVMoNHRXJyNcxrMA4dSxoYHZSQbirFg34=
 github.com/minio/md5-simd v1.1.2/go.mod h1:MzdKDxYpY2BT9XQFocsiZf/NKVtR7nkE4RoEpN+20RM=
 github.com/minio/minio-go/v7 v7.0.63 h1:GbZ2oCvaUdgT5640WJOpyDhhDxvknAJU2/T3yurwcbQ=
@@ -337,6 +339,8 @@ go.sia.tech/mux v1.2.0 h1:ofa1Us9mdymBbGMY2XH/lSpY8itFsKIo/Aq8zwe+GHU=
 go.sia.tech/mux v1.2.0/go.mod h1:Yyo6wZelOYTyvrHmJZ6aQfRoer3o4xyKQ4NmQLJrBSo=
 go.sia.tech/siad v1.5.10-0.20230228235644-3059c0b930ca h1:aZMg2AKevn7jKx+wlusWQfwSM5pNU9aGtRZme29q3O4=
 go.sia.tech/siad v1.5.10-0.20230228235644-3059c0b930ca/go.mod h1:h/1afFwpxzff6/gG5i1XdAgPK7dEY6FaibhK7N5F86Y=
+go.sia.tech/web v0.0.0-20230817201630-c3d9328334b1 h1:qzS1HFVPuQlOyh17zqO4Qkz63Q0YwADGMt9YAiL9mrk=
+go.sia.tech/web v0.0.0-20230817201630-c3d9328334b1/go.mod h1:RKODSdOmR3VtObPAcGwQqm4qnqntDVFylbvOBbWYYBU=
 go.uber.org/atomic v1.4.0/go.mod h1:gD2HeocX3+yG+ygLZcrzQJaqmWj9AIm7n08wl/qW/PE=
 go.uber.org/goleak v1.2.0 h1:xqgm/S+aQvhWFTtR0XK3Jvg7z8kGV8P4X14IzwN3Eqk=
 go.uber.org/multierr v1.1.0/go.mod h1:wR5kodmAFQ0UK8QlbwjlSNy0Z68gJhDJUG5sjR94q/0=

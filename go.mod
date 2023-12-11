@@ -8,7 +8,7 @@ require (
 	github.com/google/go-cmp v0.5.9
 	github.com/gotd/contrib v0.19.0
 	github.com/klauspost/reedsolomon v1.11.8
-	github.com/mike76-dev/sia-web/renterd v0.1.18
+	github.com/mike76-dev/sia-web/renterd v0.1.19
 	github.com/minio/minio-go/v7 v7.0.63
 	github.com/montanaflynn/stats v0.7.1
 	gitlab.com/NebulousLabs/encoding v0.0.0-20200604091946-456c3dc907fe
@@ -89,6 +89,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/internal/retry v1.16.0 // indirect
 	go.opentelemetry.io/otel/metric v1.16.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.0.0 // indirect
+	go.sia.tech/web v0.0.0-20230817201630-c3d9328334b1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/net v0.18.0 // indirect
 	golang.org/x/sys v0.14.0 // indirect
