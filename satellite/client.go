@@ -106,17 +106,16 @@ func (c *Client) GetSatellites() (satellites map[types.PublicKey]SatelliteInfo, 
 func (c *Client) GetObject(bucket, path string) (or ObjectResponse, err error) {
 	values := make(url.Values)
 	values.Set("bucket", bucket)
-	values.Set("path", url.PathEscape(strings.TrimPrefix(path, "/")))
+	values.Set("path", strings.TrimPrefix(path, "/"))
 	err = c.c.GET(fmt.Sprintf("/object?"+values.Encode()), &or)
 	return
 }
 
 // AddObject adds the information about an encrypted object.
 func (c *Client) AddObject(bucket, path string, parts []uint64) error {
-	path = url.PathEscape(strings.TrimPrefix(path, "/"))
 	req := ObjectPutRequest{
 		Bucket: bucket,
-		Path:   path,
+		Path:   strings.TrimPrefix(path, "/"),
 		Parts:  parts,
 	}
 	return c.c.PUT("/object", &req)
@@ -126,7 +125,7 @@ func (c *Client) AddObject(bucket, path string, parts []uint64) error {
 func (c *Client) DeleteObject(bucket, path string) error {
 	values := make(url.Values)
 	values.Set("bucket", bucket)
-	values.Set("path", url.PathEscape(strings.TrimPrefix(path, "/")))
+	values.Set("path", strings.TrimPrefix(path, "/"))
 	return c.c.DELETE(fmt.Sprintf("/object?" + values.Encode()))
 }
 

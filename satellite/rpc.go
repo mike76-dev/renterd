@@ -9,7 +9,6 @@ import (
 	"io"
 	"mime"
 	"net"
-	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -847,10 +846,10 @@ func (s *Satellite) saveMetadataHandler(jc jape.Context) {
 	pk, sk := generateKeyPair(cfg.RenterSeed)
 
 	var encrypted string
-	parts, exists := s.store.getObject(fmr.Metadata.Bucket, url.PathEscape(strings.TrimPrefix(fmr.Metadata.Path, "/")))
+	parts, exists := s.store.getObject(fmr.Metadata.Bucket, strings.TrimPrefix(fmr.Metadata.Path, "/"))
 	if fmr.New {
 		if exists {
-			err := s.store.deleteObject(fmr.Metadata.Bucket, url.PathEscape(strings.TrimPrefix(fmr.Metadata.Path, "/")))
+			err := s.store.deleteObject(fmr.Metadata.Bucket, strings.TrimPrefix(fmr.Metadata.Path, "/"))
 			if jc.Check("couldn't delete old object information", err) != nil {
 				return
 			}
@@ -863,7 +862,7 @@ func (s *Satellite) saveMetadataHandler(jc jape.Context) {
 					}
 					encrypted += fmt.Sprintf("%d", part)
 				}
-				err := s.store.addObject(fmr.Metadata.Bucket, url.PathEscape(strings.TrimPrefix(fmr.Metadata.Path, "/")), fmr.Metadata.Parts)
+				err := s.store.addObject(fmr.Metadata.Bucket, strings.TrimPrefix(fmr.Metadata.Path, "/"), fmr.Metadata.Parts)
 				if jc.Check("couldn't save object information", err) != nil {
 					return
 				}
@@ -873,7 +872,7 @@ func (s *Satellite) saveMetadataHandler(jc jape.Context) {
 					length += uint64(slab.Length)
 				}
 				encrypted = fmt.Sprintf("%d", length)
-				err := s.store.addObject(fmr.Metadata.Bucket, url.PathEscape(strings.TrimPrefix(fmr.Metadata.Path, "/")), []uint64{length})
+				err := s.store.addObject(fmr.Metadata.Bucket, strings.TrimPrefix(fmr.Metadata.Path, "/"), []uint64{length})
 				if jc.Check("couldn't save object information", err) != nil {
 					return
 				}
@@ -1039,7 +1038,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 			return
 		}
 		for _, entry := range resp.Objects {
-			_, found := s.store.getObject(bucket.Name, url.PathEscape(strings.TrimPrefix(entry.Name, "/")))
+			_, found := s.store.getObject(bucket.Name, strings.TrimPrefix(entry.Name, "/"))
 			if found {
 				encryptedPath, err := encodeString(cfg.EncryptionKey, entry.Name)
 				if jc.Check("couldn't encode path", err) != nil {
@@ -1176,7 +1175,7 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 				s.logger.Error(fmt.Sprintf("couldn't decode MIME type: %s", err))
 				continue
 			}
-			err = s.store.addObject(bucket, url.PathEscape(strings.TrimPrefix(path, "/")), parts)
+			err = s.store.addObject(bucket, strings.TrimPrefix(path, "/"), parts)
 			if jc.Check("couldn't save object information", err) != nil {
 				return
 			}

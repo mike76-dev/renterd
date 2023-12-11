@@ -8,7 +8,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"net/url"
 	"runtime"
 	"sort"
 	"strings"
@@ -1336,7 +1335,7 @@ func (b *bus) objectsHandlerDELETE(jc jape.Context) {
 	if jc.Check("couldn't delete object", err) != nil {
 		return
 	}
-	satellite.StaticSatellite.DeleteObject(bucket, url.PathEscape(strings.TrimPrefix(jc.PathParam("path"), "/")))
+	satellite.StaticSatellite.DeleteObject(bucket, strings.TrimPrefix(jc.PathParam("path"), "/"))
 }
 
 func (b *bus) slabbuffersHandlerGET(jc jape.Context) {
@@ -2231,7 +2230,6 @@ func (b *bus) multipartHandlerCompletePOST(jc jape.Context) {
 	for _, part := range mup.Parts {
 		parts = append(parts, uint64(part.Size))
 	}
-	fmt.Println("DEBUG:", parts) //TODO
 	resp, err := b.ms.CompleteMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, req.UploadID, req.Parts)
 	if jc.Check("failed to complete multipart upload", err) != nil {
 		return
