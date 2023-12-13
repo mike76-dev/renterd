@@ -237,6 +237,18 @@ func (s *Satellite) objectHandlerDELETE(jc jape.Context) {
 	jc.Check("failed to delete object from the store", s.store.deleteObject(bucket, path))
 }
 
+// objectsHandlerDELETE handles the DELETE /objects request.
+func (s *Satellite) objectsHandlerDELETE(jc jape.Context) {
+	var bucket, path string
+	if jc.DecodeForm("bucket", &bucket) != nil {
+		return
+	}
+	if jc.DecodeForm("path", &path) != nil {
+		return
+	}
+	jc.Check("failed to delete objects from the store", s.store.deleteObjects(bucket, path))
+}
+
 // Handler returns an HTTP handler that serves the satellite API.
 func (s *Satellite) Handler() http.Handler {
 	return jape.Mux(map[string]jape.Handler{
@@ -253,6 +265,7 @@ func (s *Satellite) Handler() http.Handler {
 		"GET    /object":             s.objectHandlerGET,
 		"PUT    /object":             s.objectHandlerPUT,
 		"DELETE /object":             s.objectHandlerDELETE,
+		"DELETE /objects":            s.objectsHandlerDELETE,
 		"POST   /rspv2/form":         s.formContractHandler,
 		"POST   /rspv2/renew":        s.renewContractHandler,
 		"GET    /settings":           s.settingsHandlerGET,

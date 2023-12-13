@@ -129,6 +129,14 @@ func (c *Client) DeleteObject(bucket, path string) error {
 	return c.c.DELETE(fmt.Sprintf("/object?" + values.Encode()))
 }
 
+// DeleteObjects deletes the information about a series of encrypted objects.
+func (c *Client) DeleteObjects(bucket, path string) error {
+	values := make(url.Values)
+	values.Set("bucket", bucket)
+	values.Set("path", strings.TrimPrefix(path, "/"))
+	return c.c.DELETE(fmt.Sprintf("/objects?" + values.Encode()))
+}
+
 // FormContract requests the satellite to form a contract with the
 // specified host and adds it to the contract set.
 func (c *Client) FormContract(ctx context.Context, hpk types.PublicKey, endHeight uint64, storage uint64, upload uint64, download uint64) (api.ContractMetadata, error) {

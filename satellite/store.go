@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,6 +90,18 @@ func (s *ephemeralStore) deleteObject(bucket, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.encryptedObjects, bucket+":"+path)
+	return nil
+}
+
+// deleteObjects deletes the information about a series of encrypted objects.
+func (s *ephemeralStore) deleteObjects(bucket, path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.encryptedObjects {
+		if strings.HasPrefix(key, bucket+":"+path) {
+			delete(s.encryptedObjects, key)
+		}
+	}
 	return nil
 }
 
@@ -189,6 +202,12 @@ func (s *jsonStore) addObject(bucket, path string, parts []uint64) error {
 // deleteObject deletes the information about an encrypted object.
 func (s *jsonStore) deleteObject(bucket, path string) error {
 	s.ephemeralStore.deleteObject(bucket, path)
+	return s.save()
+}
+
+// deleteObjects deletes the information about a series of encrypted objects.
+func (s *jsonStore) deleteObjects(bucket, path string) error {
+	s.ephemeralStore.deleteObjects(bucket, path)
 	return s.save()
 }
 

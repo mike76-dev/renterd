@@ -1335,7 +1335,11 @@ func (b *bus) objectsHandlerDELETE(jc jape.Context) {
 	if jc.Check("couldn't delete object", err) != nil {
 		return
 	}
-	satellite.StaticSatellite.DeleteObject(bucket, strings.TrimPrefix(jc.PathParam("path"), "/"))
+	if batch {
+		satellite.StaticSatellite.DeleteObjects(bucket, strings.TrimPrefix(jc.PathParam("path"), "/"))
+	} else {
+		satellite.StaticSatellite.DeleteObject(bucket, strings.TrimPrefix(jc.PathParam("path"), "/"))
+	}
 }
 
 func (b *bus) slabbuffersHandlerGET(jc jape.Context) {
