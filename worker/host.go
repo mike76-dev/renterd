@@ -14,6 +14,10 @@ import (
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/hostdb"
 	"go.uber.org/zap"
+
+	// Satellite
+	//"github.com/mike76-dev/renterd-satellite"
+	"go.sia.tech/renterd/satellite"
 )
 
 type (
@@ -142,6 +146,8 @@ func (h *host) UploadSector(ctx context.Context, sector *[rhpv2.SectorSize]byte,
 
 	// record spending
 	h.contractSpendingRecorder.Record(rev, api.ContractSpending{Uploads: cost})
+	satellite.StaticSatellite.UpdateRevision(ctx, rhpv2.ContractRevision{Revision: rev}, api.ContractSpending{Uploads: cost})
+
 	return root, nil
 }
 

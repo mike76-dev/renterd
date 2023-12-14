@@ -165,20 +165,6 @@ func (w *worker) upload(ctx context.Context, r io.Reader, contracts []api.Contra
 		}
 	}
 
-	// fetch satellite config
-	cfg, err := satellite.StaticSatellite.Config()
-	if err != nil {
-		return "", err
-	}
-
-	// create a stream cipher
-	if cfg.Encrypt {
-		r, err = encrypt.Encrypt(r, cfg.EncryptionKey)
-		if err != nil {
-			return "", err
-		}
-	}
-
 	// perform the upload
 	bufferSizeLimitReached, eTag, err := w.uploadManager.Upload(ctx, r, contracts, up, lockingPriorityUpload)
 	if err != nil {
@@ -189,25 +175,6 @@ func (w *worker) upload(ctx context.Context, r io.Reader, contracts []api.Contra
 	if up.packing {
 		if err := w.tryUploadPackedSlabs(ctx, up.rs, up.contractSet, bufferSizeLimitReached); err != nil {
 			w.logger.Errorf("couldn't upload packed slabs, err: %v", err)
-		}
-	}
-
-	// backup the object metadata if the user has opted in
-	if err == nil && cfg.Enabled {
-		rs, err := satellite.StaticSatellite.GetSettings(ctx)
-		if err == nil && rs.BackupFileMetadata {
-			err = satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
-				Key:      obj.Key,
-				Bucket:   bucket,
-				Path:     path,
-				ETag:     eTag,
-				MimeType: mimeType,
-				Slabs:    obj.Slabs,
-				Data:     partialSlabData,
-			}, true)
-			if err != nil {
-				w.logger.Errorf("couldn't send metadata to satellite: %v", err)
-			}
 		}
 	}
 
@@ -338,22 +305,6 @@ func (w *worker) uploadPackedSlab(ctx context.Context, ps api.PackedSlab, rs api
 	err = w.uploadManager.UploadPackedSlab(ctx, rs, ps, contracts, up.CurrentHeight, lockPriority, mem)
 	if err != nil {
 		return fmt.Errorf("couldn't upload packed slab, err: %v", err)
-	}
-
-	// send updated slab to the satellite
-	cfg, err := satellite.StaticSatellite.Config()
-	if err == nil && cfg.Enabled {
-		settings, err := satellite.StaticSatellite.GetSettings(ctx)
-		if err == nil && settings.BackupFileMetadata {
-			err = satellite.StaticSatellite.UpdateSlab(ctx, object.Slab{
-				Key:       ps.Key,
-				MinShards: uint8(rs.MinShards),
-				Shards:    sectors,
-			}, true)
-			if err != nil {
-				return fmt.Errorf("couldn't send updated slab to satellite: %v", err)
-			}
-		}
 	}
 
 	return nil
@@ -512,6 +463,20 @@ func (mgr *uploadManager) Upload(ctx context.Context, r io.Reader, contracts []a
 		span.RecordError(err)
 		span.End()
 	}()
+
+	// fetch satellite config
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		return false, "", err
+	}
+
+	// create a stream cipher
+	if cfg.Encrypt {
+		r, err = encrypt.Encrypt(r, cfg.EncryptionKey)
+		if err != nil {
+			return false, "", err
+		}
+	}
 
 	// create the object
 	o := object.NewObject(up.ec)
@@ -672,6 +637,25 @@ func (mgr *uploadManager) Upload(ctx context.Context, r io.Reader, contracts []a
 		}
 	}
 
+	// backup the object metadata if the user has opted in
+	if cfg.Enabled {
+		rs, err := satellite.StaticSatellite.GetSettings(ctx)
+		if err == nil && rs.BackupFileMetadata {
+			err = satellite.StaticSatellite.SaveMetadata(ctx, satellite.FileMetadata{
+				Key:      o.Key,
+				Bucket:   up.bucket,
+				Path:     up.path,
+				ETag:     eTag,
+				MimeType: up.mimeType,
+				Slabs:    o.Slabs,
+				Data:     partialSlab,
+			}, true)
+			if err != nil {
+				mgr.logger.Errorf("couldn't send metadata to satellite: %v", err)
+			}
+		}
+	}
+
 	return
 }
 
@@ -725,6 +709,22 @@ func (mgr *uploadManager) UploadPackedSlab(ctx context.Context, rs api.Redundanc
 	err = mgr.os.MarkPackedSlabsUploaded(ctx, []api.UploadedPackedSlab{slab})
 	if err != nil {
 		return fmt.Errorf("couldn't mark packed slabs uploaded, err: %v", err)
+	}
+
+	// send updated slab to the satellite
+	cfg, err := satellite.StaticSatellite.Config()
+	if err == nil && cfg.Enabled {
+		settings, err := satellite.StaticSatellite.GetSettings(ctx)
+		if err == nil && settings.BackupFileMetadata {
+			err = satellite.StaticSatellite.UpdateSlab(ctx, object.Slab{
+				Key:       ps.Key,
+				MinShards: uint8(rs.MinShards),
+				Shards:    sectors,
+			}, true)
+			if err != nil {
+				return fmt.Errorf("couldn't send updated slab to satellite: %v", err)
+			}
+		}
 	}
 
 	return nil
