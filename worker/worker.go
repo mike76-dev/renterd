@@ -1131,7 +1131,9 @@ func (w *worker) objectsHandlerPUT(jc jape.Context) {
 	}
 	if settings.ProxyUploads {
 		jc.Check("couldn't upload object", satellite.UploadObject(jc.Request.Body, bucket, jc.PathParam("path"), mimeType))
-		return
+		if !strings.HasSuffix(jc.PathParam("path"), "/") {
+			return
+		}
 	}
 
 	// cancel the upload if no contract set is specified

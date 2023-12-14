@@ -1181,6 +1181,11 @@ func (s *Satellite) requestMetadataHandler(jc jape.Context) {
 			}
 		}
 
+		// Check if the object is a directory.
+		if strings.HasSuffix(path, "/") {
+			continue
+		}
+
 		_, err = s.bus.Bucket(ctx, bucket)
 		if err != nil {
 			err = s.bus.CreateBucket(ctx, bucket, api.CreateBucketOptions{})
