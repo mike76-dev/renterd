@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -65,31 +66,35 @@ func (c *Client) RHPPriceTable(ctx context.Context, hostKey types.PublicKey, sia
 // RHPPruneContract prunes deleted sectors from the contract with given id.
 func (c *Client) RHPPruneContract(ctx context.Context, contractID types.FileContractID, timeout time.Duration) (pruned, remaining uint64, err error) {
 	var res api.RHPPruneContractResponse
-	err = c.c.WithContext(ctx).POST(fmt.Sprintf("/rhp/contract/%s/prune", contractID), api.RHPPruneContractRequest{
+	if err = c.c.WithContext(ctx).POST(fmt.Sprintf("/rhp/contract/%s/prune", contractID), api.RHPPruneContractRequest{
 		Timeout: api.DurationMS(timeout),
-	}, &res)
+	}, &res); err != nil {
+		return
+	} else if res.Error != "" {
+		err = errors.New(res.Error)
+	}
+
 	pruned = res.Pruned
 	remaining = res.Remaining
 	return
 }
 
 // RHPRenew renews an existing contract with a host.
-func (c *Client) RHPRenew(ctx context.Context, contractID types.FileContractID, endHeight uint64, hostKey types.PublicKey, siamuxAddr string, hostAddress, renterAddress types.Address, renterFunds, newCollateral types.Currency, windowSize uint64) (rhpv2.ContractRevision, []types.Transaction, error) {
+func (c *Client) RHPRenew(ctx context.Context, contractID types.FileContractID, endHeight uint64, hostKey types.PublicKey, siamuxAddr string, hostAddress, renterAddress types.Address, renterFunds, minNewCollateral types.Currency, expectedStorage, windowSize uint64) (resp api.RHPRenewResponse, err error) {
 	req := api.RHPRenewRequest{
-		ContractID:    contractID,
-		EndHeight:     endHeight,
-		HostAddress:   hostAddress,
-		HostKey:       hostKey,
-		NewCollateral: newCollateral,
-		RenterAddress: renterAddress,
-		RenterFunds:   renterFunds,
-		SiamuxAddr:    siamuxAddr,
-		WindowSize:    windowSize,
+		ContractID:         contractID,
+		EndHeight:          endHeight,
+		ExpectedNewStorage: expectedStorage,
+		HostAddress:        hostAddress,
+		HostKey:            hostKey,
+		MinNewCollateral:   minNewCollateral,
+		RenterAddress:      renterAddress,
+		RenterFunds:        renterFunds,
+		SiamuxAddr:         siamuxAddr,
+		WindowSize:         windowSize,
 	}
-
-	var resp api.RHPRenewResponse
-	err := c.c.WithContext(ctx).POST("/rhp/renew", req, &resp)
-	return resp.Contract, resp.TransactionSet, err
+	err = c.c.WithContext(ctx).POST("/rhp/renew", req, &resp)
+	return
 }
 
 // RHPScan scans a host, returning its current settings.

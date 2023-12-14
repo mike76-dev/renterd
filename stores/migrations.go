@@ -305,6 +305,18 @@ func performMigrations(db *gorm.DB, logger *zap.SugaredLogger) error {
 				return performMigration00034_objectHealth(tx, logger)
 			},
 		},
+		{
+			ID: "00035_bufferedSlabsDropSizeAndComplete",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00035_bufferedSlabsDropSizeAndComplete(tx, logger)
+			},
+		},
+		{
+			ID: "00036_contractPruneCfg",
+			Migrate: func(tx *gorm.DB) error {
+				return performMigration00036_contractPruneCfg(tx, logger)
+			},
+		},
 	}
 	// Create migrator.
 	m := gormigrate.New(db, gormigrate.DefaultOptions, migrations)
@@ -1375,5 +1387,42 @@ func performMigration00034_objectHealth(txn *gorm.DB, logger *zap.SugaredLogger)
 	}
 
 	logger.Info("migration 00034_objectHealth complete")
+	return nil
+}
+
+func performMigration00035_bufferedSlabsDropSizeAndComplete(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info("performing migration 00035_bufferedSlabsDropSizeAndComplete")
+	if txn.Migrator().HasColumn(&dbBufferedSlab{}, "size") {
+		if err := txn.Migrator().DropColumn(&dbBufferedSlab{}, "size"); err != nil {
+			return err
+		}
+	}
+	if txn.Migrator().HasColumn(&dbBufferedSlab{}, "complete") {
+		if err := txn.Migrator().DropColumn(&dbBufferedSlab{}, "complete"); err != nil {
+			return err
+		}
+	}
+	logger.Info("migration 00035_bufferedSlabsDropSizeAndComplete complete")
+	return nil
+}
+
+func performMigration00036_contractPruneCfg(txn *gorm.DB, logger *zap.SugaredLogger) error {
+	logger.Info("performing migration 00036_contractPruneCfg")
+
+	var autopilots []dbAutopilot
+	if err := txn.Model(&dbAutopilot{}).Find(&autopilots).Error; err != nil {
+		return err
+	}
+
+	for _, autopilot := range autopilots {
+		autopilot.Config.Contracts.Prune = false
+		if err := txn.Save(&autopilot).Error; err != nil {
+			logger.Errorf("failed to set default value for Contracts.Prune on autopilot '%v', err: %v", autopilot.Identifier, err)
+			return err
+		}
+		logger.Debugf("successfully defaulted Contracts.Prune to 'false' on autopilot '%v'", autopilot.Identifier)
+	}
+
+	logger.Info("migration 00036_contractPruneCfg complete")
 	return nil
 }

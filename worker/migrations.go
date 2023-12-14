@@ -9,10 +9,9 @@ import (
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/object"
 	"go.sia.tech/renterd/tracing"
-	"go.uber.org/zap"
 )
 
-func migrateSlab(ctx context.Context, d *downloadManager, u *uploadManager, s *object.Slab, dlContracts, ulContracts []api.ContractMetadata, bh uint64, logger *zap.SugaredLogger) (int, bool, error) {
+func (w *worker) migrate(ctx context.Context, s *object.Slab, contractSet string, dlContracts, ulContracts []api.ContractMetadata, bh uint64) (int, bool, error) {
 	ctx, span := tracing.Tracer.Start(ctx, "migrateSlab")
 	defer span.End()
 
@@ -84,14 +83,14 @@ SHARDS:
 	}
 
 	// acquire memory for the migration
-	mem := u.mm.AcquireMemory(ctx, uint64(len(shardIndices))*rhpv2.SectorSize)
+	mem := w.uploadManager.mm.AcquireMemory(ctx, uint64(len(shardIndices))*rhpv2.SectorSize)
 	if mem == nil {
 		return 0, false, fmt.Errorf("failed to acquire memory for migration")
 	}
 	defer mem.Release()
 
 	// download the slab
-	shards, surchargeApplied, err := d.DownloadSlab(ctx, *s, dlContracts)
+	shards, surchargeApplied, err := w.downloadManager.DownloadSlab(ctx, *s, dlContracts)
 	if err != nil {
 		return 0, false, fmt.Errorf("failed to download slab for migration: %w", err)
 	}
@@ -113,31 +112,10 @@ SHARDS:
 	}
 
 	// migrate the shards
-	uploaded, err := u.UploadShards(ctx, shards, allowed, bh, lockingPriorityUpload, mem)
+	err = w.uploadManager.MigrateShards(ctx, s, shardIndices, shards, contractSet, allowed, bh, lockingPriorityUpload, mem)
 	if err != nil {
 		return 0, surchargeApplied, fmt.Errorf("failed to upload slab for migration: %w", err)
 	}
 
-	// overwrite the unhealthy shards with the newly migrated ones
-	for i, si := range shardIndices {
-		s.Shards[si].LatestHost = uploaded[i].LatestHost
-
-		knownContracts := make(map[types.FileContractID]struct{})
-		for _, fcids := range s.Shards[si].Contracts {
-			for _, fcid := range fcids {
-				knownContracts[fcid] = struct{}{}
-			}
-		}
-		for hk, fcids := range uploaded[i].Contracts {
-			for _, fcid := range fcids {
-				if _, exists := knownContracts[fcid]; !exists {
-					if s.Shards[si].Contracts == nil {
-						s.Shards[si].Contracts = make(map[types.PublicKey][]types.FileContractID)
-					}
-					s.Shards[si].Contracts[hk] = append(s.Shards[si].Contracts[hk], fcid)
-				}
-			}
-		}
-	}
 	return len(shards), surchargeApplied, nil
 }

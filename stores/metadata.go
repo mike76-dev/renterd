@@ -16,6 +16,7 @@ import (
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/object"
 	"go.sia.tech/siad/modules"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -156,9 +157,7 @@ type (
 
 		DBSlab dbSlab
 
-		Complete bool `gorm:"index"`
 		Filename string
-		Size     int64
 	}
 
 	dbSector struct {
@@ -1300,10 +1299,6 @@ func (s *SQLStore) RecordContractSpending(ctx context.Context, records []api.Con
 		return nil // nothing to do
 	}
 
-	// Only allow for applying one batch of spending records at a time.
-	s.spendingMu.Lock()
-	defer s.spendingMu.Unlock()
-
 	squashedRecords := make(map[types.FileContractID]api.ContractSpending)
 	latestValues := make(map[types.FileContractID]struct {
 		revision          uint64
@@ -1380,7 +1375,7 @@ func (s *SQLStore) RecordContractSpending(ctx context.Context, records []api.Con
 		}
 	}
 	if err := s.RecordContractMetric(ctx, metrics...); err != nil {
-		s.logger.Errorw("failed to record contract metrics", "err", err)
+		s.logger.Errorw("failed to record contract metrics", zap.Error(err))
 	}
 	return nil
 }
@@ -1650,9 +1645,6 @@ func (s *SQLStore) DeleteHostSector(ctx context.Context, hk types.PublicKey, roo
 }
 
 func (s *SQLStore) UpdateObject(ctx context.Context, bucket, path, contractSet, eTag, mimeType string, o object.Object) error {
-	s.objectsMu.Lock()
-	defer s.objectsMu.Unlock()
-
 	// Sanity check input.
 	for _, s := range o.Slabs {
 		for i, shard := range s.Shards {
@@ -1773,9 +1765,6 @@ func (s *SQLStore) Slab(ctx context.Context, key object.EncryptionKey) (object.S
 }
 
 func (ss *SQLStore) UpdateSlab(ctx context.Context, s object.Slab, contractSet string) error {
-	ss.objectsMu.Lock()
-	defer ss.objectsMu.Unlock()
-
 	// sanity check the shards don't contain an empty root
 	for _, s := range s.Shards {
 		if s.Root == (types.Hash256{}) {
@@ -1925,9 +1914,6 @@ LIMIT ?
 `, now.Unix(), refreshHealthBatchSize)
 		var rowsAffected int64
 		err := s.retryTransaction(func(tx *gorm.DB) error {
-			s.objectsMu.Lock()
-			defer s.objectsMu.Unlock()
-
 			// create temp table from the health query since we will reuse it
 			if err := tx.Exec("DROP TABLE IF EXISTS src").Error; err != nil {
 				return err

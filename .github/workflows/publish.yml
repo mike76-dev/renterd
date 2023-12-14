@@ -4,6 +4,9 @@ name: Publish
 on:
   # Triggers the workflow on new SemVer tags
   push:
+    branches:
+      - master
+      - dev
     tags: 
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-alpha+'

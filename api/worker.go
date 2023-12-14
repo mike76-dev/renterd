@@ -103,7 +103,7 @@ type (
 	RHPPruneContractResponse struct {
 		Pruned    uint64 `json:"pruned"`
 		Remaining uint64 `json:"remaining"`
-		Error     error  `json:"error,omitempty"`
+		Error     string `json:"error,omitempty"`
 	}
 
 	// RHPPriceTableRequest is the request type for the /rhp/pricetable endpoint.
@@ -115,15 +115,16 @@ type (
 
 	// RHPRenewRequest is the request type for the /rhp/renew endpoint.
 	RHPRenewRequest struct {
-		ContractID    types.FileContractID `json:"contractID"`
-		EndHeight     uint64               `json:"endHeight"`
-		HostAddress   types.Address        `json:"hostAddress"`
-		HostKey       types.PublicKey      `json:"hostKey"`
-		SiamuxAddr    string               `json:"siamuxAddr"`
-		NewCollateral types.Currency       `json:"newCollateral"`
-		RenterAddress types.Address        `json:"renterAddress"`
-		RenterFunds   types.Currency       `json:"renterFunds"`
-		WindowSize    uint64               `json:"windowSize"`
+		ContractID         types.FileContractID `json:"contractID"`
+		EndHeight          uint64               `json:"endHeight"`
+		ExpectedNewStorage uint64               `json:"expectedNewStorage"`
+		HostAddress        types.Address        `json:"hostAddress"`
+		HostKey            types.PublicKey      `json:"hostKey"`
+		MinNewCollateral   types.Currency       `json:"minNewCollateral"`
+		SiamuxAddr         string               `json:"siamuxAddr"`
+		RenterAddress      types.Address        `json:"renterAddress"`
+		RenterFunds        types.Currency       `json:"renterFunds"`
+		WindowSize         uint64               `json:"windowSize"`
 	}
 
 	// RHPRenewResponse is the response type for the /rhp/renew endpoint.
@@ -131,6 +132,7 @@ type (
 		Error          string                 `json:"error"`
 		ContractID     types.FileContractID   `json:"contractID"`
 		Contract       rhpv2.ContractRevision `json:"contract"`
+		ContractPrice  types.Currency         `json:"contractPrice"`
 		TransactionSet []types.Transaction    `json:"transactionSet"`
 	}
 
@@ -176,21 +178,21 @@ type (
 
 	// DownloadStatsResponse is the response type for the /stats/downloads endpoint.
 	DownloadStatsResponse struct {
-		AvgDownloadSpeedMBPS float64           `json:"avgDownloadSpeedMBPS"`
+		AvgDownloadSpeedMBPS float64           `json:"avgDownloadSpeedMbps"`
 		AvgOverdrivePct      float64           `json:"avgOverdrivePct"`
 		HealthyDownloaders   uint64            `json:"healthyDownloaders"`
 		NumDownloaders       uint64            `json:"numDownloaders"`
 		DownloadersStats     []DownloaderStats `json:"downloadersStats"`
 	}
 	DownloaderStats struct {
-		AvgSectorDownloadSpeedMBPS float64         `json:"avgSectorDownloadSpeedMBPS"`
+		AvgSectorDownloadSpeedMBPS float64         `json:"avgSectorDownloadSpeedMbps"`
 		HostKey                    types.PublicKey `json:"hostKey"`
 		NumDownloads               uint64          `json:"numDownloads"`
 	}
 
 	// UploadStatsResponse is the response type for the /stats/uploads endpoint.
 	UploadStatsResponse struct {
-		AvgSlabUploadSpeedMBPS float64         `json:"avgSlabUploadSpeedMBPS"`
+		AvgSlabUploadSpeedMBPS float64         `json:"avgSlabUploadSpeedMbps"`
 		AvgOverdrivePct        float64         `json:"avgOverdrivePct"`
 		HealthyUploaders       uint64          `json:"healthyUploaders"`
 		NumUploaders           uint64          `json:"numUploaders"`
@@ -198,7 +200,7 @@ type (
 	}
 	UploaderStats struct {
 		HostKey                  types.PublicKey `json:"hostKey"`
-		AvgSectorUploadSpeedMBPS float64         `json:"avgSectorUploadSpeedMBPS"`
+		AvgSectorUploadSpeedMBPS float64         `json:"avgSectorUploadSpeedMbps"`
 	}
 
 	// WorkerStateResponse is the response type for the /worker/state endpoint.
