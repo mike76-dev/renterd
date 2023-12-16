@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	rhpv2 "go.sia.tech/core/rhp/v2"
@@ -201,14 +202,11 @@ func (s *Satellite) satellitesHandlerGET(jc jape.Context) {
 
 // objectHandlerGET handles the GET /object requests.
 func (s *Satellite) objectHandlerGET(jc jape.Context) {
-	var bucket, path string
+	var bucket string
 	if jc.DecodeForm("bucket", &bucket) != nil {
 		return
 	}
-	if jc.DecodeForm("path", &path) != nil {
-		return
-	}
-	parts, exists := s.store.getObject(bucket, path)
+	parts, exists := s.store.getObject(bucket, strings.TrimPrefix(jc.PathParam("path"), "/"))
 	or := ObjectResponse{
 		Found: exists,
 		Parts: parts,
@@ -222,31 +220,25 @@ func (s *Satellite) objectHandlerPUT(jc jape.Context) {
 	if jc.Decode(&opr) != nil {
 		return
 	}
-	jc.Check("failed to add object to the store", s.store.addObject(opr.Bucket, opr.Path, opr.Parts))
+	jc.Check("failed to add object to the store", s.store.addObject(opr.Bucket, strings.TrimPrefix(jc.PathParam("path"), "/"), opr.Parts))
 }
 
 // objectHandlerDELETE handles the DELETE /object request.
 func (s *Satellite) objectHandlerDELETE(jc jape.Context) {
-	var bucket, path string
+	var bucket string
 	if jc.DecodeForm("bucket", &bucket) != nil {
 		return
 	}
-	if jc.DecodeForm("path", &path) != nil {
-		return
-	}
-	jc.Check("failed to delete object from the store", s.store.deleteObject(bucket, path))
+	jc.Check("failed to delete object from the store", s.store.deleteObject(bucket, strings.TrimPrefix(jc.PathParam("path"), "/")))
 }
 
 // objectsHandlerDELETE handles the DELETE /objects request.
 func (s *Satellite) objectsHandlerDELETE(jc jape.Context) {
-	var bucket, path string
+	var bucket string
 	if jc.DecodeForm("bucket", &bucket) != nil {
 		return
 	}
-	if jc.DecodeForm("path", &path) != nil {
-		return
-	}
-	jc.Check("failed to delete objects from the store", s.store.deleteObjects(bucket, path))
+	jc.Check("failed to delete objects from the store", s.store.deleteObjects(bucket, strings.TrimPrefix(jc.PathParam("path"), "/")))
 }
 
 // Handler returns an HTTP handler that serves the satellite API.
@@ -262,10 +254,10 @@ func (s *Satellite) Handler() http.Handler {
 		"PUT    /satellite":          s.satelliteHandlerPUT,
 		"GET    /satellite/:id":      s.satelliteHandlerGET,
 		"GET    /satellites":         s.satellitesHandlerGET,
-		"GET    /object":             s.objectHandlerGET,
-		"PUT    /object":             s.objectHandlerPUT,
-		"DELETE /object":             s.objectHandlerDELETE,
-		"DELETE /objects":            s.objectsHandlerDELETE,
+		"GET    /object/*path":       s.objectHandlerGET,
+		"PUT    /object/*path":       s.objectHandlerPUT,
+		"DELETE /object/*path":       s.objectHandlerDELETE,
+		"DELETE /objects/*path":      s.objectsHandlerDELETE,
 		"POST   /rspv2/form":         s.formContractHandler,
 		"POST   /rspv2/renew":        s.renewContractHandler,
 		"GET    /settings":           s.settingsHandlerGET,

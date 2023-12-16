@@ -104,10 +104,10 @@ func (c *Client) GetSatellites() (satellites map[types.PublicKey]SatelliteInfo, 
 
 // GetObject retrieves the information about an encrypted object.
 func (c *Client) GetObject(bucket, path string) (or ObjectResponse, err error) {
-	values := make(url.Values)
+	values := url.Values{}
 	values.Set("bucket", bucket)
-	values.Set("path", strings.TrimPrefix(path, "/"))
-	err = c.c.GET(fmt.Sprintf("/object?"+values.Encode()), &or)
+	escapedPath := url.PathEscape(strings.TrimPrefix(path, "/"))
+	err = c.c.GET(fmt.Sprintf("/object/%s?"+values.Encode(), escapedPath), &or)
 	return
 }
 
@@ -115,26 +115,26 @@ func (c *Client) GetObject(bucket, path string) (or ObjectResponse, err error) {
 func (c *Client) AddObject(bucket, path string, parts []uint64) error {
 	req := ObjectPutRequest{
 		Bucket: bucket,
-		Path:   strings.TrimPrefix(path, "/"),
 		Parts:  parts,
 	}
-	return c.c.PUT("/object", &req)
+	escapedPath := url.PathEscape(strings.TrimPrefix(path, "/"))
+	return c.c.PUT(fmt.Sprintf("/object/%s", escapedPath), &req)
 }
 
 // DeleteObject deletes the information about an encrypted object.
 func (c *Client) DeleteObject(bucket, path string) error {
-	values := make(url.Values)
+	values := url.Values{}
 	values.Set("bucket", bucket)
-	values.Set("path", strings.TrimPrefix(path, "/"))
-	return c.c.DELETE(fmt.Sprintf("/object?" + values.Encode()))
+	path = url.PathEscape(strings.TrimPrefix(path, "/"))
+	return c.c.DELETE(fmt.Sprintf("/object/%s?"+values.Encode(), path))
 }
 
 // DeleteObjects deletes the information about a series of encrypted objects.
 func (c *Client) DeleteObjects(bucket, path string) error {
-	values := make(url.Values)
+	values := url.Values{}
 	values.Set("bucket", bucket)
-	values.Set("path", strings.TrimPrefix(path, "/"))
-	return c.c.DELETE(fmt.Sprintf("/objects?" + values.Encode()))
+	path = url.PathEscape(strings.TrimPrefix(path, "/"))
+	return c.c.DELETE(fmt.Sprintf("/objects/%s?"+values.Encode(), path))
 }
 
 // FormContract requests the satellite to form a contract with the

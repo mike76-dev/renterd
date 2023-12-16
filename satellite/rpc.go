@@ -1338,14 +1338,34 @@ func (s *Satellite) requestSlabsHandler(jc jape.Context) {
 		return
 	}
 
+	contracts, err := s.bus.ContractSetContracts(ctx, set)
+	if jc.Check("couldn't fetch contracts from bus", err) != nil {
+		return
+	}
+
+	h2c := make(map[types.PublicKey]types.FileContractID)
+	for _, c := range contracts {
+		h2c[c.HostKey] = c.ID
+	}
+
+	var numSlabs int
 	for _, slab := range ms.slabs {
+		for i, shard := range slab.Shards {
+			shard.Contracts = map[types.PublicKey][]types.FileContractID{
+				shard.LatestHost: {
+					h2c[shard.LatestHost],
+				},
+			}
+			slab.Shards[i] = shard
+		}
 		if err := s.bus.UpdateSlab(ctx, slab, set); err != nil {
 			s.logger.Error(fmt.Sprintf("couldn't update slab: %s", err))
 			continue
 		}
+		numSlabs++
 	}
 
-	s.logger.Info(fmt.Sprintf("successfully updated %d slabs", len(ms.slabs)))
+	s.logger.Info(fmt.Sprintf("successfully updated %d slabs", numSlabs))
 	jc.Encode(ms.slabs)
 }
 

@@ -255,6 +255,7 @@ func (h *host) FundAccount(ctx context.Context, balance types.Currency, rev *typ
 				return fmt.Errorf("failed to fund account with %v;%w", amount, err)
 			}
 			h.contractSpendingRecorder.Record(*rev, api.ContractSpending{FundAccount: cost})
+			satellite.StaticSatellite.UpdateRevision(ctx, rhpv2.ContractRevision{Revision: *rev}, api.ContractSpending{FundAccount: cost})
 			return nil
 		})
 	})

@@ -59,7 +59,6 @@ type SatellitesAllResponse struct {
 // ObjectPutRequest is the request type for the PUT /object requests.
 type ObjectPutRequest struct {
 	Bucket string   `json:"bucket"`
-	Path   string   `json:"path"`
 	Parts  []uint64 `json:"parts"`
 }
 
