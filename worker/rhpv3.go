@@ -24,8 +24,6 @@ import (
 	"go.sia.tech/siad/crypto"
 	"go.uber.org/zap"
 	"lukechampine.com/frand"
-	// Satellite
-	//satellite "github.com/mike76-dev/renterd-satellite"
 )
 
 const (

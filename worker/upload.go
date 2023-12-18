@@ -18,14 +18,15 @@ import (
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/object"
-	"go.sia.tech/renterd/satellite/encrypt"
 	"go.sia.tech/renterd/stats"
 	"go.sia.tech/renterd/tracing"
 	"go.uber.org/zap"
 
 	// Satellite.
-	//satellite "github.com/mike76-dev/renterd-satellite"
-	"go.sia.tech/renterd/satellite"
+	satellite "github.com/mike76-dev/renterd-satellite"
+	"github.com/mike76-dev/renterd-satellite/encrypt"
+	//"go.sia.tech/renterd/satellite"
+	//"go.sia.tech/renterd/satellite/encrypt"
 )
 
 const (
