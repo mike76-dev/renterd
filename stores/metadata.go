@@ -64,6 +64,8 @@ type (
 
 		HostID uint `gorm:"index"`
 		Host   dbHost
+
+		ContractSets []dbContractSet `gorm:"many2many:contract_set_contracts;constraint:OnDelete:CASCADE"`
 	}
 
 	ContractCommon struct {
@@ -330,6 +332,10 @@ func (c dbArchivedContract) convert() api.ArchivedContract {
 func (c dbContract) convert() api.ContractMetadata {
 	var revisionNumber uint64
 	_, _ = fmt.Sscan(c.RevisionNumber, &revisionNumber)
+	var contractSets []string
+	for _, cs := range c.ContractSets {
+		contractSets = append(contractSets, cs.Name)
+	}
 	return api.ContractMetadata{
 		ContractPrice: types.Currency(c.ContractPrice),
 		ID:            types.FileContractID(c.FCID),
@@ -349,6 +355,7 @@ func (c dbContract) convert() api.ContractMetadata {
 		ProofHeight:    c.ProofHeight,
 		RevisionHeight: c.RevisionHeight,
 		RevisionNumber: revisionNumber,
+		ContractSets:   contractSets,
 		Size:           c.Size,
 		StartHeight:    c.StartHeight,
 		State:          c.State.String(),
@@ -607,7 +614,8 @@ func (s *SQLStore) DeleteBucket(ctx context.Context, bucket string) error {
 		if res.Error != nil {
 			return res.Error
 		}
-		return pruneSlabs(tx)
+		s.scheduleSlabPruning()
+		return nil
 	})
 }
 
@@ -636,7 +644,7 @@ func (s *SQLStore) ListBuckets(ctx context.Context) ([]api.Bucket, error) {
 // reduce locking and make sure all results are consistent, everything is done
 // within a single transaction.
 func (s *SQLStore) ObjectsStats(ctx context.Context) (api.ObjectsStatsResponse, error) {
-	// Number of objects.
+	// number of objects
 	var objInfo struct {
 		NumObjects       uint64
 		MinHealth        float64
@@ -646,6 +654,28 @@ func (s *SQLStore) ObjectsStats(ctx context.Context) (api.ObjectsStatsResponse, 
 		Model(&dbObject{}).
 		Select("COUNT(*) AS NumObjects, COALESCE(MIN(health), 1) as MinHealth, SUM(size) AS TotalObjectsSize").
 		Scan(&objInfo).
+		Error
+	if err != nil {
+		return api.ObjectsStatsResponse{}, err
+	}
+
+	// number of unfinished objects
+	var unfinishedObjects uint64
+	err = s.db.
+		Model(&dbMultipartUpload{}).
+		Select("COUNT(*)").
+		Scan(&unfinishedObjects).
+		Error
+	if err != nil {
+		return api.ObjectsStatsResponse{}, err
+	}
+
+	// size of unfinished objects
+	var totalUnfinishedObjectsSize uint64
+	err = s.db.
+		Model(&dbMultipartPart{}).
+		Select("COALESCE(SUM(size), 0)").
+		Scan(&totalUnfinishedObjectsSize).
 		Error
 	if err != nil {
 		return api.ObjectsStatsResponse{}, err
@@ -683,11 +713,13 @@ func (s *SQLStore) ObjectsStats(ctx context.Context) (api.ObjectsStatsResponse, 
 	}
 
 	return api.ObjectsStatsResponse{
-		MinHealth:         objInfo.MinHealth,
-		NumObjects:        objInfo.NumObjects,
-		TotalObjectsSize:  objInfo.TotalObjectsSize,
-		TotalSectorsSize:  totalSectors * rhpv2.SectorSize,
-		TotalUploadedSize: uint64(totalUploaded) * rhpv2.SectorSize,
+		MinHealth:                  objInfo.MinHealth,
+		NumObjects:                 objInfo.NumObjects,
+		NumUnfinishedObjects:       unfinishedObjects,
+		TotalUnfinishedObjectsSize: totalUnfinishedObjectsSize,
+		TotalObjectsSize:           objInfo.TotalObjectsSize,
+		TotalSectorsSize:           totalSectors * rhpv2.SectorSize,
+		TotalUploadedSize:          uint64(totalUploaded) * rhpv2.SectorSize,
 	}, nil
 }
 
@@ -732,20 +764,80 @@ func (s *SQLStore) AddContract(ctx context.Context, c rhpv2.ContractRevision, co
 	return added.convert(), nil
 }
 
-func (s *SQLStore) Contracts(ctx context.Context) ([]api.ContractMetadata, error) {
-	var dbContracts []dbContract
-	err := s.db.
-		Model(&dbContract{}).
-		Joins("Host").
-		Find(&dbContracts).
+func (s *SQLStore) Contracts(ctx context.Context, opts api.ContractsOpts) ([]api.ContractMetadata, error) {
+	// helper to check whether a contract set exists
+	hasContractSet := func() error {
+		if opts.ContractSet == "" {
+			return nil
+		}
+		err := s.db.Where("name", opts.ContractSet).Take(&dbContractSet{}).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return api.ErrContractSetNotFound
+		}
+		return err
+	}
+
+	// fetch all contracts, their hosts and the contract set name
+	var rows []struct {
+		Contract dbContract `gorm:"embedded"`
+		Host     dbHost     `gorm:"embedded"`
+		Name     string
+	}
+	tx := s.db
+	if opts.ContractSet == "" {
+		// no filter, use all contracts
+		tx = tx.Table("contracts")
+	} else {
+		// filter contracts by contract set first
+		tx = tx.Table("(?) contracts", s.db.Model(&dbContract{}).
+			Select("contracts.*").
+			Joins("INNER JOIN hosts h ON h.id = contracts.host_id").
+			Joins("INNER JOIN contract_set_contracts csc ON csc.db_contract_id = contracts.id").
+			Joins("INNER JOIN contract_sets cs ON cs.id = csc.db_contract_set_id AND cs.name = ?", opts.ContractSet))
+	}
+	err := tx.
+		Select("contracts.*, h.*, cs.name as Name").
+		Joins("INNER JOIN hosts h ON h.id = contracts.host_id").
+		Joins("LEFT JOIN contract_set_contracts csc ON csc.db_contract_id = contracts.id").
+		Joins("LEFT JOIN contract_sets cs ON cs.id = csc.db_contract_set_id").
+		Order("contracts.id ASC").
+		Scan(&rows).
 		Error
 	if err != nil {
 		return nil, err
+	} else if len(rows) == 0 {
+		return nil, hasContractSet()
 	}
 
-	contracts := make([]api.ContractMetadata, len(dbContracts))
-	for i, c := range dbContracts {
-		contracts[i] = c.convert()
+	// merge 'Host', 'Name' and 'Contract' into dbContracts
+	var dbContracts []dbContract
+	for i := range rows {
+		dbContract := rows[i].Contract
+		dbContract.Host = rows[i].Host
+		if rows[i].Name != "" {
+			dbContract.ContractSets = append(dbContract.ContractSets, dbContractSet{Name: rows[i].Name})
+		}
+		dbContracts = append(dbContracts, dbContract)
+	}
+
+	// merge contract sets
+	var contracts []api.ContractMetadata
+	current, dbContracts := dbContracts[0], dbContracts[1:]
+	for {
+		if len(dbContracts) == 0 {
+			contracts = append(contracts, current.convert())
+			break
+		} else if current.ID != dbContracts[0].ID {
+			contracts = append(contracts, current.convert())
+		} else if len(dbContracts[0].ContractSets) > 0 {
+			current.ContractSets = append(current.ContractSets, dbContracts[0].ContractSets...)
+		}
+		current, dbContracts = dbContracts[0], dbContracts[1:]
+	}
+
+	// if no contracts are left, check if the set existed in the first place
+	if len(contracts) == 0 {
+		return nil, hasContractSet()
 	}
 	return contracts, nil
 }
@@ -888,18 +980,6 @@ WHERE c.fcid = ?
 		}
 	}
 	return
-}
-
-func (s *SQLStore) ContractSetContracts(ctx context.Context, set string) ([]api.ContractMetadata, error) {
-	dbContracts, err := s.contracts(ctx, set)
-	if err != nil {
-		return nil, err
-	}
-	contracts := make([]api.ContractMetadata, len(dbContracts))
-	for i, c := range dbContracts {
-		contracts[i] = c.convert()
-	}
-	return contracts, nil
 }
 
 func (s *SQLStore) ContractSets(ctx context.Context) ([]string, error) {
@@ -1222,7 +1302,7 @@ FROM (
 		case api.ObjectSortByHealth:
 			var markerHealth float64
 			if err = s.db.
-				Raw(fmt.Sprintf(`SELECT Health FROM (%s WHERE Name >= ? ORDER BY Name LIMIT 1) as n`, objectsQuery), append(objectsQueryParams, marker)...).
+				Raw(fmt.Sprintf(`SELECT Health FROM (%s WHERE oname >= ? ORDER BY oname LIMIT 1) as n`, objectsQuery), append(objectsQueryParams, marker)...).
 				Scan(&markerHealth).
 				Error; err != nil {
 				return
@@ -1234,6 +1314,22 @@ FROM (
 			} else {
 				markerExpr = "(Health = ? AND Name > ?) OR Health < ?"
 				markerParams = []interface{}{markerHealth, marker, markerHealth}
+			}
+		case api.ObjectSortBySize:
+			var markerSize float64
+			if err = s.db.
+				Raw(fmt.Sprintf(`SELECT Size FROM (%s WHERE oname >= ? ORDER BY oname LIMIT 1) as n`, objectsQuery), append(objectsQueryParams, marker)...).
+				Scan(&markerSize).
+				Error; err != nil {
+				return
+			}
+
+			if sortDir == api.ObjectSortDirAsc {
+				markerExpr = "(Size > ? OR (Size = ? AND Name > ?))"
+				markerParams = []interface{}{markerSize, markerSize, marker}
+			} else {
+				markerExpr = "(Size = ? AND Name > ?) OR Size < ?"
+				markerParams = []interface{}{markerSize, marker, markerSize}
 			}
 		case api.ObjectSortByName:
 			if sortDir == api.ObjectSortDirAsc {
@@ -1249,7 +1345,7 @@ FROM (
 
 	// build order clause
 	orderByClause := fmt.Sprintf("%s %s", sortBy, sortDir)
-	if sortBy == api.ObjectSortByHealth {
+	if sortBy != api.ObjectSortByName {
 		orderByClause += ", Name"
 	}
 
@@ -1393,10 +1489,60 @@ func (s *SQLStore) isKnownContract(fcid types.FileContractID) bool {
 	return found
 }
 
-func pruneSlabs(tx *gorm.DB) error {
-	return tx.Exec(`DELETE FROM slabs WHERE slabs.id IN (SELECT * FROM (SELECT sla.id FROM slabs sla
-		LEFT JOIN slices sli ON sli.db_slab_id  = sla.id
-		WHERE db_object_id IS NULL AND db_multipart_part_id IS NULL AND sla.db_buffered_slab_id IS NULL) toDelete)`).Error
+func (s *SQLStore) slabPruningLoop(interval, cooldown time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		// wait for trigger
+		select {
+		case <-s.shutdownCtx.Done():
+			return
+		case <-ticker.C:
+		case <-s.slabPruneSigChan:
+		}
+
+		err := s.retryTransaction(func(tx *gorm.DB) error {
+			if !isSQLite(s.db) {
+				return s.db.Exec(`
+			DELETE slabs
+			FROM slabs
+			LEFT JOIN slices ON slices.db_slab_id = slabs.id
+			WHERE slices.db_object_id IS NULL
+			AND slices.db_multipart_part_id IS NULL
+			AND slabs.db_buffered_slab_id IS NULL;
+		`).Error
+			} else {
+				return s.db.Exec(`
+			DELETE FROM slabs
+				WHERE id IN (
+				SELECT slabs.id
+				FROM slabs
+				LEFT JOIN slices ON slices.db_slab_id = slabs.id
+				WHERE slices.db_object_id IS NULL
+				AND slices.db_multipart_part_id IS NULL
+				AND slabs.db_buffered_slab_id IS NULL
+			);
+		`).Error
+			}
+		})
+		if err != nil {
+			s.logger.Errorw("failed to prune slabs", zap.Error(err))
+		}
+
+		// cooldown
+		select {
+		case <-s.shutdownCtx.Done():
+			return
+		case <-time.After(cooldown):
+		}
+	}
+}
+
+func (s *SQLStore) scheduleSlabPruning() {
+	select {
+	case s.slabPruneSigChan <- struct{}{}:
+	default:
+	}
 }
 
 func fetchUsedContracts(tx *gorm.DB, usedContracts map[types.PublicKey]map[types.FileContractID]struct{}) (map[types.FileContractID]dbContract, error) {
@@ -1431,7 +1577,7 @@ func (s *SQLStore) RenameObject(ctx context.Context, bucket, keyOld, keyNew stri
 	return s.retryTransaction(func(tx *gorm.DB) error {
 		if force {
 			// delete potentially existing object at destination
-			if _, err := deleteObject(tx, bucket, keyNew); err != nil {
+			if _, err := s.deleteObject(tx, bucket, keyNew); err != nil {
 				return err
 			}
 		}
@@ -1463,9 +1609,7 @@ func (s *SQLStore) RenameObjects(ctx context.Context, bucket, prefixOld, prefixN
 				return err
 			}
 			if resp.RowsAffected > 0 {
-				if err := pruneSlabs(tx); err != nil {
-					return err
-				}
+				s.scheduleSlabPruning()
 			}
 		}
 		tx = tx.Exec("UPDATE objects SET object_id = "+sqlConcat(tx, "?", "SUBSTR(object_id, ?)")+" WHERE SUBSTR(object_id, 1, ?) = ? AND ?",
@@ -1524,7 +1668,7 @@ func (s *SQLStore) CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath
 			}
 			return tx.Save(&srcObj).Error
 		}
-		_, err = deleteObject(tx, dstBucket, dstPath)
+		_, err = s.deleteObject(tx, dstBucket, dstPath)
 		if err != nil {
 			return fmt.Errorf("failed to delete object: %w", err)
 		}
@@ -1672,7 +1816,7 @@ func (s *SQLStore) UpdateObject(ctx context.Context, bucket, path, contractSet, 
 		// NOTE: please note that the object's created_at is currently used as
 		// its ModTime, if we ever stop recreating the object but update it
 		// instead we need to take this into account
-		_, err := deleteObject(tx, bucket, path)
+		_, err := s.deleteObject(tx, bucket, path)
 		if err != nil {
 			return fmt.Errorf("failed to delete object: %w", err)
 		}
@@ -1721,7 +1865,7 @@ func (s *SQLStore) RemoveObject(ctx context.Context, bucket, key string) error {
 	var rowsAffected int64
 	var err error
 	err = s.retryTransaction(func(tx *gorm.DB) error {
-		rowsAffected, err = deleteObject(tx, bucket, key)
+		rowsAffected, err = s.deleteObject(tx, bucket, key)
 		return err
 	})
 	if err != nil {
@@ -1737,7 +1881,7 @@ func (s *SQLStore) RemoveObjects(ctx context.Context, bucket, prefix string) err
 	var rowsAffected int64
 	var err error
 	err = s.retryTransaction(func(tx *gorm.DB) error {
-		rowsAffected, err = deleteObjects(tx, bucket, prefix)
+		rowsAffected, err = s.deleteObjects(tx, bucket, prefix)
 		return err
 	})
 	if err != nil {
@@ -1845,19 +1989,14 @@ func (ss *SQLStore) UpdateSlab(ctx context.Context, s object.Slab, contractSet s
 		// loop updated shards
 		for i, shard := range s.Shards {
 			// ensure the sector exists
-			var sector dbSector
-			if err := tx.
-				Where(dbSector{Root: shard.Root[:]}).
-				Assign(dbSector{
-					DBSlabID:   slab.ID,
-					SlabIndex:  i + 1,
-					LatestHost: publicKey(shard.LatestHost),
-					Root:       shard.Root[:],
-				},
-				).
-				FirstOrCreate(&sector).
-				Error; err != nil {
-				return err
+			sector := dbSector{
+				DBSlabID:   slab.ID,
+				SlabIndex:  i + 1,
+				LatestHost: publicKey(shard.LatestHost),
+				Root:       shard.Root[:],
+			}
+			if err := createOrUpdateSector(tx, &sector); err != nil {
+				return fmt.Errorf("failed to create sector: %w", err)
 			}
 
 			// ensure the associations are updated
@@ -1919,6 +2058,8 @@ LIMIT ?
 				return err
 			} else if err = tx.Exec("CREATE TEMPORARY TABLE src AS ?", healthQuery).Error; err != nil {
 				return err
+			} else if err = tx.Exec("CREATE INDEX src_id ON src (id)").Error; err != nil {
+				return err
 			}
 
 			var res *gorm.DB
@@ -1934,14 +2075,25 @@ LIMIT ?
 
 			// Update the health of the objects associated with the updated slabs.
 			if isSQLite(s.db) {
-				return tx.Exec(`UPDATE objects SET health = src.health FROM src
-								INNER JOIN slices ON slices.db_slab_id = src.id
-								WHERE slices.db_object_id = objects.id`).Error
+				return tx.Exec(`UPDATE objects SET health = i.health FROM (
+									SELECT slices.db_object_id, MIN(s.health) AS health
+									FROM slices
+									INNER JOIN src s ON s.id = slices.db_slab_id
+									INNER JOIN objects o ON o.id = slices.db_object_id
+									GROUP BY slices.db_object_id
+								) i
+								WHERE i.db_object_id = objects.id AND objects.health != i.health`).Error
 			} else {
 				return tx.Exec(`UPDATE objects
-								INNER JOIN slices sli ON sli.db_object_id = objects.id
-								INNER JOIN src s ON s.id = sli.db_slab_id
-								SET objects.health = s.health`).Error
+								INNER JOIN (
+									SELECT slices.db_object_id, MIN(s.health) as health
+									FROM slices
+									INNER JOIN src s ON s.id = slices.db_slab_id
+									GROUP BY slices.db_object_id
+								) i ON objects.id = i.db_object_id
+								SET objects.health = i.health
+								WHERE objects.health != i.health
+								`).Error
 			}
 		})
 		if err != nil {
@@ -2002,7 +2154,7 @@ func (s *SQLStore) createSlices(tx *gorm.DB, objID, multiPartID *uint, contractS
 	}
 
 	for i, ss := range slices {
-		// Create Slab if it doesn't exist yet.
+		// create Slab if it doesn't exist yet
 		slabKey, err := ss.Key.MarshalBinary()
 		if err != nil {
 			return fmt.Errorf("failed to marshal slab key: %w", err)
@@ -2013,12 +2165,21 @@ func (s *SQLStore) createSlices(tx *gorm.DB, objID, multiPartID *uint, contractS
 			MinShards:       ss.MinShards,
 			TotalShards:     uint8(len(ss.Shards)),
 		}
-		err = tx.Where(dbSlab{Key: slabKey}).
-			FirstOrCreate(&slab).Error
+		err = tx.
+			Where(dbSlab{Key: slabKey}).
+			Clauses(clause.OnConflict{
+				DoNothing: true,
+			}).
+			Create(&slab).Error
 		if err != nil {
 			return fmt.Errorf("failed to create slab %v/%v: %w", i+1, len(slices), err)
 		} else if slab.DBContractSetID != contractSetID {
 			return fmt.Errorf("slab already exists in another contract set %v != %v", slab.DBContractSetID, contractSetID)
+		} else if slab.ID == 0 {
+			// if it already exists, fetch it
+			if err := tx.Where(dbSlab{Key: slabKey}).Take(&slab).Error; err != nil {
+				return fmt.Errorf("failed to fetch slab: %w", err)
+			}
 		}
 
 		// Create Slice.
@@ -2036,17 +2197,14 @@ func (s *SQLStore) createSlices(tx *gorm.DB, objID, multiPartID *uint, contractS
 		}
 
 		for j, shard := range ss.Shards {
-			var sector dbSector
-			err := tx.
-				Where(dbSector{Root: shard.Root[:]}).
-				Assign(dbSector{
-					DBSlabID:   slab.ID,
-					SlabIndex:  j + 1,
-					LatestHost: publicKey(shard.LatestHost),
-				}).
-				FirstOrCreate(&sector).
-				Error
-			if err != nil {
+			sector := dbSector{
+				DBSlabID:   slab.ID,
+				SlabIndex:  j + 1,
+				LatestHost: publicKey(shard.LatestHost),
+				Root:       shard.Root[:],
+			}
+			// create sector if it doesn't exist yet
+			if err := createOrUpdateSector(tx, &sector); err != nil {
 				return fmt.Errorf("failed to create sector %v/%v: %w", j+1, len(ss.Shards), err)
 			}
 			// Add contract and host to join tables.
@@ -2310,7 +2468,8 @@ func contractsForHost(tx *gorm.DB, host dbHost) (contracts []dbContract, err err
 
 func newContract(hostID uint, fcid, renewedFrom types.FileContractID, contractPrice, totalCost types.Currency, startHeight, windowStart, windowEnd, size uint64, state contractState) dbContract {
 	return dbContract{
-		HostID: hostID,
+		HostID:       hostID,
+		ContractSets: nil, // new contract isn't in a set yet
 
 		ContractCommon: ContractCommon{
 			FCID:        fileContractID(fcid),
@@ -2404,7 +2563,7 @@ func archiveContracts(ctx context.Context, tx *gorm.DB, contracts []dbContract, 
 // deleteObject deletes an object from the store and prunes all slabs which are
 // without an obect after the deletion. That means in case of packed uploads,
 // the slab is only deleted when no more objects point to it.
-func deleteObject(tx *gorm.DB, bucket string, path string) (numDeleted int64, _ error) {
+func (s *SQLStore) deleteObject(tx *gorm.DB, bucket string, path string) (numDeleted int64, _ error) {
 	tx = tx.Where("object_id = ? AND ?", path, sqlWhereBucket("objects", bucket)).
 		Delete(&dbObject{})
 	if tx.Error != nil {
@@ -2414,21 +2573,19 @@ func deleteObject(tx *gorm.DB, bucket string, path string) (numDeleted int64, _ 
 	if numDeleted == 0 {
 		return 0, nil // nothing to prune if no object was deleted
 	}
-	if err := pruneSlabs(tx); err != nil {
-		return 0, err
-	}
+	s.scheduleSlabPruning()
 	return
 }
 
-func deleteObjects(tx *gorm.DB, bucket string, path string) (numDeleted int64, _ error) {
+func (s *SQLStore) deleteObjects(tx *gorm.DB, bucket string, path string) (numDeleted int64, _ error) {
 	tx = tx.Exec("DELETE FROM objects WHERE SUBSTR(object_id, 1, ?) = ? AND ?",
 		utf8.RuneCountInString(path), path, sqlWhereBucket("objects", bucket))
 	if tx.Error != nil {
 		return 0, tx.Error
 	}
 	numDeleted = tx.RowsAffected
-	if err := pruneSlabs(tx); err != nil {
-		return 0, err
+	if numDeleted > 0 {
+		s.scheduleSlabPruning()
 	}
 	return numDeleted, nil
 }
@@ -2687,6 +2844,28 @@ func buildMarkerExpr(db *gorm.DB, bucket, prefix, marker, sortBy, sortDir string
 		} else {
 			markerExpr = gorm.Expr("Health > ? OR (Health >= ? AND object_id > ?)", markerHealth, markerHealth, marker)
 		}
+	case api.ObjectSortBySize:
+		// fetch marker size
+		var markerSize float64
+		if marker != "" && sortBy == api.ObjectSortBySize {
+			if err := db.
+				Select("o.size").
+				Model(&dbObject{}).
+				Table("objects o").
+				Joins("INNER JOIN buckets b ON o.db_bucket_id = b.id").
+				Where("b.name = ? AND ? AND ?", bucket, buildPrefixExpr(prefix), gorm.Expr("o.object_id >= ?", marker)).
+				Limit(1).
+				Scan(&markerSize).
+				Error; err != nil {
+				return exprTRUE, clause.OrderBy{}, err
+			}
+		}
+
+		if desc {
+			markerExpr = gorm.Expr("(Size <= ? AND object_id > ?) OR Size < ?", markerSize, marker, markerSize)
+		} else {
+			markerExpr = gorm.Expr("Size > ? OR (Size >= ? AND object_id > ?)", markerSize, markerSize, marker)
+		}
 	default:
 		err = fmt.Errorf("unhandled sortBy parameter '%s'", sortBy)
 	}
@@ -2702,6 +2881,7 @@ func buildOrderClause(sortBy, sortDir string) (clause.OrderByColumn, error) {
 		"":                     "object_id",
 		api.ObjectSortByName:   "object_id",
 		api.ObjectSortByHealth: "Health",
+		api.ObjectSortBySize:   "Size",
 	}
 
 	return clause.OrderByColumn{
@@ -2743,8 +2923,32 @@ func validateSort(sortBy, sortDir string) error {
 		return fmt.Errorf("invalid dir '%v', allowed values are '%v' and '%v'; %w", sortDir, api.ObjectSortDirAsc, api.ObjectSortDirDesc, api.ErrInvalidObjectSortParameters)
 	}
 
-	if !allowed(sortBy, "", api.ObjectSortByHealth, api.ObjectSortByName) {
-		return fmt.Errorf("invalid sort by '%v', allowed values are '%v' and '%v'; %w", sortBy, api.ObjectSortByHealth, api.ObjectSortByName, api.ErrInvalidObjectSortParameters)
+	if !allowed(sortBy, "", api.ObjectSortByHealth, api.ObjectSortByName, api.ObjectSortBySize) {
+		return fmt.Errorf("invalid sort by '%v', allowed values are '%v', '%v' and '%v'; %w", sortBy, api.ObjectSortByHealth, api.ObjectSortByName, api.ObjectSortBySize, api.ErrInvalidObjectSortParameters)
+	}
+	return nil
+}
+
+// createOrUpdateSector creates a sector or updates it if it exists already. The
+// resulting ID is set on the input sector.
+// NOTE: don't rely on any other fields of the returned sector than the ID
+func createOrUpdateSector(tx *gorm.DB, sector *dbSector) error {
+	err := tx.
+		Where(dbSector{Root: sector.Root[:]}).
+		Clauses(clause.OnConflict{
+			UpdateAll: true,
+			Columns:   []clause.Column{{Name: "root"}},
+		}).
+		Create(&sector).
+		Error
+	if err != nil {
+		return err
+	} else if sector.ID == 0 {
+		// if it already exists, fetch it - this fallback is needed for MySQL
+		// since it doesn't support returning the ID on conflict
+		if err := tx.Where(dbSector{Root: sector.Root[:]}).Take(&sector).Error; err != nil {
+			return err
+		}
 	}
 	return nil
 }

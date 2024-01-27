@@ -77,12 +77,25 @@ func TestNewTestCluster(t *testing.T) {
 		t.Fatal("TotalCost and ContractPrice shouldn't be zero")
 	}
 
+	// Make sure the contracts are part of the set.
+	busContracts, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range busContracts {
+		if len(c.ContractSets) != 1 {
+			t.Fatal("contract should be part of one set", len(c.ContractSets))
+		} else if c.ContractSets[0] != sets[0] {
+			t.Fatalf("contract should be part of set %v but was %v", sets[0], c.ContractSets[0])
+		}
+	}
+
 	// Mine blocks until contracts start renewing.
 	cluster.MineToRenewWindow()
 
 	// Wait for the contract to be renewed.
 	tt.Retry(100, 100*time.Millisecond, func() error {
-		contracts, err := cluster.Bus.Contracts(context.Background())
+		contracts, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 		if err != nil {
 			return err
 		}
@@ -120,7 +133,7 @@ func TestNewTestCluster(t *testing.T) {
 		cluster.MineBlocks(1)
 
 		// Fetch renewed contract and make sure we caught the proof and revision.
-		contracts, err := cluster.Bus.Contracts(context.Background())
+		contracts, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -306,48 +319,69 @@ func TestObjectEntries(t *testing.T) {
 	}
 
 	tests := []struct {
-		path   string
-		prefix string
-		want   []api.ObjectMetadata
+		path    string
+		prefix  string
+		sortBy  string
+		sortDir string
+		want    []api.ObjectMetadata
 	}{
-		{"/", "", []api.ObjectMetadata{{Name: "//", Size: 15, Health: 1}, {Name: "/FOO/", Size: 9, Health: 1}, {Name: "/fileś/", Size: 6, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}, {Name: "/gab/", Size: 5, Health: 1}}},
-		{"//", "", []api.ObjectMetadata{{Name: "///", Size: 8, Health: 1}, {Name: "//double/", Size: 7, Health: 1}}},
-		{"///", "", []api.ObjectMetadata{{Name: "///triple", Size: 8, Health: 1}}},
-		{"/foo/", "", []api.ObjectMetadata{{Name: "/foo/bar", Size: 1, Health: 1}, {Name: "/foo/bat", Size: 2, Health: 1}, {Name: "/foo/baz/", Size: 7, Health: 1}}},
-		{"/FOO/", "", []api.ObjectMetadata{{Name: "/FOO/bar", Size: 9, Health: 1}}},
-		{"/foo/baz/", "", []api.ObjectMetadata{{Name: "/foo/baz/quux", Size: 3, Health: 1}, {Name: "/foo/baz/quuz", Size: 4, Health: 1}}},
-		{"/gab/", "", []api.ObjectMetadata{{Name: "/gab/guub", Size: 5, Health: 1}}},
-		{"/fileś/", "", []api.ObjectMetadata{{Name: "/fileś/śpecial", Size: 6, Health: 1}}},
+		{"/", "", "", "", []api.ObjectMetadata{{Name: "//", Size: 15, Health: 1}, {Name: "/FOO/", Size: 9, Health: 1}, {Name: "/fileś/", Size: 6, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}, {Name: "/gab/", Size: 5, Health: 1}}},
+		{"//", "", "", "", []api.ObjectMetadata{{Name: "///", Size: 8, Health: 1}, {Name: "//double/", Size: 7, Health: 1}}},
+		{"///", "", "", "", []api.ObjectMetadata{{Name: "///triple", Size: 8, Health: 1}}},
+		{"/foo/", "", "", "", []api.ObjectMetadata{{Name: "/foo/bar", Size: 1, Health: 1}, {Name: "/foo/bat", Size: 2, Health: 1}, {Name: "/foo/baz/", Size: 7, Health: 1}}},
+		{"/FOO/", "", "", "", []api.ObjectMetadata{{Name: "/FOO/bar", Size: 9, Health: 1}}},
+		{"/foo/baz/", "", "", "", []api.ObjectMetadata{{Name: "/foo/baz/quux", Size: 3, Health: 1}, {Name: "/foo/baz/quuz", Size: 4, Health: 1}}},
+		{"/gab/", "", "", "", []api.ObjectMetadata{{Name: "/gab/guub", Size: 5, Health: 1}}},
+		{"/fileś/", "", "", "", []api.ObjectMetadata{{Name: "/fileś/śpecial", Size: 6, Health: 1}}},
 
-		{"/", "f", []api.ObjectMetadata{{Name: "/fileś/", Size: 6, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}}},
-		{"/foo/", "fo", []api.ObjectMetadata{}},
-		{"/foo/baz/", "quux", []api.ObjectMetadata{{Name: "/foo/baz/quux", Size: 3, Health: 1}}},
-		{"/gab/", "/guub", []api.ObjectMetadata{}},
+		{"/", "f", "", "", []api.ObjectMetadata{{Name: "/fileś/", Size: 6, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}}},
+		{"/foo/", "fo", "", "", []api.ObjectMetadata{}},
+		{"/foo/baz/", "quux", "", "", []api.ObjectMetadata{{Name: "/foo/baz/quux", Size: 3, Health: 1}}},
+		{"/gab/", "/guub", "", "", []api.ObjectMetadata{}},
+
+		{"/", "", "name", "ASC", []api.ObjectMetadata{{Name: "//", Size: 15, Health: 1}, {Name: "/FOO/", Size: 9, Health: 1}, {Name: "/fileś/", Size: 6, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}, {Name: "/gab/", Size: 5, Health: 1}}},
+		{"/", "", "name", "DESC", []api.ObjectMetadata{{Name: "/gab/", Size: 5, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}, {Name: "/fileś/", Size: 6, Health: 1}, {Name: "/FOO/", Size: 9, Health: 1}, {Name: "//", Size: 15, Health: 1}}},
+
+		{"/", "", "health", "ASC", []api.ObjectMetadata{{Name: "//", Size: 15, Health: 1}, {Name: "/FOO/", Size: 9, Health: 1}, {Name: "/fileś/", Size: 6, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}, {Name: "/gab/", Size: 5, Health: 1}}},
+		{"/", "", "health", "DESC", []api.ObjectMetadata{{Name: "//", Size: 15, Health: 1}, {Name: "/FOO/", Size: 9, Health: 1}, {Name: "/fileś/", Size: 6, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}, {Name: "/gab/", Size: 5, Health: 1}}},
+
+		{"/", "", "size", "ASC", []api.ObjectMetadata{{Name: "/gab/", Size: 5, Health: 1}, {Name: "/fileś/", Size: 6, Health: 1}, {Name: "/FOO/", Size: 9, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}, {Name: "//", Size: 15, Health: 1}}},
+		{"/", "", "size", "DESC", []api.ObjectMetadata{{Name: "//", Size: 15, Health: 1}, {Name: "/foo/", Size: 10, Health: 1}, {Name: "/FOO/", Size: 9, Health: 1}, {Name: "/fileś/", Size: 6, Health: 1}, {Name: "/gab/", Size: 5, Health: 1}}},
 	}
 	for _, test := range tests {
 		// use the bus client
-		res, err := b.Object(context.Background(), api.DefaultBucketName, test.path, api.GetObjectOptions{Prefix: test.prefix})
+		res, err := b.Object(context.Background(), api.DefaultBucketName, test.path, api.GetObjectOptions{
+			Prefix:  test.prefix,
+			SortBy:  test.sortBy,
+			SortDir: test.sortDir,
+		})
 		if err != nil {
 			t.Fatal(err, test.path)
 		}
 		assertMetadata(res.Entries)
 
 		if !(len(res.Entries) == 0 && len(test.want) == 0) && !reflect.DeepEqual(res.Entries, test.want) {
-			t.Errorf("\nlist: %v\nprefix: %v\ngot: %v\nwant: %v", test.path, test.prefix, res.Entries, test.want)
+			t.Fatalf("\nlist: %v\nprefix: %v\nsortBy: %v\nsortDir: %v\ngot: %v\nwant: %v", test.path, test.prefix, test.sortBy, test.sortDir, res.Entries, test.want)
 		}
 		for offset := 0; offset < len(test.want); offset++ {
-			res, err := b.Object(context.Background(), api.DefaultBucketName, test.path, api.GetObjectOptions{Prefix: test.prefix, Offset: offset, Limit: 1})
+			res, err := b.Object(context.Background(), api.DefaultBucketName, test.path, api.GetObjectOptions{
+				Prefix:  test.prefix,
+				SortBy:  test.sortBy,
+				SortDir: test.sortDir,
+				Offset:  offset,
+				Limit:   1,
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			assertMetadata(res.Entries)
 
 			if len(res.Entries) != 1 || res.Entries[0] != test.want[offset] {
-				t.Errorf("\nlist: %v\nprefix: %v\ngot: %v\nwant: %v", test.path, test.prefix, res.Entries, test.want[offset])
+				t.Fatalf("\nlist: %v\nprefix: %v\nsortBy: %v\nsortDir: %v\ngot: %v\nwant: %v", test.path, test.prefix, test.sortBy, test.sortDir, res.Entries, test.want[offset])
 			}
 			moreRemaining := len(test.want)-offset-1 > 0
 			if res.HasMore != moreRemaining {
-				t.Errorf("invalid value for hasMore (%t) at offset (%d) test (%+v)", res.HasMore, offset, test)
+				t.Fatalf("invalid value for hasMore (%t) at offset (%d) test (%+v)", res.HasMore, offset, test)
 			}
 
 			// make sure we stay within bounds
@@ -355,9 +389,15 @@ func TestObjectEntries(t *testing.T) {
 				continue
 			}
 
-			res, err = b.Object(context.Background(), api.DefaultBucketName, test.path, api.GetObjectOptions{Prefix: test.prefix, Marker: test.want[offset].Name, Limit: 1})
+			res, err = b.Object(context.Background(), api.DefaultBucketName, test.path, api.GetObjectOptions{
+				Prefix:  test.prefix,
+				SortBy:  test.sortBy,
+				SortDir: test.sortDir,
+				Marker:  test.want[offset].Name,
+				Limit:   1,
+			})
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("\nlist: %v\nprefix: %v\nsortBy: %v\nsortDir: %vmarker: %v\n\nerr: %v", test.path, test.prefix, test.sortBy, test.sortDir, test.want[offset].Name, err)
 			}
 			assertMetadata(res.Entries)
 
@@ -372,7 +412,11 @@ func TestObjectEntries(t *testing.T) {
 		}
 
 		// use the worker client
-		got, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, test.path, api.ObjectEntriesOptions{Prefix: test.prefix})
+		got, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, test.path, api.GetObjectOptions{
+			Prefix:  test.prefix,
+			SortBy:  test.sortBy,
+			SortDir: test.sortDir,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -396,7 +440,7 @@ func TestObjectEntries(t *testing.T) {
 	}
 
 	// assert root dir is empty
-	if entries, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, "/", api.ObjectEntriesOptions{}); err != nil {
+	if entries, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, "/", api.GetObjectOptions{}); err != nil {
 		t.Fatal(err)
 	} else if len(entries) != 0 {
 		t.Fatal("there should be no entries left", entries)
@@ -567,7 +611,7 @@ func TestUploadDownloadBasic(t *testing.T) {
 	}
 
 	// fetch the contracts.
-	contracts, err := cluster.Bus.Contracts(context.Background())
+	contracts, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 	tt.OK(err)
 
 	// broadcast the revision for each contract and assert the revision height
@@ -585,7 +629,7 @@ func TestUploadDownloadBasic(t *testing.T) {
 	// check the revision height was updated.
 	tt.Retry(100, 100*time.Millisecond, func() error {
 		// fetch the contracts.
-		contracts, err := cluster.Bus.Contracts(context.Background())
+		contracts, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 		if err != nil {
 			return err
 		}
@@ -630,7 +674,7 @@ func TestUploadDownloadExtended(t *testing.T) {
 	tt.OKAll(w.UploadObject(context.Background(), bytes.NewReader(file2), api.DefaultBucketName, "fileś/file2", api.UploadObjectOptions{}))
 
 	// fetch all entries from the worker
-	entries, err := cluster.Worker.ObjectEntries(context.Background(), api.DefaultBucketName, "", api.ObjectEntriesOptions{})
+	entries, err := cluster.Worker.ObjectEntries(context.Background(), api.DefaultBucketName, "", api.GetObjectOptions{})
 	tt.OK(err)
 
 	if len(entries) != 1 {
@@ -655,7 +699,7 @@ func TestUploadDownloadExtended(t *testing.T) {
 	}
 
 	// fetch entries from the worker for unexisting path
-	entries, err = cluster.Worker.ObjectEntries(context.Background(), api.DefaultBucketName, "bar/", api.ObjectEntriesOptions{})
+	entries, err = cluster.Worker.ObjectEntries(context.Background(), api.DefaultBucketName, "bar/", api.GetObjectOptions{})
 	tt.OK(err)
 	if len(entries) != 0 {
 		t.Fatal("expected no entries to be returned", len(entries))
@@ -712,7 +756,7 @@ func TestUploadDownloadExtended(t *testing.T) {
 	tt.OK(b.SetContractSet(context.Background(), t.Name(), nil))
 
 	// assert there are no contracts in the set
-	csc, err := b.ContractSetContracts(context.Background(), t.Name())
+	csc, err := b.Contracts(context.Background(), api.ContractsOpts{ContractSet: t.Name()})
 	tt.OK(err)
 	if len(csc) != 0 {
 		t.Fatalf("expected no contracts, got %v", len(csc))
@@ -755,7 +799,7 @@ func TestUploadDownloadSpending(t *testing.T) {
 
 	// check that the funding was recorded
 	tt.Retry(100, testBusFlushInterval, func() error {
-		cms, err := cluster.Bus.Contracts(context.Background())
+		cms, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 		tt.OK(err)
 		if len(cms) == 0 {
 			t.Fatal("no contracts found")
@@ -847,16 +891,19 @@ func TestUploadDownloadSpending(t *testing.T) {
 	cluster.MineToRenewWindow()
 
 	// wait for the contract to be renewed
-	tt.Retry(100, 100*time.Millisecond, func() error {
+	tt.Retry(10, time.Second, func() error {
+		// mine a block
+		cluster.MineBlocks(1)
+
 		// fetch contracts
-		cms, err := cluster.Bus.Contracts(context.Background())
+		cms, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 		tt.OK(err)
 		if len(cms) == 0 {
 			t.Fatal("no contracts found")
 		}
 
 		// fetch contract set contracts
-		contracts, err := cluster.Bus.ContractSetContracts(context.Background(), testAutopilotConfig.Contracts.Set)
+		contracts, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{ContractSet: testAutopilotConfig.Contracts.Set})
 		tt.OK(err)
 		currentSet := make(map[types.FileContractID]struct{})
 		for _, c := range contracts {
@@ -880,7 +927,7 @@ func TestUploadDownloadSpending(t *testing.T) {
 
 	// check that the spending was recorded
 	tt.Retry(100, testBusFlushInterval, func() error {
-		cms, err := cluster.Bus.Contracts(context.Background())
+		cms, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1301,7 +1348,7 @@ func TestContractArchival(t *testing.T) {
 	tt := cluster.tt
 
 	// check that we have 1 contract
-	contracts, err := cluster.Bus.Contracts(context.Background())
+	contracts, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 	tt.OK(err)
 	if len(contracts) != 1 {
 		t.Fatal("expected 1 contract", len(contracts))
@@ -1318,7 +1365,7 @@ func TestContractArchival(t *testing.T) {
 
 	// check that we have 0 contracts
 	tt.Retry(100, 100*time.Millisecond, func() error {
-		contracts, err := cluster.Bus.Contracts(context.Background())
+		contracts, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 		if err != nil {
 			return err
 		}
@@ -1346,7 +1393,7 @@ func TestUnconfirmedContractArchival(t *testing.T) {
 	tt.OK(err)
 
 	// we should have a contract with the host
-	contracts, err := cluster.Bus.Contracts(context.Background())
+	contracts, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 	tt.OK(err)
 	if len(contracts) != 1 {
 		t.Fatalf("expected 1 contract, got %v", len(contracts))
@@ -1377,7 +1424,7 @@ func TestUnconfirmedContractArchival(t *testing.T) {
 	tt.OK(err)
 
 	// should have 2 contracts now
-	contracts, err = cluster.Bus.Contracts(context.Background())
+	contracts, err = cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 	tt.OK(err)
 	if len(contracts) != 2 {
 		t.Fatalf("expected 2 contracts, got %v", len(contracts))
@@ -1388,7 +1435,7 @@ func TestUnconfirmedContractArchival(t *testing.T) {
 	cluster.MineBlocks(20)
 
 	tt.Retry(100, 100*time.Millisecond, func() error {
-		contracts, err := cluster.Bus.Contracts(context.Background())
+		contracts, err := cluster.Bus.Contracts(context.Background(), api.ContractsOpts{})
 		tt.OK(err)
 		if len(contracts) != 1 {
 			return fmt.Errorf("expected 1 contract, got %v", len(contracts))
@@ -1544,7 +1591,7 @@ func TestUploadPacking(t *testing.T) {
 		if res.Object.Size != int64(len(data)) {
 			t.Fatal("unexpected size after upload", res.Object.Size, len(data))
 		}
-		entries, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, "/", api.ObjectEntriesOptions{})
+		entries, err := w.ObjectEntries(context.Background(), api.DefaultBucketName, "/", api.GetObjectOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1978,6 +2025,19 @@ func TestMultipartUploads(t *testing.T) {
 		t.Fatal("unexpected part:", part3)
 	}
 
+	// Check objects stats.
+	os, err := b.ObjectsStats()
+	tt.OK(err)
+	if os.NumObjects != 0 {
+		t.Fatalf("expected 0 object, got %v", os.NumObjects)
+	} else if os.TotalObjectsSize != 0 {
+		t.Fatalf("expected object size of 0, got %v", os.TotalObjectsSize)
+	} else if os.NumUnfinishedObjects != 1 {
+		t.Fatalf("expected 1 unfinished object, got %v", os.NumUnfinishedObjects)
+	} else if os.TotalUnfinishedObjectsSize != uint64(size) {
+		t.Fatalf("expected unfinished object size of %v, got %v", size, os.TotalUnfinishedObjectsSize)
+	}
+
 	// Complete upload
 	ui, err := b.CompleteMultipartUpload(context.Background(), api.DefaultBucketName, objPath, mpr.UploadID, []api.MultipartCompletedPart{
 		{
@@ -2022,6 +2082,19 @@ func TestMultipartUploads(t *testing.T) {
 		t.Fatal(err)
 	} else if expectedData := data1[:1]; !bytes.Equal(data, expectedData) {
 		t.Fatal("unexpected data:", cmp.Diff(data, expectedData))
+	}
+
+	// Check objects stats.
+	os, err = b.ObjectsStats()
+	tt.OK(err)
+	if os.NumObjects != 1 {
+		t.Fatalf("expected 1 object, got %v", os.NumObjects)
+	} else if os.TotalObjectsSize != uint64(size) {
+		t.Fatalf("expected object size of %v, got %v", size, os.TotalObjectsSize)
+	} else if os.NumUnfinishedObjects != 0 {
+		t.Fatalf("expected 0 unfinished object, got %v", os.NumUnfinishedObjects)
+	} else if os.TotalUnfinishedObjectsSize != 0 {
+		t.Fatalf("expected unfinished object size of 0, got %v", os.TotalUnfinishedObjectsSize)
 	}
 }
 
@@ -2132,7 +2205,7 @@ func TestWalletFormUnconfirmed(t *testing.T) {
 	}
 
 	// There shouldn't be any contracts at this point.
-	contracts, err := b.Contracts(context.Background())
+	contracts, err := b.Contracts(context.Background(), api.ContractsOpts{})
 	tt.OK(err)
 	if len(contracts) != 0 {
 		t.Fatal("expected 0 contracts", len(contracts))

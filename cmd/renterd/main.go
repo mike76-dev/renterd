@@ -25,7 +25,6 @@ import (
 	"go.sia.tech/renterd/internal/node"
 	"go.sia.tech/renterd/s3"
 	"go.sia.tech/renterd/stores"
-	"go.sia.tech/renterd/tracing"
 	"go.sia.tech/renterd/wallet"
 	"go.sia.tech/renterd/worker"
 
@@ -54,10 +53,6 @@ const (
 )
 
 var (
-	// to be supplied at build time
-	githash   = "?"
-	builddate = "?"
-
 	cfg = config.Config{
 		Directory: ".",
 		Seed:      os.Getenv("RENTERD_SEED"),
@@ -66,9 +61,6 @@ var (
 			Password: os.Getenv("RENTERD_API_PASSWORD"),
 		},
 		ShutdownTimeout: 5 * time.Minute,
-		Tracing: config.Tracing{
-			InstanceID: "cluster",
-		},
 		Database: config.Database{
 			Log: config.DatabaseLog{
 				IgnoreRecordNotFoundError: true,
@@ -247,8 +239,6 @@ func main() {
 	// node
 	flag.StringVar(&cfg.HTTP.Address, "http", cfg.HTTP.Address, "Address for serving the API")
 	flag.StringVar(&cfg.Directory, "dir", cfg.Directory, "Directory for storing node state")
-	flag.BoolVar(&cfg.Tracing.Enabled, "tracing-enabled", cfg.Tracing.Enabled, "Enables OpenTelemetry tracing (overrides with RENTERD_TRACING_ENABLED). See OpenTelemetry spec for configuration details.")
-	flag.StringVar(&cfg.Tracing.InstanceID, "tracing-service-instance-id", cfg.Tracing.InstanceID, "Service instance ID for tracing (overrides with RENTERD_TRACING_SERVICE_INSTANCE_ID)")
 	flag.StringVar(&cfg.Log.Path, "log-path", cfg.Log.Path, "Path for logs (overrides with RENTERD_LOG_PATH)")
 
 	// db
@@ -302,11 +292,11 @@ func main() {
 
 	flag.Parse()
 
-	log.Println("renterd v0.9.0-satellite")
+	log.Println("renterd v0.9.1-satellite")
 	log.Println("Network", build.NetworkName())
 	if flag.Arg(0) == "version" {
-		log.Println("Commit:", githash)
-		log.Println("Build Date:", builddate)
+		log.Println("Commit:", build.Commit())
+		log.Println("Build Date:", build.BuildTime())
 		return
 	} else if flag.Arg(0) == "seed" {
 		log.Println("Seed phrase:")
@@ -316,9 +306,6 @@ func main() {
 
 	// Overwrite flags from environment if set.
 	parseEnvVar("RENTERD_LOG_PATH", &cfg.Log.Path)
-
-	parseEnvVar("RENTERD_TRACING_ENABLED", &cfg.Tracing.Enabled)
-	parseEnvVar("RENTERD_TRACING_SERVICE_INSTANCE_ID", &cfg.Tracing.InstanceID)
 
 	parseEnvVar("RENTERD_BUS_REMOTE_ADDR", &cfg.Bus.RemoteAddr)
 	parseEnvVar("RENTERD_BUS_API_PASSWORD", &cfg.Bus.RemotePassword)
@@ -372,8 +359,10 @@ func main() {
 
 	network, _ := build.Network()
 	busCfg := node.BusConfig{
-		Bus:     cfg.Bus,
-		Network: network,
+		Bus:                 cfg.Bus,
+		Network:             network,
+		SlabPruningInterval: time.Hour,
+		SlabPruningCooldown: 30 * time.Second,
 	}
 	// Init db dialector
 	if cfg.Database.MySQL.URI != "" {
@@ -416,6 +405,8 @@ func main() {
 	}
 	defer closeFn(context.Background())
 
+	logger.Info("renterd", zap.String("version", build.Version()), zap.String("network", build.NetworkName()), zap.String("commit", build.Commit()), zap.Time("buildDate", build.BuildTime()))
+
 	busCfg.DBLoggerConfig = stores.LoggerConfig{
 		LogLevel:                  level,
 		IgnoreRecordNotFoundError: cfg.Database.Log.IgnoreRecordNotFoundError,
@@ -427,18 +418,6 @@ func main() {
 		fn   func(context.Context) error
 	}
 	var shutdownFns []shutdownFn
-
-	// Init tracing.
-	if cfg.Tracing.Enabled {
-		fn, err := tracing.Init(cfg.Tracing.InstanceID)
-		if err != nil {
-			logger.Fatal("failed to init tracing: " + err.Error())
-		}
-		shutdownFns = append(shutdownFns, shutdownFn{
-			name: "Tracing",
-			fn:   fn,
-		})
-	}
 
 	if cfg.Bus.RemoteAddr != "" && len(cfg.Worker.Remotes) != 0 && !cfg.Autopilot.Enabled {
 		logger.Fatal("remote bus, remote worker, and no autopilot -- nothing to do!")

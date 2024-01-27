@@ -38,7 +38,7 @@ const (
 	// defaultWithdrawalExpiryBlocks is the number of blocks we add to the
 	// current blockheight when we define an expiry block height for withdrawal
 	// messages.
-	defaultWithdrawalExpiryBlocks = 6
+	defaultWithdrawalExpiryBlocks = 12
 
 	// maxPriceTableSize defines the maximum size of a price table
 	maxPriceTableSize = 16 * 1024
@@ -79,6 +79,10 @@ var (
 	// errWithdrawalsInactive occurs when the host is (perhaps temporarily)
 	// unsynced and has disabled its account manager.
 	errWithdrawalsInactive = errors.New("ephemeral account withdrawals are inactive because the host is not synced")
+
+	// errWithdrawalExpired is returned by the host when the withdrawal request
+	// has an expiry block height that is in the past.
+	errWithdrawalExpired = errors.New("withdrawal request expired")
 )
 
 func isBalanceInsufficient(err error) bool { return isError(err, errBalanceInsufficient) }
@@ -94,6 +98,7 @@ func isSectorNotFound(err error) bool {
 	return isError(err, errSectorNotFound) || isError(err, errSectorNotFoundOld)
 }
 func isWithdrawalsInactive(err error) bool { return isError(err, errWithdrawalsInactive) }
+func isWithdrawalExpired(err error) bool   { return isError(err, errWithdrawalExpired) }
 
 func isError(err error, target error) bool {
 	if err == nil {
@@ -250,7 +255,7 @@ func (h *host) FetchRevision(ctx context.Context, fetchTimeout time.Duration, bl
 	ctx, cancel := timeoutCtx()
 	defer cancel()
 	rev, err := h.fetchRevisionWithAccount(ctx, h.hk, h.siamuxAddr, blockHeight, h.fcid)
-	if err != nil && !(isBalanceInsufficient(err) || isWithdrawalsInactive(err) || isClosedStream(err)) { // TODO: checking for a closed stream here can be removed once the withdrawal timeout on the host side is removed
+	if err != nil && !(isBalanceInsufficient(err) || isWithdrawalsInactive(err) || isWithdrawalExpired(err) || isClosedStream(err)) { // TODO: checking for a closed stream here can be removed once the withdrawal timeout on the host side is removed
 		return types.FileContractRevision{}, fmt.Errorf("unable to fetch revision with account: %v", err)
 	} else if err == nil {
 		return rev, nil
@@ -336,17 +341,19 @@ type (
 	// accounts stores the balance and other metrics of accounts that the
 	// worker maintains with a host.
 	accounts struct {
-		store AccountStore
-		key   types.PrivateKey
+		as          AccountStore
+		key         types.PrivateKey
+		shutdownCtx context.Context
 	}
 
 	// account contains information regarding a specific account of the
 	// worker.
 	account struct {
-		bus  AccountStore
-		id   rhpv3.Account
-		key  types.PrivateKey
-		host types.PublicKey
+		as          AccountStore
+		id          rhpv3.Account
+		key         types.PrivateKey
+		host        types.PublicKey
+		shutdownCtx context.Context
 	}
 )
 
@@ -355,8 +362,9 @@ func (w *worker) initAccounts(as AccountStore) {
 		panic("accounts already initialized") // developer error
 	}
 	w.accounts = &accounts{
-		store: as,
-		key:   w.deriveSubKey("accountkey"),
+		as:          as,
+		key:         w.deriveSubKey("accountkey"),
+		shutdownCtx: w.shutdownCtx,
 	}
 }
 
@@ -372,35 +380,45 @@ func (w *worker) initTransportPool() {
 func (a *accounts) ForHost(hk types.PublicKey) *account {
 	accountID := rhpv3.Account(a.deriveAccountKey(hk).PublicKey())
 	return &account{
-		bus:  a.store,
-		id:   accountID,
-		key:  a.key,
-		host: hk,
+		as:          a.as,
+		id:          accountID,
+		key:         a.key,
+		host:        hk,
+		shutdownCtx: a.shutdownCtx,
 	}
 }
 
 // WithDeposit increases the balance of an account by the amount returned by
 // amtFn if amtFn doesn't return an error.
 func (a *account) WithDeposit(ctx context.Context, amtFn func() (types.Currency, error)) error {
-	_, lockID, err := a.bus.LockAccount(ctx, a.id, a.host, false, accountLockingDuration)
+	_, lockID, err := a.as.LockAccount(ctx, a.id, a.host, false, accountLockingDuration)
 	if err != nil {
 		return err
 	}
-	defer a.bus.UnlockAccount(ctx, a.id, lockID)
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(a.shutdownCtx, 10*time.Second)
+		a.as.UnlockAccount(unlockCtx, a.id, lockID)
+		cancel()
+	}()
 
 	amt, err := amtFn()
 	if err != nil {
 		return err
 	}
-	return a.bus.AddBalance(ctx, a.id, a.host, amt.Big())
+	return a.as.AddBalance(ctx, a.id, a.host, amt.Big())
 }
 
 func (a *account) Balance(ctx context.Context) (types.Currency, error) {
-	account, lockID, err := a.bus.LockAccount(ctx, a.id, a.host, false, accountLockingDuration)
+	account, lockID, err := a.as.LockAccount(ctx, a.id, a.host, false, accountLockingDuration)
 	if err != nil {
 		return types.Currency{}, err
 	}
-	defer a.bus.UnlockAccount(ctx, a.id, lockID)
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(a.shutdownCtx, 10*time.Second)
+		a.as.UnlockAccount(unlockCtx, a.id, lockID)
+		cancel()
+	}()
+
 	return types.NewCurrency(account.Balance.Uint64(), new(big.Int).Rsh(account.Balance, 64).Uint64()), nil
 }
 
@@ -408,13 +426,13 @@ func (a *account) Balance(ctx context.Context) (types.Currency, error) {
 // amtFn. The amount is still withdrawn if amtFn returns an error since some
 // costs are non-refundable.
 func (a *account) WithWithdrawal(ctx context.Context, amtFn func() (types.Currency, error)) error {
-	account, lockID, err := a.bus.LockAccount(ctx, a.id, a.host, false, accountLockingDuration)
+	account, lockID, err := a.as.LockAccount(ctx, a.id, a.host, false, accountLockingDuration)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		unlockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		a.bus.UnlockAccount(unlockCtx, a.id, lockID)
+		unlockCtx, cancel := context.WithTimeout(a.shutdownCtx, 10*time.Second)
+		a.as.UnlockAccount(unlockCtx, a.id, lockID)
 		cancel()
 	}()
 
@@ -432,9 +450,9 @@ func (a *account) WithWithdrawal(ctx context.Context, amtFn func() (types.Curren
 	amt, err := amtFn()
 	if isBalanceInsufficient(err) {
 		// in case of an insufficient balance, we schedule a sync
-		scheduleCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		scheduleCtx, cancel := context.WithTimeout(a.shutdownCtx, 10*time.Second)
 		defer cancel()
-		err2 := a.bus.ScheduleSync(scheduleCtx, a.id, a.host)
+		err2 := a.as.ScheduleSync(scheduleCtx, a.id, a.host)
 		if err2 != nil {
 			err = fmt.Errorf("%w; failed to set requiresSync flag on bus, error: %v", err, err2)
 		}
@@ -446,9 +464,9 @@ func (a *account) WithWithdrawal(ctx context.Context, amtFn func() (types.Curren
 	}
 
 	// if an amount was returned, we withdraw it.
-	addCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	addCtx, cancel := context.WithTimeout(a.shutdownCtx, 10*time.Second)
 	defer cancel()
-	errAdd := a.bus.AddBalance(addCtx, a.id, a.host, new(big.Int).Neg(amt.Big()))
+	errAdd := a.as.AddBalance(addCtx, a.id, a.host, new(big.Int).Neg(amt.Big()))
 	if errAdd != nil {
 		err = fmt.Errorf("%w; failed to add balance to account, error: %v", err, errAdd)
 	}
@@ -458,16 +476,21 @@ func (a *account) WithWithdrawal(ctx context.Context, amtFn func() (types.Curren
 // WithSync syncs an accounts balance with the bus. To do so, the account is
 // locked while the balance is fetched through balanceFn.
 func (a *account) WithSync(ctx context.Context, balanceFn func() (types.Currency, error)) error {
-	_, lockID, err := a.bus.LockAccount(ctx, a.id, a.host, true, accountLockingDuration)
+	_, lockID, err := a.as.LockAccount(ctx, a.id, a.host, true, accountLockingDuration)
 	if err != nil {
 		return err
 	}
-	defer a.bus.UnlockAccount(ctx, a.id, lockID)
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(a.shutdownCtx, 10*time.Second)
+		a.as.UnlockAccount(unlockCtx, a.id, lockID)
+		cancel()
+	}()
+
 	balance, err := balanceFn()
 	if err != nil {
 		return err
 	}
-	return a.bus.SetBalance(ctx, a.id, a.host, balance.Big())
+	return a.as.SetBalance(ctx, a.id, a.host, balance.Big())
 }
 
 // deriveAccountKey derives an account plus key for a given host and worker.
