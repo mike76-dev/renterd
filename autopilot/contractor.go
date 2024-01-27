@@ -1046,6 +1046,13 @@ func (c *contractor) runContractRenewals(ctx context.Context, w Worker, toRenew 
 		)
 	}()
 
+	// fetch satellite config
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		c.logger.Errorf("couldn't fetch satellite config: %w", err)
+		return nil, nil
+	}
+
 	var i int
 	for i = 0; i < len(toRenew); i++ {
 		// check if the autopilot is stopped
