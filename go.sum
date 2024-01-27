@@ -146,10 +146,14 @@ github.com/mike76-dev/renterd-satellite v0.5.0 h1:A9pzOPFC42YzbMdjTgScYovyociKoo
 github.com/mike76-dev/renterd-satellite v0.5.0/go.mod h1:Gi8oIh+/4l/jR91gc6sZ2IDrpAKlmOGTshgg13AfjhM=
 github.com/mike76-dev/renterd-satellite v0.6.1 h1:0UlJx4HBHpEriPRgDFW4xoPFQ0R6zrLOXfgyNJtBycM=
 github.com/mike76-dev/renterd-satellite v0.6.1/go.mod h1:X9DSp2Qi9pHDMmHCQBi6MaYB5mmed8EZJSHq3VgmlUw=
+github.com/mike76-dev/renterd-satellite v0.6.2 h1:HqsW6t+pS2ltmsb9Sw3RM0Dcc7PEG+LxUB+TAUEurqk=
+github.com/mike76-dev/renterd-satellite v0.6.2/go.mod h1:X9DSp2Qi9pHDMmHCQBi6MaYB5mmed8EZJSHq3VgmlUw=
 github.com/mike76-dev/sia-web v0.0.0-20230901082429-66c26e5b192b h1:k1QirAGgtoG9+6UTB3dW8oBPDQUNV/LkXEw+AwvgdZE=
 github.com/mike76-dev/sia-web v0.0.0-20230901082429-66c26e5b192b/go.mod h1:NFIW61hZYM56qpBiEnoUkTeTZtWCX+SS99wjWBmIfb0=
 github.com/mike76-dev/sia-web/renterd v0.1.19 h1:JiZLAmBAaUl9SrGgPaYVcF2poAekWFpkFxmRi6R3TvQ=
 github.com/mike76-dev/sia-web/renterd v0.1.19/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
+github.com/mike76-dev/sia-web/renterd v0.1.20 h1:FEXRAbfpl5fV2NjNtWWQW2cxBOvGVUqrZX/k+mpEAjs=
+github.com/mike76-dev/sia-web/renterd v0.1.20/go.mod h1:i8kLX1MdtPLR3alM63MYWR8Zjzhl739L5dmiXrPNqzY=
 github.com/minio/md5-simd v1.1.2 h1:Gdi1DZK69+ZVMoNHRXJyNcxrMA4dSxoYHZSQbirFg34=
 github.com/minio/md5-simd v1.1.2/go.mod h1:MzdKDxYpY2BT9XQFocsiZf/NKVtR7nkE4RoEpN+20RM=
 github.com/minio/minio-go/v7 v7.0.65 h1:sOlB8T3nQK+TApTpuN3k4WD5KasvZIE3vVFzyyCa0go=

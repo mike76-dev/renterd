@@ -8,7 +8,7 @@ require (
 	github.com/google/go-cmp v0.6.0
 	github.com/gotd/contrib v0.19.0
 	github.com/klauspost/reedsolomon v1.12.0
-	github.com/mike76-dev/sia-web/renterd v0.1.19
+	github.com/mike76-dev/sia-web/renterd v0.1.20
 	github.com/minio/minio-go/v7 v7.0.65
 	github.com/montanaflynn/stats v0.7.1
 	gitlab.com/NebulousLabs/encoding v0.0.0-20200604091946-456c3dc907fe
@@ -62,7 +62,7 @@ require (
 	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
 	github.com/mattn/go-sqlite3 v1.14.18 // indirect
-	github.com/mike76-dev/renterd-satellite v0.6.1 // indirect
+	github.com/mike76-dev/renterd-satellite v0.6.2 // indirect
 	github.com/mike76-dev/sia-web v0.0.0-20230901082429-66c26e5b192b // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/sha256-simd v1.0.1 // indirect
