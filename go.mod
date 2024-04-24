@@ -1,8 +1,8 @@
 module go.sia.tech/renterd
 
-go 1.21
+go 1.21.7
 
-toolchain go1.21.6
+toolchain go1.21.9
 
 require (
 	github.com/gabriel-vasile/mimetype v1.4.3
@@ -19,7 +19,7 @@ require (
 	go.sia.tech/jape v0.11.1
 	go.sia.tech/mux v1.2.0
 	go.sia.tech/siad v1.5.10-0.20230228235644-3059c0b930ca
-	go.sia.tech/web/renterd v0.44.0
+	go.sia.tech/web/renterd v0.51.2
 	go.uber.org/zap v1.26.0
 	golang.org/x/crypto v0.18.0
 	golang.org/x/term v0.16.0
@@ -74,7 +74,7 @@ require (
 	gitlab.com/NebulousLabs/ratelimit v0.0.0-20200811080431-99b8f0768b2e // indirect
 	gitlab.com/NebulousLabs/siamux v0.0.2-0.20220630142132-142a1443a259 // indirect
 	gitlab.com/NebulousLabs/threadgroup v0.0.0-20200608151952-38921fbef213 // indirect
-	go.sia.tech/web v0.0.0-20231213145933-3f175a86abff // indirect
+	go.sia.tech/web v0.0.0-20240422221546-c1709d16b6ef // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/net v0.19.0 // indirect
 	golang.org/x/sys v0.16.0 // indirect
