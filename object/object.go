@@ -43,6 +43,9 @@ func (k *EncryptionKey) UnmarshalBinary(b []byte) error {
 
 // String implements fmt.Stringer.
 func (k EncryptionKey) String() string {
+	if k.entropy == nil {
+		return ""
+	}
 	return "key:" + hex.EncodeToString(k.entropy[:])
 }
 
@@ -110,9 +113,12 @@ func GenerateEncryptionKey() EncryptionKey {
 }
 
 // An Object is a unit of data that has been stored on a host.
+// NOTE: Object is embedded in the API's Object type, so all fields should be
+// tagged omitempty to make sure responses where no object is returned remain
+// clean.
 type Object struct {
-	Key   EncryptionKey `json:"key"`
-	Slabs []SlabSlice   `json:"slabs"`
+	Key   EncryptionKey `json:"key,omitempty"`
+	Slabs []SlabSlice   `json:"slabs,omitempty"`
 }
 
 // NewObject returns a new Object with a random key.
@@ -152,40 +158,6 @@ func (o Object) TotalSize() int64 {
 // the object's key.
 func (o Object) Encrypt(r io.Reader, offset uint64) (cipher.StreamReader, error) {
 	return o.Key.Encrypt(r, offset)
-}
-
-// SplitSlabs splits a set of slabs into slices comprising objects with the
-// specified lengths.
-func SplitSlabs(slabs []Slab, lengths []int) [][]SlabSlice {
-	s := slabs[0]
-	slabs = slabs[1:]
-	objects := make([][]SlabSlice, len(lengths))
-	offset := 0
-	for i, l := range lengths {
-		for l > s.Length() {
-			objects[i] = append(objects[i], SlabSlice{
-				Slab:   s,
-				Offset: uint32(offset),
-				Length: uint32(s.Length() - offset),
-			})
-			l -= s.Length() - offset
-			s, slabs = slabs[0], slabs[1:]
-			offset = 0
-		}
-		objects[i] = append(objects[i], SlabSlice{
-			Slab:   s,
-			Offset: uint32(offset),
-			Length: uint32(l),
-		})
-		offset += l
-	}
-	return objects
-}
-
-// SingleSlabs converts a set of slabs into slices comprising a single object
-// with the specified length.
-func SingleSlabs(slabs []Slab, length int) []SlabSlice {
-	return SplitSlabs(slabs, []int{length})[0]
 }
 
 type rekeyStream struct {

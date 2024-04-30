@@ -2,68 +2,56 @@ package stores
 
 import (
 	"fmt"
-	"reflect"
-	"strings"
 
+	gormigrate "github.com/go-gormigrate/gormigrate/v2"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-func detectMissingIndices(tx *gorm.DB, f func(dst interface{}, name string)) {
-	for _, table := range tables {
-		detectMissingIndicesOnType(tx, table, reflect.TypeOf(table), f)
+// initSchema is executed only on a clean database. Otherwise the individual
+// migrations are executed.
+func initSchema(name string, logger *zap.SugaredLogger) gormigrate.InitSchemaFunc {
+	return func(tx *gorm.DB) error {
+		logger.Infof("initializing '%s' schema", name)
+
+		// init schema
+		err := execSQLFile(tx, name, "schema")
+		if err != nil {
+			return fmt.Errorf("failed to init schema: %w", err)
+		}
+
+		logger.Info("initialization complete")
+		return nil
 	}
 }
 
-func detectMissingIndicesOnType(tx *gorm.DB, table interface{}, t reflect.Type, f func(dst interface{}, name string)) {
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		if field.Anonymous {
-			detectMissingIndicesOnType(tx, table, field.Type, f)
-			continue
-		}
-		if !strings.Contains(field.Tag.Get("gorm"), "index") {
-			continue // no index tag
-		}
-		if !tx.Migrator().HasIndex(table, field.Name) {
-			f(table, field.Name)
-		}
-	}
-}
+func performMigration(db *gorm.DB, kind, migration string, logger *zap.SugaredLogger) error {
+	logger.Infof("performing %s migration '%s'", kind, migration)
 
-func setupJoinTables(tx *gorm.DB) error {
-	jointables := []struct {
-		model     interface{}
-		joinTable interface{ TableName() string }
-		field     string
-	}{
-		{
-			&dbAllowlistEntry{},
-			&dbHostAllowlistEntryHost{},
-			"Hosts",
-		},
-		{
-			&dbBlocklistEntry{},
-			&dbHostBlocklistEntryHost{},
-			"Hosts",
-		},
-		{
-			&dbSector{},
-			&dbContractSector{},
-			"Contracts",
-		},
-		{
-			&dbContractSet{},
-			&dbContractSetContract{},
-			"Contracts",
-		},
+	// execute migration
+	err := execSQLFile(db, kind, fmt.Sprintf("migration_%s", migration))
+	if err != nil {
+		return fmt.Errorf("migration '%s' failed: %w", migration, err)
 	}
-	for _, t := range jointables {
-		if err := tx.SetupJoinTable(t.model, t.field, t.joinTable); err != nil {
-			return fmt.Errorf("failed to setup join table '%s': %w", t.joinTable.TableName(), err)
-		}
-	}
+
+	logger.Infof("migration '%s' complete", migration)
 	return nil
+}
+
+func execSQLFile(db *gorm.DB, folder, filename string) error {
+	// build path
+	protocol := "mysql"
+	if isSQLite(db) {
+		protocol = "sqlite"
+	}
+	path := fmt.Sprintf("migrations/%s/%s/%s.sql", protocol, folder, filename)
+
+	// read file
+	file, err := migrations.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	// execute it
+	return db.Exec(string(file)).Error
 }

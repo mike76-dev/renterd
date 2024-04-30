@@ -7,6 +7,11 @@ import (
 )
 
 var (
+	// ErrInvalidMultipartEncryptionSettings is returned if the multipart upload
+	// has an invalid combination of encryption params. e.g. when encryption is
+	// enabled but not offset is set.
+	ErrInvalidMultipartEncryptionSettings = errors.New("invalid multipart encryption settings")
+
 	// ErrMultipartUploadNotFound is returned if the specified multipart upload
 	// wasn't found.
 	ErrMultipartUploadNotFound = errors.New("multipart upload not found")
@@ -46,8 +51,14 @@ type (
 	}
 
 	CreateMultipartOptions struct {
-		Key      object.EncryptionKey
-		MimeType string
+		GenerateKey bool
+		Key         *object.EncryptionKey
+		MimeType    string
+		Metadata    ObjectUserMetadata
+	}
+
+	CompleteMultipartOptions struct {
+		Metadata ObjectUserMetadata
 	}
 )
 
@@ -73,17 +84,23 @@ type (
 	}
 
 	MultipartCompleteRequest struct {
-		Bucket   string `json:"bucket"`
-		Path     string `json:"path"`
-		UploadID string `json:"uploadID"`
-		Parts    []MultipartCompletedPart
+		Bucket   string                   `json:"bucket"`
+		Metadata ObjectUserMetadata       `json:"metadata"`
+		Path     string                   `json:"path"`
+		UploadID string                   `json:"uploadID"`
+		Parts    []MultipartCompletedPart `json:"parts"`
 	}
 
 	MultipartCreateRequest struct {
-		Bucket   string               `json:"bucket"`
-		Path     string               `json:"path"`
-		Key      object.EncryptionKey `json:"key"`
-		MimeType string               `json:"mimeType"`
+		Bucket   string                `json:"bucket"`
+		Path     string                `json:"path"`
+		Key      *object.EncryptionKey `json:"key"`
+		MimeType string                `json:"mimeType"`
+		Metadata ObjectUserMetadata    `json:"metadata"`
+
+		// TODO: The next major version change should invert this to create a
+		// key by default
+		GenerateKey bool `json:"generateKey"`
 	}
 
 	MultipartCreateResponse struct {

@@ -23,7 +23,6 @@ import (
 	"go.sia.tech/renterd/api"
 	"go.sia.tech/renterd/build"
 	"go.sia.tech/renterd/bus/client"
-	"go.sia.tech/renterd/hostdb"
 	"go.sia.tech/renterd/object"
 	"go.sia.tech/renterd/wallet"
 	"go.sia.tech/renterd/webhooks"
@@ -95,19 +94,18 @@ type (
 
 	// A HostDB stores information about hosts.
 	HostDB interface {
-		Host(ctx context.Context, hostKey types.PublicKey) (hostdb.HostInfo, error)
-		Hosts(ctx context.Context, offset, limit int) ([]hostdb.Host, error)
-		HostsForScanning(ctx context.Context, maxLastScan time.Time, offset, limit int) ([]hostdb.HostAddress, error)
-		RecordHostScans(ctx context.Context, scans []hostdb.HostScan) error
-		RecordPriceTables(ctx context.Context, priceTableUpdate []hostdb.PriceTableUpdate) error
-		RemoveOfflineHosts(ctx context.Context, minRecentScanFailures uint64, maxDowntime time.Duration) (uint64, error)
-		ResetLostSectors(ctx context.Context, hk types.PublicKey) error
-		SearchHosts(ctx context.Context, filterMode, addressContains string, keyIn []types.PublicKey, offset, limit int) ([]hostdb.Host, error)
-
+		Host(ctx context.Context, hostKey types.PublicKey) (api.Host, error)
 		HostAllowlist(ctx context.Context) ([]types.PublicKey, error)
 		HostBlocklist(ctx context.Context) ([]string, error)
+		HostsForScanning(ctx context.Context, maxLastScan time.Time, offset, limit int) ([]api.HostAddress, error)
+		RecordHostScans(ctx context.Context, scans []api.HostScan) error
+		RecordPriceTables(ctx context.Context, priceTableUpdate []api.HostPriceTableUpdate) error
+		RemoveOfflineHosts(ctx context.Context, minRecentScanFailures uint64, maxDowntime time.Duration) (uint64, error)
+		ResetLostSectors(ctx context.Context, hk types.PublicKey) error
+		SearchHosts(ctx context.Context, autopilotID, filterMode, usabilityMode, addressContains string, keyIn []types.PublicKey, offset, limit int) ([]api.Host, error)
 		UpdateHostAllowlistEntries(ctx context.Context, add, remove []types.PublicKey, clear bool) error
 		UpdateHostBlocklistEntries(ctx context.Context, add, remove []string, clear bool) error
+		UpdateHostCheck(ctx context.Context, autopilotID string, hk types.PublicKey, check api.HostCheck) error
 	}
 
 	// A MetadataStore stores information about contracts and objects.
@@ -130,7 +128,7 @@ type (
 		ContractSizes(ctx context.Context) (map[types.FileContractID]api.ContractSize, error)
 		ContractSize(ctx context.Context, id types.FileContractID) (api.ContractSize, error)
 
-		DeleteHostSector(ctx context.Context, hk types.PublicKey, root types.Hash256) error
+		DeleteHostSector(ctx context.Context, hk types.PublicKey, root types.Hash256) (int, error)
 
 		Bucket(_ context.Context, bucketName string) (api.Bucket, error)
 		CreateBucket(_ context.Context, bucketName string, policy api.BucketPolicy) error
@@ -138,23 +136,24 @@ type (
 		ListBuckets(_ context.Context) ([]api.Bucket, error)
 		UpdateBucketPolicy(ctx context.Context, bucketName string, policy api.BucketPolicy) error
 
-		CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath, dstPath, mimeType string) (api.ObjectMetadata, error)
+		CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath, dstPath, mimeType string, metadata api.ObjectUserMetadata) (api.ObjectMetadata, error)
 		ListObjects(ctx context.Context, bucketName, prefix, sortBy, sortDir, marker string, limit int) (api.ObjectsListResponse, error)
 		Object(ctx context.Context, bucketName, path string) (api.Object, error)
+		ObjectMetadata(ctx context.Context, bucketName, path string) (api.Object, error)
 		ObjectEntries(ctx context.Context, bucketName, path, prefix, sortBy, sortDir, marker string, offset, limit int) ([]api.ObjectMetadata, bool, error)
 		ObjectsBySlabKey(ctx context.Context, bucketName string, slabKey object.EncryptionKey) ([]api.ObjectMetadata, error)
-		ObjectsStats(ctx context.Context) (api.ObjectsStatsResponse, error)
+		ObjectsStats(ctx context.Context, opts api.ObjectsStatsOpts) (api.ObjectsStatsResponse, error)
 		RemoveObject(ctx context.Context, bucketName, path string) error
 		RemoveObjects(ctx context.Context, bucketName, prefix string) error
 		RenameObject(ctx context.Context, bucketName, from, to string, force bool) error
 		RenameObjects(ctx context.Context, bucketName, from, to string, force bool) error
 		SearchObjects(ctx context.Context, bucketName, substring string, offset, limit int) ([]api.ObjectMetadata, error)
-		UpdateObject(ctx context.Context, bucketName, path, contractSet, ETag, mimeType string, o object.Object) error
+		UpdateObject(ctx context.Context, bucketName, path, contractSet, ETag, mimeType string, metadata api.ObjectUserMetadata, o object.Object) error
 
 		AbortMultipartUpload(ctx context.Context, bucketName, path string, uploadID string) (err error)
 		AddMultipartPart(ctx context.Context, bucketName, path, contractSet, eTag, uploadID string, partNumber int, slices []object.SlabSlice) (err error)
-		CompleteMultipartUpload(ctx context.Context, bucketName, path, uploadID string, parts []api.MultipartCompletedPart) (_ api.MultipartCompleteResponse, err error)
-		CreateMultipartUpload(ctx context.Context, bucketName, path string, ec object.EncryptionKey, mimeType string) (api.MultipartCreateResponse, error)
+		CompleteMultipartUpload(ctx context.Context, bucketName, path, uploadID string, parts []api.MultipartCompletedPart, opts api.CompleteMultipartOptions) (_ api.MultipartCompleteResponse, err error)
+		CreateMultipartUpload(ctx context.Context, bucketName, path string, ec object.EncryptionKey, mimeType string, metadata api.ObjectUserMetadata) (api.MultipartCreateResponse, error)
 		MultipartUpload(ctx context.Context, uploadID string) (resp api.MultipartUpload, _ error)
 		MultipartUploads(ctx context.Context, bucketName, prefix, keyMarker, uploadIDMarker string, maxUploads int) (resp api.MultipartListUploadsResponse, _ error)
 		MultipartUploadParts(ctx context.Context, bucketName, object string, uploadID string, marker int, limit int64) (resp api.MultipartListPartsResponse, _ error)
@@ -192,7 +191,7 @@ type (
 	EphemeralAccountStore interface {
 		Accounts(context.Context) ([]api.Account, error)
 		SaveAccounts(context.Context, []api.Account) error
-		SetUncleanShutdown() error
+		SetUncleanShutdown(context.Context) error
 	}
 
 	MetricsStore interface {
@@ -257,6 +256,8 @@ func (b *bus) Handler() http.Handler {
 		"GET    /autopilot/:id": b.autopilotsHandlerGET,
 		"PUT    /autopilot/:id": b.autopilotsHandlerPUT,
 
+		"PUT    /autopilot/:id/host/:hostkey/check": b.autopilotHostCheckHandlerPUT,
+
 		"GET    /buckets":             b.bucketsHandlerGET,
 		"POST   /buckets":             b.bucketsHandlerPOST,
 		"PUT    /bucket/:name/policy": b.bucketsHandlerPolicyPUT,
@@ -288,7 +289,7 @@ func (b *bus) Handler() http.Handler {
 		"GET    /contract/:id/roots":     b.contractIDRootsHandlerGET,
 		"GET    /contract/:id/size":      b.contractSizeHandlerGET,
 
-		"GET    /hosts":                          b.hostsHandlerGET,
+		"GET    /hosts":                          b.hostsHandlerGETDeprecated,
 		"GET    /hosts/allowlist":                b.hostsAllowlistHandlerGET,
 		"PUT    /hosts/allowlist":                b.hostsAllowlistHandlerPUT,
 		"GET    /hosts/blocklist":                b.hostsBlocklistHandlerGET,
@@ -609,6 +610,11 @@ func (b *bus) walletRedistributeHandler(jc jape.Context) {
 	}
 
 	var ids []types.TransactionID
+	if len(txns) == 0 {
+		jc.Encode(ids)
+		return
+	}
+
 	for i := 0; i < len(txns); i++ {
 		err = b.w.SignTransaction(cs, &txns[i], toSign, types.CoveredFields{WholeTransaction: true})
 		if jc.Check("couldn't sign the transaction", err) != nil {
@@ -753,13 +759,15 @@ func (b *bus) walletPendingHandler(jc jape.Context) {
 	jc.Encode(relevant)
 }
 
-func (b *bus) hostsHandlerGET(jc jape.Context) {
+func (b *bus) hostsHandlerGETDeprecated(jc jape.Context) {
 	offset := 0
 	limit := -1
 	if jc.DecodeForm("offset", &offset) != nil || jc.DecodeForm("limit", &limit) != nil {
 		return
 	}
-	hosts, err := b.hdb.Hosts(jc.Request.Context(), offset, limit)
+
+	// fetch hosts
+	hosts, err := b.hdb.SearchHosts(jc.Request.Context(), "", api.HostFilterModeAllowed, api.UsabilityFilterModeAll, "", nil, offset, limit)
 	if jc.Check(fmt.Sprintf("couldn't fetch hosts %d-%d", offset, offset+limit), err) != nil {
 		return
 	}
@@ -771,7 +779,12 @@ func (b *bus) searchHostsHandlerPOST(jc jape.Context) {
 	if jc.Decode(&req) != nil {
 		return
 	}
-	hosts, err := b.hdb.SearchHosts(jc.Request.Context(), req.FilterMode, req.AddressContains, req.KeyIn, req.Offset, req.Limit)
+
+	// TODO: on the next major release:
+	// - properly default search params (currently no defaults are set)
+	// - properly validate and return 400 (currently validation is done in autopilot and the store)
+
+	hosts, err := b.hdb.SearchHosts(jc.Request.Context(), req.AutopilotID, req.FilterMode, req.UsabilityMode, req.AddressContains, req.KeyIn, req.Offset, req.Limit)
 	if jc.Check(fmt.Sprintf("couldn't fetch hosts %d-%d", req.Offset, req.Offset+req.Limit), err) != nil {
 		return
 	}
@@ -1010,7 +1023,7 @@ func (b *bus) contractsPrunableDataHandlerGET(jc jape.Context) {
 		// adjust the amount of prunable data with the pending uploads, due to
 		// how we record contract spending a contract's size might already
 		// include pending sectors
-		pending := b.uploadingSectors.pending(fcid)
+		pending := b.uploadingSectors.Pending(fcid)
 		if pending > size.Prunable {
 			size.Prunable = 0
 		} else {
@@ -1057,7 +1070,7 @@ func (b *bus) contractSizeHandlerGET(jc jape.Context) {
 	// adjust the amount of prunable data with the pending uploads, due to how
 	// we record contract spending a contract's size might already include
 	// pending sectors
-	pending := b.uploadingSectors.pending(id)
+	pending := b.uploadingSectors.Pending(id)
 	if pending > size.Prunable {
 		size.Prunable = 0
 	} else {
@@ -1134,6 +1147,7 @@ func (b *bus) contractIDRenewedHandlerPOST(jc jape.Context) {
 	if jc.Check("couldn't store contract", err) == nil {
 		jc.Encode(r)
 	}
+	b.uploadingSectors.HandleRenewal(req.Contract.ID(), req.RenewedFrom)
 }
 
 func (b *bus) contractIDRootsHandlerGET(jc jape.Context) {
@@ -1146,7 +1160,7 @@ func (b *bus) contractIDRootsHandlerGET(jc jape.Context) {
 	if jc.Check("couldn't fetch contract sectors", err) == nil {
 		jc.Encode(api.ContractRootsResponse{
 			Roots:     roots,
-			Uploading: b.uploadingSectors.sectors(id),
+			Uploading: b.uploadingSectors.Sectors(id),
 		})
 	}
 }
@@ -1195,13 +1209,22 @@ func (b *bus) objectsHandlerGET(jc jape.Context) {
 	if jc.DecodeForm("bucket", &bucket) != nil {
 		return
 	}
+	var onlymetadata bool
+	if jc.DecodeForm("onlymetadata", &onlymetadata) != nil {
+		return
+	}
 
-	o, err := b.ms.Object(jc.Request.Context(), bucket, path)
+	var o api.Object
+	var err error
+	if onlymetadata {
+		o, err = b.ms.ObjectMetadata(jc.Request.Context(), bucket, path)
+	} else {
+		o, err = b.ms.Object(jc.Request.Context(), bucket, path)
+	}
 	if errors.Is(err, api.ErrObjectNotFound) {
 		jc.Error(err, http.StatusNotFound)
 		return
-	}
-	if jc.Check("couldn't load object", err) != nil {
+	} else if jc.Check("couldn't load object", err) != nil {
 		return
 	}
 	jc.Encode(api.ObjectsResponse{Object: &o})
@@ -1252,27 +1275,26 @@ func (b *bus) objectEntriesHandlerGET(jc jape.Context, path string) {
 }
 
 func (b *bus) objectsHandlerPUT(jc jape.Context) {
-	var aor api.ObjectAddRequest
+	var aor api.AddObjectRequest
 	if jc.Decode(&aor) != nil {
 		return
 	} else if aor.Bucket == "" {
 		aor.Bucket = api.DefaultBucketName
 	}
-	jc.Check("couldn't store object", b.ms.UpdateObject(jc.Request.Context(), aor.Bucket, jc.PathParam("path"), aor.ContractSet, aor.ETag, aor.MimeType, aor.Object))
+	jc.Check("couldn't store object", b.ms.UpdateObject(jc.Request.Context(), aor.Bucket, jc.PathParam("path"), aor.ContractSet, aor.ETag, aor.MimeType, aor.Metadata, aor.Object))
 }
 
 func (b *bus) objectsCopyHandlerPOST(jc jape.Context) {
-	var orr api.ObjectsCopyRequest
+	var orr api.CopyObjectsRequest
 	if jc.Decode(&orr) != nil {
 		return
 	}
-
-	om, err := b.ms.CopyObject(jc.Request.Context(), orr.SourceBucket, orr.DestinationBucket, orr.SourcePath, orr.DestinationPath, orr.MimeType)
+	om, err := b.ms.CopyObject(jc.Request.Context(), orr.SourceBucket, orr.DestinationBucket, orr.SourcePath, orr.DestinationPath, orr.MimeType, orr.Metadata)
 	if jc.Check("couldn't copy object", err) != nil {
 		return
 	}
 
-	jc.ResponseWriter.Header().Set("Last-Modified", om.LastModified())
+	jc.ResponseWriter.Header().Set("Last-Modified", om.ModTime.Std().Format(http.TimeFormat))
 	jc.ResponseWriter.Header().Set("ETag", api.FormatETag(om.ETag))
 	jc.Encode(om)
 }
@@ -1360,7 +1382,11 @@ func (b *bus) slabbuffersHandlerGET(jc jape.Context) {
 }
 
 func (b *bus) objectsStatshandlerGET(jc jape.Context) {
-	info, err := b.ms.ObjectsStats(jc.Request.Context())
+	opts := api.ObjectsStatsOpts{}
+	if jc.DecodeForm("bucket", &opts.Bucket) != nil {
+		return
+	}
+	info, err := b.ms.ObjectsStats(jc.Request.Context(), opts)
 	if jc.Check("couldn't get objects stats", err) != nil {
 		return
 	}
@@ -1407,9 +1433,11 @@ func (b *bus) sectorsHostRootHandlerDELETE(jc jape.Context) {
 	} else if jc.DecodeParam("root", &root) != nil {
 		return
 	}
-	err := b.ms.DeleteHostSector(jc.Request.Context(), hk, root)
+	n, err := b.ms.DeleteHostSector(jc.Request.Context(), hk, root)
 	if jc.Check("failed to mark sector as lost", err) != nil {
 		return
+	} else if n > 0 {
+		b.logger.Infow("successfully marked sector as lost", "hk", hk, "root", root)
 	}
 }
 
@@ -1435,7 +1463,7 @@ func (b *bus) slabHandlerGET(jc jape.Context) {
 		return
 	}
 	slab, err := b.ms.Slab(jc.Request.Context(), key)
-	if errors.Is(err, api.ErrObjectNotFound) {
+	if errors.Is(err, api.ErrSlabNotFound) {
 		jc.Error(err, http.StatusNotFound)
 		return
 	} else if err != nil {
@@ -1741,8 +1769,40 @@ func (b *bus) gougingParams(ctx context.Context) (api.GougingParams, error) {
 	}, nil
 }
 
-func (b *bus) handleGETAlerts(c jape.Context) {
-	c.Encode(b.alertMgr.Active())
+func (b *bus) handleGETAlertsDeprecated(jc jape.Context) {
+	ar, err := b.alertMgr.Alerts(jc.Request.Context(), alerts.AlertsOpts{Offset: 0, Limit: -1})
+	if jc.Check("failed to fetch alerts", err) != nil {
+		return
+	}
+	jc.Encode(ar.Alerts)
+}
+
+func (b *bus) handleGETAlerts(jc jape.Context) {
+	if jc.Request.FormValue("offset") == "" && jc.Request.FormValue("limit") == "" {
+		b.handleGETAlertsDeprecated(jc)
+		return
+	}
+	offset, limit := 0, -1
+	var severity alerts.Severity
+	if jc.DecodeForm("offset", &offset) != nil {
+		return
+	} else if jc.DecodeForm("limit", &limit) != nil {
+		return
+	} else if offset < 0 {
+		jc.Error(errors.New("offset must be non-negative"), http.StatusBadRequest)
+		return
+	} else if jc.DecodeForm("severity", &severity) != nil {
+		return
+	}
+	ar, err := b.alertMgr.Alerts(jc.Request.Context(), alerts.AlertsOpts{
+		Offset:   offset,
+		Limit:    limit,
+		Severity: severity,
+	})
+	if jc.Check("failed to fetch alerts", err) != nil {
+		return
+	}
+	jc.Encode(ar)
 }
 
 func (b *bus) handlePOSTAlertsDismiss(jc jape.Context) {
@@ -1938,6 +1998,29 @@ func (b *bus) autopilotsHandlerPUT(jc jape.Context) {
 	jc.Check("failed to update autopilot", b.as.UpdateAutopilot(jc.Request.Context(), ap))
 }
 
+func (b *bus) autopilotHostCheckHandlerPUT(jc jape.Context) {
+	var id string
+	if jc.DecodeParam("id", &id) != nil {
+		return
+	}
+	var hk types.PublicKey
+	if jc.DecodeParam("hostkey", &hk) != nil {
+		return
+	}
+	var hc api.HostCheck
+	if jc.Check("failed to decode host check", jc.Decode(&hc)) != nil {
+		return
+	}
+
+	err := b.hdb.UpdateHostCheck(jc.Request.Context(), id, hk, hc)
+	if errors.Is(err, api.ErrAutopilotNotFound) {
+		jc.Error(err, http.StatusNotFound)
+		return
+	} else if jc.Check("failed to update host", err) != nil {
+		return
+	}
+}
+
 func (b *bus) contractTaxHandlerGET(jc jape.Context) {
 	var payout types.Currency
 	if jc.DecodeParam("payout", (*api.ParamCurrency)(&payout)) != nil {
@@ -1963,7 +2046,7 @@ func (b *bus) stateHandlerGET(jc jape.Context) {
 func (b *bus) uploadTrackHandlerPOST(jc jape.Context) {
 	var id api.UploadID
 	if jc.DecodeParam("id", &id) == nil {
-		jc.Check("failed to track upload", b.uploadingSectors.trackUpload(id))
+		jc.Check("failed to track upload", b.uploadingSectors.StartUpload(id))
 	}
 }
 
@@ -1976,13 +2059,13 @@ func (b *bus) uploadAddSectorHandlerPOST(jc jape.Context) {
 	if jc.Decode(&req) != nil {
 		return
 	}
-	jc.Check("failed to add sector", b.uploadingSectors.addUploadingSector(id, req.ContractID, req.Root))
+	jc.Check("failed to add sector", b.uploadingSectors.AddSector(id, req.ContractID, req.Root))
 }
 
 func (b *bus) uploadFinishedHandlerDELETE(jc jape.Context) {
 	var id api.UploadID
 	if jc.DecodeParam("id", &id) == nil {
-		b.uploadingSectors.finishUpload(id)
+		b.uploadingSectors.FinishUpload(id)
 	}
 }
 
@@ -1999,7 +2082,7 @@ func (b *bus) webhookHandlerDelete(jc jape.Context) {
 	if jc.Decode(&wh) != nil {
 		return
 	}
-	err := b.hooks.Delete(wh)
+	err := b.hooks.Delete(jc.Request.Context(), wh)
 	if errors.Is(err, webhooks.ErrWebhookNotFound) {
 		jc.Error(fmt.Errorf("webhook for URL %v and event %v.%v not found", wh.URL, wh.Module, wh.Event), http.StatusNotFound)
 		return
@@ -2021,7 +2104,7 @@ func (b *bus) webhookHandlerPost(jc jape.Context) {
 	if jc.Decode(&req) != nil {
 		return
 	}
-	err := b.hooks.Register(webhooks.Webhook{
+	err := b.hooks.Register(jc.Request.Context(), webhooks.Webhook{
 		Event:  req.Event,
 		Module: req.Module,
 		URL:    req.URL,
@@ -2113,19 +2196,18 @@ func (b *bus) metricsHandlerGET(jc jape.Context) {
 	}
 
 	// parse optional query parameters
-	switch key := jc.PathParam("key"); key {
+	var metrics interface{}
+	var err error
+	key := jc.PathParam("key")
+	switch key {
 	case api.MetricContract:
 		var opts api.ContractMetricsQueryOpts
 		if jc.DecodeForm("contractID", &opts.ContractID) != nil {
 			return
 		} else if jc.DecodeForm("hostKey", &opts.HostKey) != nil {
 			return
-		} else if metrics, err := b.metrics(jc.Request.Context(), key, start, n, interval, opts); jc.Check("failed to get contract metrics", err) != nil {
-			return
-		} else {
-			jc.Encode(metrics)
-			return
 		}
+		metrics, err = b.metrics(jc.Request.Context(), key, start, n, interval, opts)
 	case api.MetricContractPrune:
 		var opts api.ContractPruneMetricsQueryOpts
 		if jc.DecodeForm("contractID", &opts.ContractID) != nil {
@@ -2134,22 +2216,14 @@ func (b *bus) metricsHandlerGET(jc jape.Context) {
 			return
 		} else if jc.DecodeForm("hostVersion", &opts.HostVersion) != nil {
 			return
-		} else if metrics, err := b.metrics(jc.Request.Context(), key, start, n, interval, opts); jc.Check("failed to get contract prune metrics", err) != nil {
-			return
-		} else {
-			jc.Encode(metrics)
-			return
 		}
+		metrics, err = b.metrics(jc.Request.Context(), key, start, n, interval, opts)
 	case api.MetricContractSet:
 		var opts api.ContractSetMetricsQueryOpts
 		if jc.DecodeForm("name", &opts.Name) != nil {
 			return
-		} else if metrics, err := b.metrics(jc.Request.Context(), key, start, n, interval, opts); jc.Check("failed to get contract set metrics", err) != nil {
-			return
-		} else {
-			jc.Encode(metrics)
-			return
 		}
+		metrics, err = b.metrics(jc.Request.Context(), key, start, n, interval, opts)
 	case api.MetricContractSetChurn:
 		var opts api.ContractSetChurnMetricsQueryOpts
 		if jc.DecodeForm("name", &opts.Name) != nil {
@@ -2158,24 +2232,22 @@ func (b *bus) metricsHandlerGET(jc jape.Context) {
 			return
 		} else if jc.DecodeForm("reason", &opts.Reason) != nil {
 			return
-		} else if metrics, err := b.metrics(jc.Request.Context(), key, start, n, interval, opts); jc.Check("failed to get contract churn metrics", err) != nil {
-			return
-		} else {
-			jc.Encode(metrics)
-			return
 		}
+		metrics, err = b.metrics(jc.Request.Context(), key, start, n, interval, opts)
 	case api.MetricWallet:
 		var opts api.WalletMetricsQueryOpts
-		if metrics, err := b.metrics(jc.Request.Context(), key, start, n, interval, opts); jc.Check("failed to get wallet metrics", err) != nil {
-			return
-		} else {
-			jc.Encode(metrics)
-			return
-		}
+		metrics, err = b.metrics(jc.Request.Context(), key, start, n, interval, opts)
 	default:
 		jc.Error(fmt.Errorf("unknown metric '%s'", key), http.StatusBadRequest)
 		return
 	}
+	if errors.Is(err, api.ErrMaxIntervalsExceeded) {
+		jc.Error(err, http.StatusBadRequest)
+		return
+	} else if jc.Check(fmt.Sprintf("failed to fetch '%s' metrics", key), err) != nil {
+		return
+	}
+	jc.Encode(metrics)
 }
 
 func (b *bus) metrics(ctx context.Context, key string, start time.Time, n uint64, interval time.Duration, opts interface{}) (interface{}, error) {
@@ -2200,35 +2272,16 @@ func (b *bus) multipartHandlerCreatePOST(jc jape.Context) {
 		return
 	}
 
-	key := req.Key
-	if key == (object.EncryptionKey{}) {
+	var key object.EncryptionKey
+	if req.GenerateKey {
+		key = object.GenerateEncryptionKey()
+	} else if req.Key == nil {
 		key = object.NoOpKey
+	} else {
+		key = *req.Key
 	}
 
-	cfg, err := satellite.StaticSatellite.Config()
-	if jc.Check("couldn't fetch satellite config", err) != nil {
-		return
-	}
-	if cfg.Enabled {
-		ctx := jc.Request.Context()
-		rs, err := satellite.StaticSatellite.GetSettings(ctx)
-		if jc.Check("couldn't retrieve renter settings", err) != nil {
-			return
-		}
-		if rs.ProxyUploads {
-			id, err := satellite.StaticSatellite.CreateMultipart(ctx, key, req.Bucket, req.Path, req.MimeType)
-			if jc.Check("couldn't register multipart upload", err) != nil {
-				return
-			}
-			resp := api.MultipartCreateResponse{
-				UploadID: id,
-			}
-			jc.Encode(resp)
-			return
-		}
-	}
-
-	resp, err := b.ms.CreateMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, key, req.MimeType)
+	resp, err := b.ms.CreateMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, key, req.MimeType, req.Metadata)
 	if jc.Check("failed to create multipart upload", err) != nil {
 		return
 	}
@@ -2297,7 +2350,9 @@ func (b *bus) multipartHandlerCompletePOST(jc jape.Context) {
 	for _, part := range mup.Parts {
 		parts = append(parts, uint64(part.Size))
 	}
-	resp, err := b.ms.CompleteMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, req.UploadID, req.Parts)
+	resp, err := b.ms.CompleteMultipartUpload(jc.Request.Context(), req.Bucket, req.Path, req.UploadID, req.Parts, api.CompleteMultipartOptions{
+		Metadata: req.Metadata,
+	})
 	if jc.Check("failed to complete multipart upload", err) != nil {
 		return
 	}
@@ -2493,7 +2548,7 @@ func New(s Syncer, am *alerts.Manager, hm *webhooks.Manager, cm ChainManager, tp
 
 	// mark the shutdown as unclean, this will be overwritten when/if the
 	// accounts are saved on shutdown
-	if err := eas.SetUncleanShutdown(); err != nil {
+	if err := eas.SetUncleanShutdown(ctx); err != nil {
 		return nil, fmt.Errorf("failed to mark account shutdown as unclean: %w", err)
 	}
 	return b, nil

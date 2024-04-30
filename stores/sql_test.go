@@ -4,21 +4,28 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"go.sia.tech/core/types"
 	"go.sia.tech/renterd/alerts"
+	"go.sia.tech/renterd/api"
+	"go.sia.tech/renterd/object"
 	"go.sia.tech/siad/modules"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 	"lukechampine.com/frand"
+	"moul.io/zapgorm2"
 )
 
 const (
@@ -26,6 +33,13 @@ const (
 	testContractSet     = "test"
 	testMimeType        = "application/octet-stream"
 	testETag            = "d34db33f"
+)
+
+var (
+	testMetadata = api.ObjectUserMetadata{
+		"foo": "bar",
+		"baz": "qux",
+	}
 )
 
 type testSQLStore struct {
@@ -39,6 +53,9 @@ type testSQLStore struct {
 }
 
 type testSQLStoreConfig struct {
+	dbURI           string
+	dbUser          string
+	dbPassword      string
 	dbName          string
 	dbMetricsName   string
 	dir             string
@@ -56,9 +73,26 @@ func newTestSQLStore(t *testing.T, cfg testSQLStoreConfig) *testSQLStore {
 	if dir == "" {
 		dir = t.TempDir()
 	}
-	dbName := cfg.dbName
+
+	dbURI, dbUser, dbPassword, dbName := DBConfigFromEnv()
+	if dbURI == "" {
+		dbURI = cfg.dbURI
+	}
+	if cfg.persistent && dbURI != "" {
+		t.Fatal("invalid store config, can't use both persistent and dbURI")
+	}
+	if dbUser == "" {
+		dbUser = cfg.dbUser
+	}
+	if dbPassword == "" {
+		dbPassword = cfg.dbPassword
+	}
 	if dbName == "" {
-		dbName = hex.EncodeToString(frand.Bytes(32)) // random name for db
+		if cfg.dbName != "" {
+			dbName = cfg.dbName
+		} else {
+			dbName = hex.EncodeToString(frand.Bytes(32)) // random name for db
+		}
 	}
 	dbMetricsName := cfg.dbMetricsName
 	if dbMetricsName == "" {
@@ -66,9 +100,20 @@ func newTestSQLStore(t *testing.T, cfg testSQLStoreConfig) *testSQLStore {
 	}
 
 	var conn, connMetrics gorm.Dialector
-	if cfg.persistent {
-		conn = NewSQLiteConnection(filepath.Join(cfg.dir, "db.sqlite"))
-		connMetrics = NewSQLiteConnection(filepath.Join(cfg.dir, "metrics.sqlite"))
+	if dbURI != "" {
+		if tmpDB, err := gorm.Open(NewMySQLConnection(dbUser, dbPassword, dbURI, "")); err != nil {
+			t.Fatal(err)
+		} else if err := tmpDB.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", dbName)).Error; err != nil {
+			t.Fatal(err)
+		} else if err := tmpDB.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", dbMetricsName)).Error; err != nil {
+			t.Fatal(err)
+		}
+
+		conn = NewMySQLConnection(dbUser, dbPassword, dbURI, dbName)
+		connMetrics = NewMySQLConnection(dbUser, dbPassword, dbURI, dbMetricsName)
+	} else if cfg.persistent {
+		conn = NewSQLiteConnection(filepath.Join(dir, "db.sqlite"))
+		connMetrics = NewSQLiteConnection(filepath.Join(dir, "metrics.sqlite"))
 	} else {
 		conn = NewEphemeralSQLiteConnection(dbName)
 		connMetrics = NewEphemeralSQLiteConnection(dbMetricsName)
@@ -88,15 +133,11 @@ func newTestSQLStore(t *testing.T, cfg testSQLStoreConfig) *testSQLStore {
 		SlabBufferCompletionThreshold: 0,
 		Logger:                        zap.NewNop().Sugar(),
 		GormLogger:                    newTestLogger(),
-		SlabPruningInterval:           time.Hour,
-		SlabPruningCooldown:           10 * time.Millisecond,
+		RetryTransactionIntervals:     []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond},
 	})
 	if err != nil {
 		t.Fatal("failed to create SQLStore", err)
 	}
-	detectMissingIndices(sqlStore.db, func(dst interface{}, name string) {
-		panic("no index can be missing")
-	})
 	if !cfg.skipContractSet {
 		err = sqlStore.SetContractSet(context.Background(), testContractSet, []types.FileContractID{})
 		if err != nil {
@@ -118,6 +159,18 @@ func (s *testSQLStore) Close() error {
 		s.t.Error(err)
 	}
 	return nil
+}
+
+func (s *testSQLStore) DefaultBucketID() uint {
+	var b dbBucket
+	if err := s.db.
+		Model(&dbBucket{}).
+		Where("name = ?", api.DefaultBucketName).
+		Take(&b).
+		Error; err != nil {
+		s.t.Fatal(err)
+	}
+	return b.ID
 }
 
 func (s *testSQLStore) Reopen() *testSQLStore {
@@ -158,11 +211,65 @@ func newTestLogger() logger.Interface {
 		zap.AddCaller(),
 		zap.AddStacktrace(zapcore.ErrorLevel),
 	)
-	return NewSQLLogger(l, LoggerConfig{
-		IgnoreRecordNotFoundError: false,
-		LogLevel:                  logger.Warn,
-		SlowThreshold:             100 * time.Millisecond,
-	})
+	return zapgorm2.New(l)
+}
+
+func (s *testSQLStore) addTestObject(path string, o object.Object) (api.Object, error) {
+	if err := s.UpdateObjectBlocking(context.Background(), api.DefaultBucketName, path, testContractSet, testETag, testMimeType, testMetadata, o); err != nil {
+		return api.Object{}, err
+	} else if obj, err := s.Object(context.Background(), api.DefaultBucketName, path); err != nil {
+		return api.Object{}, err
+	} else {
+		return obj, nil
+	}
+}
+
+func (s *SQLStore) addTestContracts(keys []types.PublicKey) (fcids []types.FileContractID, contracts []api.ContractMetadata, err error) {
+	cnt, err := s.contractsCount()
+	if err != nil {
+		return nil, nil, err
+	}
+	for i, key := range keys {
+		fcids = append(fcids, types.FileContractID{byte(int(cnt) + i + 1)})
+		contract, err := s.addTestContract(fcids[len(fcids)-1], key)
+		if err != nil {
+			return nil, nil, err
+		}
+		contracts = append(contracts, contract)
+	}
+	return
+}
+
+func (s *SQLStore) addTestContract(fcid types.FileContractID, hk types.PublicKey) (api.ContractMetadata, error) {
+	rev := testContractRevision(fcid, hk)
+	return s.AddContract(context.Background(), rev, types.ZeroCurrency, types.ZeroCurrency, 0, api.ContractStatePending)
+}
+
+func (s *SQLStore) addTestRenewedContract(fcid, renewedFrom types.FileContractID, hk types.PublicKey, startHeight uint64) (api.ContractMetadata, error) {
+	rev := testContractRevision(fcid, hk)
+	return s.AddRenewedContract(context.Background(), rev, types.ZeroCurrency, types.ZeroCurrency, startHeight, renewedFrom, api.ContractStatePending)
+}
+
+func (s *SQLStore) contractsCount() (cnt int64, err error) {
+	err = s.db.
+		Model(&dbContract{}).
+		Count(&cnt).
+		Error
+	return
+}
+
+func (s *SQLStore) overrideSlabHealth(objectID string, health float64) (err error) {
+	err = s.db.Exec(fmt.Sprintf(`
+	UPDATE slabs SET health = %v WHERE id IN (
+		SELECT * FROM (
+			SELECT sla.id
+			FROM objects o
+			INNER JOIN slices sli ON o.id = sli.db_object_id
+			INNER JOIN slabs sla ON sli.db_slab_id = sla.id
+			WHERE o.object_id = "%s"
+		) AS sub
+	)`, health, objectID)).Error
+	return
 }
 
 // TestConsensusReset is a unit test for ResetConsensusSubscription.
@@ -186,7 +293,7 @@ func TestConsensusReset(t *testing.T) {
 	})
 
 	// Reset the consensus.
-	if err := ss.ResetConsensusSubscription(); err != nil {
+	if err := ss.ResetConsensusSubscription(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -222,11 +329,24 @@ func TestConsensusReset(t *testing.T) {
 	}
 }
 
-type queryPlanExplain struct {
-	ID      int    `json:"id"`
-	Parent  int    `json:"parent"`
-	NotUsed bool   `json:"notused"`
-	Detail  string `json:"detail"`
+type sqliteQueryPlan struct {
+	Detail string `json:"detail"`
+}
+
+func (p sqliteQueryPlan) usesIndex() bool {
+	d := strings.ToLower(p.Detail)
+	return strings.Contains(d, "using index") || strings.Contains(d, "using covering index")
+}
+
+//nolint:tagliatelle
+type mysqlQueryPlan struct {
+	Extra        string `json:"Extra"`
+	PossibleKeys string `json:"possible_keys"`
+}
+
+func (p mysqlQueryPlan) usesIndex() bool {
+	d := strings.ToLower(p.Extra)
+	return strings.Contains(d, "using index") || strings.Contains(p.PossibleKeys, "idx_")
 }
 
 func TestQueryPlan(t *testing.T) {
@@ -262,14 +382,20 @@ func TestQueryPlan(t *testing.T) {
 	}
 
 	for _, query := range queries {
-		var explain queryPlanExplain
-		err := ss.db.Raw(fmt.Sprintf("EXPLAIN QUERY PLAN %s;", query)).Scan(&explain).Error
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !(strings.Contains(explain.Detail, "USING INDEX") ||
-			strings.Contains(explain.Detail, "USING COVERING INDEX")) {
-			t.Fatalf("query '%s' should use an index, instead the plan was '%s'", query, explain.Detail)
+		if isSQLite(ss.db) {
+			var explain sqliteQueryPlan
+			if err := ss.db.Raw(fmt.Sprintf("EXPLAIN QUERY PLAN %s;", query)).Scan(&explain).Error; err != nil {
+				t.Fatal(err)
+			} else if !explain.usesIndex() {
+				t.Fatalf("query '%s' should use an index, instead the plan was %+v", query, explain)
+			}
+		} else {
+			var explain mysqlQueryPlan
+			if err := ss.db.Raw(fmt.Sprintf("EXPLAIN %s;", query)).Scan(&explain).Error; err != nil {
+				t.Fatal(err)
+			} else if !explain.usesIndex() {
+				t.Fatalf("query '%s' should use an index, instead the plan was %+v", query, explain)
+			}
 		}
 	}
 }
@@ -293,5 +419,60 @@ func TestApplyUpdatesErr(t *testing.T) {
 	// save shouldn't have happened
 	if ss.lastSave != before {
 		t.Fatal("lastSave should not have changed")
+	}
+}
+
+func TestRetryTransaction(t *testing.T) {
+	ss := newTestSQLStore(t, defaultTestSQLStoreConfig)
+	defer ss.Close()
+
+	// create custom logger to capture logs
+	observedZapCore, observedLogs := observer.New(zap.InfoLevel)
+	ss.logger = zap.New(observedZapCore).Sugar()
+
+	// collectLogs returns all logs
+	collectLogs := func() (logs []string) {
+		t.Helper()
+		for _, entry := range observedLogs.All() {
+			logs = append(logs, entry.Message)
+		}
+		return
+	}
+
+	// disable retries and retry a transaction that fails
+	ss.retryTransactionIntervals = nil
+	ss.retryTransaction(context.Background(), func(tx *gorm.DB) error { return errors.New("database locked") })
+
+	// assert transaction is attempted once and not retried
+	got := collectLogs()
+	want := []string{"transaction attempt 1/1 failed, err: database locked"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("unexpected logs", cmp.Diff(got, want))
+	}
+
+	// enable retries and retry the same transaction
+	ss.retryTransactionIntervals = []time.Duration{
+		5 * time.Millisecond,
+		10 * time.Millisecond,
+		15 * time.Millisecond,
+	}
+	ss.retryTransaction(context.Background(), func(tx *gorm.DB) error { return errors.New("database locked") })
+
+	// assert transaction is retried 4 times in total
+	got = collectLogs()
+	want = append(want,
+		"transaction attempt 1/4 failed, retry in 5ms,  err: database locked",
+		"transaction attempt 2/4 failed, retry in 10ms,  err: database locked",
+		"transaction attempt 3/4 failed, retry in 15ms,  err: database locked",
+		"transaction attempt 4/4 failed, err: database locked",
+	)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("unexpected logs", cmp.Diff(got, want))
+	}
+
+	// retry transaction that aborts, assert no logs were added
+	ss.retryTransaction(context.Background(), func(tx *gorm.DB) error { return context.Canceled })
+	if len(observedLogs.All()) != len(want) {
+		t.Fatal("expected no logs")
 	}
 }

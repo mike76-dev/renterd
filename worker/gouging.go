@@ -39,6 +39,7 @@ var (
 type (
 	GougingChecker interface {
 		Check(_ *rhpv2.HostSettings, _ *rhpv3.HostPriceTable) api.HostGougingBreakdown
+		BlocksUntilBlockHeightGouging(hostHeight uint64) int64
 	}
 
 	gougingChecker struct {
@@ -63,7 +64,7 @@ func GougingCheckerFromContext(ctx context.Context, criticalMigration bool) (Gou
 	return gc(criticalMigration)
 }
 
-func WithGougingChecker(ctx context.Context, cs consensusState, gp api.GougingParams) context.Context {
+func WithGougingChecker(ctx context.Context, cs ConsensusState, gp api.GougingParams) context.Context {
 	return context.WithValue(ctx, keyGougingChecker, func(criticalMigration bool) (GougingChecker, error) {
 		consensusState, err := cs.ConsensusState(ctx)
 		if err != nil {
@@ -72,17 +73,16 @@ func WithGougingChecker(ctx context.Context, cs consensusState, gp api.GougingPa
 
 		// adjust the max download price if we are dealing with a critical
 		// migration that might be failing due to gouging checks
+		settings := gp.GougingSettings
 		if criticalMigration && gp.GougingSettings.MigrationSurchargeMultiplier > 0 {
-			if adjustedMaxDownloadPrice, overflow := gp.GougingSettings.MaxDownloadPrice.Mul64WithOverflow(gp.GougingSettings.MigrationSurchargeMultiplier); overflow {
-				return gougingChecker{}, errors.New("failed to apply the 'MigrationSurchargeMultiplier', overflow detected")
-			} else {
-				gp.GougingSettings.MaxDownloadPrice = adjustedMaxDownloadPrice
+			if adjustedMaxDownloadPrice, overflow := gp.GougingSettings.MaxDownloadPrice.Mul64WithOverflow(gp.GougingSettings.MigrationSurchargeMultiplier); !overflow {
+				settings.MaxDownloadPrice = adjustedMaxDownloadPrice
 			}
 		}
 
 		return gougingChecker{
 			consensusState: consensusState,
-			settings:       gp.GougingSettings,
+			settings:       settings,
 			txFee:          gp.TransactionFee,
 
 			// NOTE:
@@ -106,6 +106,16 @@ func NewGougingChecker(gs api.GougingSettings, cs api.ConsensusState, txnFee typ
 		period:      &period,
 		renewWindow: &renewWindow,
 	}
+}
+
+func (gc gougingChecker) BlocksUntilBlockHeightGouging(hostHeight uint64) int64 {
+	blockHeight := gc.consensusState.BlockHeight
+	leeway := gc.settings.HostBlockHeightLeeway
+	var min uint64
+	if blockHeight >= uint64(leeway) {
+		min = blockHeight - uint64(leeway)
+	}
+	return int64(hostHeight) - int64(min)
 }
 
 func (gc gougingChecker) Check(hs *rhpv2.HostSettings, pt *rhpv3.HostPriceTable) api.HostGougingBreakdown {
@@ -161,14 +171,6 @@ func checkPriceGougingHS(gs api.GougingSettings, hs *rhpv2.HostSettings) error {
 		return fmt.Errorf("contract price exceeds max: %v > %v", hs.ContractPrice, gs.MaxContractPrice)
 	}
 
-	// check max collateral
-	if hs.MaxCollateral.IsZero() {
-		return errors.New("MaxCollateral of host is 0")
-	}
-	if hs.MaxCollateral.Cmp(gs.MinMaxCollateral) < 0 {
-		return fmt.Errorf("MaxCollateral is below minimum: %v < %v", hs.MaxCollateral, gs.MinMaxCollateral)
-	}
-
 	// check max EA balance
 	if hs.MaxEphemeralAccountBalance.Cmp(gs.MinMaxEphemeralAccountBalance) < 0 {
 		return fmt.Errorf("'MaxEphemeralAccountBalance' is less than the allowed minimum value, %v < %v", hs.MaxEphemeralAccountBalance, gs.MinMaxEphemeralAccountBalance)
@@ -209,10 +211,6 @@ func checkPriceGougingPT(gs api.GougingSettings, cs api.ConsensusState, txnFee t
 	if pt.MaxCollateral.IsZero() {
 		return errors.New("MaxCollateral of host is 0")
 	}
-	if pt.MaxCollateral.Cmp(gs.MinMaxCollateral) < 0 {
-		return fmt.Errorf("MaxCollateral is below minimum: %v < %v", pt.MaxCollateral, gs.MinMaxCollateral)
-	}
-
 	// check ReadLengthCost - should be 1H as it's unused by hosts
 	if types.NewCurrency64(1).Cmp(pt.ReadLengthCost) < 0 {
 		return fmt.Errorf("ReadLengthCost of host is %v but should be %v", pt.ReadLengthCost, types.NewCurrency64(1))
@@ -274,7 +272,10 @@ func checkPriceGougingPT(gs api.GougingSettings, cs api.ConsensusState, txnFee t
 	}
 
 	// check LatestRevisionCost - expect sane value
-	maxRevisionCost := gs.MaxDownloadPrice.Div64(1 << 40).Mul64(4096)
+	maxRevisionCost, overflow := gs.MaxRPCPrice.AddWithOverflow(gs.MaxDownloadPrice.Div64(1 << 40).Mul64(2048))
+	if overflow {
+		maxRevisionCost = types.MaxCurrency
+	}
 	if pt.LatestRevisionCost.Cmp(maxRevisionCost) > 0 {
 		return fmt.Errorf("LatestRevisionCost of %v exceeds maximum cost of %v", pt.LatestRevisionCost, maxRevisionCost)
 	}

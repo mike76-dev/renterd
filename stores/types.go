@@ -2,6 +2,7 @@ package stores
 
 import (
 	"database/sql/driver"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ type (
 	unixTimeMS     time.Time
 	datetime       time.Time
 	currency       types.Currency
+	bCurrency      types.Currency
 	fileContractID types.FileContractID
 	hash256        types.Hash256
 	publicKey      types.PublicKey
@@ -33,7 +35,40 @@ type (
 	balance        big.Int
 	unsigned64     uint64 // used for storing large uint64 values in sqlite
 	secretKey      []byte
+	setting        string
 )
+
+// GormDataType implements gorm.GormDataTypeInterface.
+func (setting) GormDataType() string {
+	return "string"
+}
+
+// String implements fmt.Stringer to prevent "s3authentication" settings from
+// getting leaked.
+func (s setting) String() string {
+	if strings.Contains(string(s), "v4Keypairs") {
+		return "*****"
+	}
+	return string(s)
+}
+
+// Scan scans value into the setting
+func (s *setting) Scan(value interface{}) error {
+	switch value := value.(type) {
+	case string:
+		*s = setting(value)
+	case []byte:
+		*s = setting(value)
+	default:
+		return fmt.Errorf("failed to unmarshal setting value from type %t", value)
+	}
+	return nil
+}
+
+// Value returns a setting value, implements driver.Valuer interface.
+func (s setting) Value() (driver.Value, error) {
+	return string(s), nil
+}
 
 // GormDataType implements gorm.GormDataTypeInterface.
 func (secretKey) GormDataType() string {
@@ -337,4 +372,30 @@ func (u *unsigned64) Scan(value interface{}) error {
 // Value returns a datetime value, implements driver.Valuer interface.
 func (u unsigned64) Value() (driver.Value, error) {
 	return int64(u), nil
+}
+
+func (bCurrency) GormDataType() string {
+	return "bytes"
+}
+
+// Scan implements the sql.Scanner interface.
+func (sc *bCurrency) Scan(src any) error {
+	buf, ok := src.([]byte)
+	if !ok {
+		return fmt.Errorf("cannot scan %T to Currency", src)
+	} else if len(buf) != 16 {
+		return fmt.Errorf("cannot scan %d bytes to Currency", len(buf))
+	}
+
+	sc.Hi = binary.BigEndian.Uint64(buf[:8])
+	sc.Lo = binary.BigEndian.Uint64(buf[8:])
+	return nil
+}
+
+// Value implements the driver.Valuer interface.
+func (sc bCurrency) Value() (driver.Value, error) {
+	buf := make([]byte, 16)
+	binary.BigEndian.PutUint64(buf[:8], sc.Hi)
+	binary.BigEndian.PutUint64(buf[8:], sc.Lo)
+	return buf, nil
 }

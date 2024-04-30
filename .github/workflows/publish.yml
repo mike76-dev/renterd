@@ -1,17 +1,15 @@
 name: Publish
 
-# Controls when the action will run. 
+# Controls when the action will run.
 on:
   # Triggers the workflow on new SemVer tags
   push:
     branches:
       - master
       - dev
-    tags: 
+    tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-alpha+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-beta+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-satellite+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-**'
 
 concurrency:
   group: ${{ github.workflow }}
@@ -28,8 +26,8 @@ jobs:
       matrix:
         network: ["mainnet"]
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
       - name: Setup
@@ -68,14 +66,14 @@ jobs:
         with:
           name: renterd
           path: release/
-  build-mac: 
+  build-mac:
     runs-on: macos-latest
     strategy:
       matrix:
         network: ["mainnet"]
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
       - name: Set build tag environment variable
@@ -108,14 +106,14 @@ jobs:
         with:
           name: renterd
           path: release/
-  build-windows: 
+  build-windows:
     runs-on: windows-latest
     strategy:
       matrix:
         network: ["mainnet"]
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
       - name: Set build tag environment variable

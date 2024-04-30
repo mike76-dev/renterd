@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"net/url"
@@ -13,6 +14,8 @@ import (
 )
 
 const (
+	ObjectMetadataPrefix = "X-Sia-Meta-"
+
 	ObjectsRenameModeSingle = "single"
 	ObjectsRenameModeMulti  = "multi"
 
@@ -40,33 +43,38 @@ var (
 	// ErrInvalidObjectSortParameters is returned when invalid sort parameters
 	// were provided
 	ErrInvalidObjectSortParameters = errors.New("invalid sort parameters")
+
+	// ErrSlabNotFound is returned when a slab can't be retrieved from the
+	// database.
+	ErrSlabNotFound = errors.New("slab not found")
 )
 
 type (
 	// Object wraps an object.Object with its metadata.
 	Object struct {
+		Metadata ObjectUserMetadata `json:"metadata,omitempty"`
 		ObjectMetadata
-		object.Object
+		*object.Object
 	}
 
 	// ObjectMetadata contains various metadata about an object.
 	ObjectMetadata struct {
 		ETag     string      `json:"eTag,omitempty"`
 		Health   float64     `json:"health"`
-		MimeType string      `json:"mimeType,omitempty"`
 		ModTime  TimeRFC3339 `json:"modTime"`
 		Name     string      `json:"name"`
 		Size     int64       `json:"size"`
+		MimeType string      `json:"mimeType,omitempty"`
 	}
 
-	// ObjectAddRequest is the request type for the /bus/object/*key endpoint.
-	ObjectAddRequest struct {
-		Bucket      string        `json:"bucket"`
-		ContractSet string        `json:"contractSet"`
-		Object      object.Object `json:"object"`
-		MimeType    string        `json:"mimeType"`
-		ETag        string        `json:"eTag"`
-	}
+	// ObjectUserMetadata contains user-defined metadata about an object and can
+	// be provided through `X-Sia-Meta-` meta headers.
+	//
+	// NOTE: `X-Amz-Meta-` headers are supported and will be converted to sia
+	// metadata headers internally, this means that S3 clients can safely keep
+	// using Amazon headers and find the metadata will be persisted in Sia as
+	// well
+	ObjectUserMetadata map[string]string
 
 	// ObjectsResponse is the response type for the /bus/objects endpoint.
 	ObjectsResponse struct {
@@ -75,15 +83,20 @@ type (
 		Object  *Object          `json:"object,omitempty"`
 	}
 
-	// ObjectsCopyRequest is the request type for the /bus/objects/copy endpoint.
-	ObjectsCopyRequest struct {
-		SourceBucket string `json:"sourceBucket"`
-		SourcePath   string `json:"sourcePath"`
+	// GetObjectResponse is the response type for the GET /worker/object endpoint.
+	GetObjectResponse struct {
+		Content io.ReadCloser `json:"content"`
+		HeadObjectResponse
+	}
 
-		DestinationBucket string `json:"destinationBucket"`
-		DestinationPath   string `json:"destinationPath"`
-
-		MimeType string `json:"mimeType"`
+	// HeadObjectResponse is the response type for the HEAD /worker/object endpoint.
+	HeadObjectResponse struct {
+		ContentType  string
+		Etag         string
+		LastModified TimeRFC3339
+		Range        *ContentRange
+		Size         int64
+		Metadata     ObjectUserMetadata
 	}
 
 	// ObjectsDeleteRequest is the request type for the /bus/objects/list endpoint.
@@ -112,6 +125,10 @@ type (
 		Mode   string `json:"mode"`
 	}
 
+	ObjectsStatsOpts struct {
+		Bucket string
+	}
+
 	// ObjectsStatsResponse is the response type for the /bus/stats/objects endpoint.
 	ObjectsStatsResponse struct {
 		NumObjects                 uint64  `json:"numObjects"`                 // number of objects
@@ -124,10 +141,14 @@ type (
 	}
 )
 
-// LastModified returns the object's ModTime formatted for use in the
-// 'Last-Modified' header
-func (o ObjectMetadata) LastModified() string {
-	return o.ModTime.Std().Format(http.TimeFormat)
+func ExtractObjectUserMetadataFrom(metadata map[string]string) ObjectUserMetadata {
+	oum := make(map[string]string)
+	for k, v := range metadata {
+		if strings.HasPrefix(strings.ToLower(k), strings.ToLower(ObjectMetadataPrefix)) {
+			oum[k[len(ObjectMetadataPrefix):]] = v
+		}
+	}
+	return oum
 }
 
 // ContentType returns the object's MimeType for use in the 'Content-Type'
@@ -146,32 +167,64 @@ func (o ObjectMetadata) ContentType() string {
 }
 
 type (
+	// AddObjectOptions is the options type for the bus client.
 	AddObjectOptions struct {
-		MimeType string
 		ETag     string
+		MimeType string
+		Metadata ObjectUserMetadata
 	}
 
+	// AddObjectRequest is the request type for the /bus/object/*key endpoint.
+	AddObjectRequest struct {
+		Bucket      string             `json:"bucket"`
+		ContractSet string             `json:"contractSet"`
+		Object      object.Object      `json:"object"`
+		ETag        string             `json:"eTag"`
+		MimeType    string             `json:"mimeType"`
+		Metadata    ObjectUserMetadata `json:"metadata"`
+	}
+
+	// CopyObjectOptions is the options type for the bus client.
 	CopyObjectOptions struct {
 		MimeType string
+		Metadata ObjectUserMetadata
+	}
+
+	// CopyObjectsRequest is the request type for the /bus/objects/copy endpoint.
+	CopyObjectsRequest struct {
+		SourceBucket string `json:"sourceBucket"`
+		SourcePath   string `json:"sourcePath"`
+
+		DestinationBucket string `json:"destinationBucket"`
+		DestinationPath   string `json:"destinationPath"`
+
+		MimeType string             `json:"mimeType"`
+		Metadata ObjectUserMetadata `json:"metadata"`
 	}
 
 	DeleteObjectOptions struct {
 		Batch bool
 	}
 
+	HeadObjectOptions struct {
+		IgnoreDelim bool
+		Range       *DownloadRange
+	}
+
 	DownloadObjectOptions struct {
 		GetObjectOptions
-		Range DownloadRange
+		Range *DownloadRange
 	}
 
 	GetObjectOptions struct {
-		Prefix      string
-		Offset      int
-		Limit       int
-		IgnoreDelim bool
-		Marker      string
-		SortBy      string
-		SortDir     string
+		Prefix       string
+		Offset       int
+		Limit        int
+		IgnoreDelim  bool
+		Marker       string
+		OnlyMetadata bool
+		SortBy       string
+		SortDir      string
 	}
 
 	ListObjectOptions struct {
@@ -186,27 +239,26 @@ type (
 		Limit  int
 	}
 
+	// UploadObjectOptions is the options type for the worker client.
 	UploadObjectOptions struct {
-		Offset                       int
-		MinShards                    int
-		TotalShards                  int
-		ContractSet                  string
-		MimeType                     string
-		DisablePreshardingEncryption bool
-		ContentLength                int64
+		MinShards     int
+		TotalShards   int
+		ContractSet   string
+		ContentLength int64
+		MimeType      string
+		Metadata      ObjectUserMetadata
 	}
 
 	UploadMultipartUploadPartOptions struct {
-		DisablePreshardingEncryption bool
-		EncryptionOffset             int
-		ContentLength                int64
+		ContractSet      string
+		MinShards        int
+		TotalShards      int
+		EncryptionOffset *int
+		ContentLength    int64
 	}
 )
 
-func (opts UploadObjectOptions) Apply(values url.Values) {
-	if opts.Offset != 0 {
-		values.Set("offset", fmt.Sprint(opts.Offset))
-	}
+func (opts UploadObjectOptions) ApplyValues(values url.Values) {
 	if opts.MinShards != 0 {
 		values.Set("minshards", fmt.Sprint(opts.MinShards))
 	}
@@ -219,17 +271,26 @@ func (opts UploadObjectOptions) Apply(values url.Values) {
 	if opts.MimeType != "" {
 		values.Set("mimetype", opts.MimeType)
 	}
-	if opts.DisablePreshardingEncryption {
-		values.Set("disablepreshardingencryption", "true")
+}
+
+func (opts UploadObjectOptions) ApplyHeaders(h http.Header) {
+	for k, v := range opts.Metadata {
+		h.Set(ObjectMetadataPrefix+k, v)
 	}
 }
 
 func (opts UploadMultipartUploadPartOptions) Apply(values url.Values) {
-	if opts.DisablePreshardingEncryption {
-		values.Set("disablepreshardingencryption", "true")
+	if opts.EncryptionOffset != nil {
+		values.Set("offset", fmt.Sprint(*opts.EncryptionOffset))
 	}
-	if !opts.DisablePreshardingEncryption || opts.EncryptionOffset != 0 {
-		values.Set("offset", fmt.Sprint(opts.EncryptionOffset))
+	if opts.MinShards != 0 {
+		values.Set("minshards", fmt.Sprint(opts.MinShards))
+	}
+	if opts.TotalShards != 0 {
+		values.Set("totalshards", fmt.Sprint(opts.TotalShards))
+	}
+	if opts.ContractSet != "" {
+		values.Set("contractset", opts.ContractSet)
 	}
 }
 
@@ -238,7 +299,7 @@ func (opts DownloadObjectOptions) ApplyValues(values url.Values) {
 }
 
 func (opts DownloadObjectOptions) ApplyHeaders(h http.Header) {
-	if opts.Range != (DownloadRange{}) {
+	if opts.Range != nil {
 		if opts.Range.Length == -1 {
 			h.Set("Range", fmt.Sprintf("bytes=%v-", opts.Range.Offset))
 		} else {
@@ -250,6 +311,22 @@ func (opts DownloadObjectOptions) ApplyHeaders(h http.Header) {
 func (opts DeleteObjectOptions) Apply(values url.Values) {
 	if opts.Batch {
 		values.Set("batch", "true")
+	}
+}
+
+func (opts HeadObjectOptions) Apply(values url.Values) {
+	if opts.IgnoreDelim {
+		values.Set("ignoreDelim", "true")
+	}
+}
+
+func (opts HeadObjectOptions) ApplyHeaders(h http.Header) {
+	if opts.Range != nil {
+		if opts.Range.Length == -1 {
+			h.Set("Range", fmt.Sprintf("bytes=%v-", opts.Range.Offset))
+		} else {
+			h.Set("Range", fmt.Sprintf("bytes=%v-%v", opts.Range.Offset, opts.Range.Offset+opts.Range.Length-1))
+		}
 	}
 }
 
@@ -268,6 +345,9 @@ func (opts GetObjectOptions) Apply(values url.Values) {
 	}
 	if opts.Marker != "" {
 		values.Set("marker", opts.Marker)
+	}
+	if opts.OnlyMetadata {
+		values.Set("onlymetadata", "true")
 	}
 	if opts.SortBy != "" {
 		values.Set("sortBy", opts.SortBy)
@@ -289,8 +369,8 @@ func (opts SearchObjectOptions) Apply(values url.Values) {
 	}
 }
 
-func FormatETag(ETag string) string {
-	return fmt.Sprintf("\"%s\"", ETag)
+func FormatETag(eTag string) string {
+	return fmt.Sprintf("%q", eTag)
 }
 
 func ObjectPathEscape(path string) string {

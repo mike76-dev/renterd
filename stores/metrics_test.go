@@ -60,7 +60,7 @@ func TestContractPruneMetrics(t *testing.T) {
 	for hi, host := range hosts {
 		for _, recordedTime := range times {
 			metric := api.ContractPruneMetric{
-				Timestamp: recordedTime,
+				Timestamp: api.TimeRFC3339(recordedTime),
 
 				ContractID:  types.FileContractID{i},
 				HostKey:     host,
@@ -92,7 +92,7 @@ func TestContractPruneMetrics(t *testing.T) {
 			t.Fatal("expected metrics to be sorted by time")
 		}
 		for _, m := range metrics {
-			if !cmp.Equal(m, fcid2Metric[m.ContractID]) {
+			if !cmp.Equal(m, fcid2Metric[m.ContractID], cmp.Comparer(api.CompareTimeRFC3339)) {
 				t.Fatal("unexpected metric", cmp.Diff(m, fcid2Metric[m.ContractID]))
 			}
 			cmpFn(m)
@@ -488,6 +488,30 @@ func TestContractMetrics(t *testing.T) {
 	} else if len(metrics) != 1 {
 		t.Fatalf("expected 1 metric, got %v", len(metrics))
 	}
+
+	// Drop all metrics.
+	if err := ss.dbMetrics.Where("TRUE").Delete(&dbContractMetric{}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// Record multiple metrics for the same contract - one per second over 10 minutes
+	for i := int64(0); i < 600; i++ {
+		err := ss.RecordContractMetric(context.Background(), api.ContractMetric{
+			ContractID: types.FileContractID{1},
+			Timestamp:  api.TimeRFC3339(time.Unix(i, 0)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Check how many metrics were recorded.
+	var n int64
+	if err := ss.dbMetrics.Model(&dbContractMetric{}).Count(&n).Error; err != nil {
+		t.Fatal(err)
+	} else if n != 2 {
+		t.Fatalf("expected 2 metrics, got %v", n)
+	}
 }
 
 func TestWalletMetrics(t *testing.T) {
@@ -517,7 +541,7 @@ func TestWalletMetrics(t *testing.T) {
 	} else if !sort.SliceIsSorted(metrics, func(i, j int) bool {
 		return time.Time(metrics[i].Timestamp).Before(time.Time(metrics[j].Timestamp))
 	}) {
-		t.Fatal("expected metrics to be sorted by time")
+		t.Fatalf("expected metrics to be sorted by time, %+v", metrics)
 	}
 
 	// Prune metrics

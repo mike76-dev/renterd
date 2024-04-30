@@ -10,7 +10,7 @@ import (
 	"go.sia.tech/renterd/object"
 )
 
-func (w *worker) migrate(ctx context.Context, s *object.Slab, contractSet string, dlContracts, ulContracts []api.ContractMetadata, bh uint64) (int, bool, error) {
+func (w *worker) migrate(ctx context.Context, s object.Slab, contractSet string, dlContracts, ulContracts []api.ContractMetadata, bh uint64) (int, bool, error) {
 	// make a map of good hosts
 	goodHosts := make(map[types.PublicKey]map[types.FileContractID]bool)
 	for _, c := range ulContracts {
@@ -86,7 +86,7 @@ SHARDS:
 	defer mem.Release()
 
 	// download the slab
-	shards, surchargeApplied, err := w.downloadManager.DownloadSlab(ctx, *s, dlContracts)
+	shards, surchargeApplied, err := w.downloadManager.DownloadSlab(ctx, s, dlContracts)
 	if err != nil {
 		return 0, false, fmt.Errorf("failed to download slab for migration: %w", err)
 	}
@@ -108,7 +108,7 @@ SHARDS:
 	}
 
 	// migrate the shards
-	err = w.uploadManager.MigrateShards(ctx, s, shardIndices, shards, contractSet, allowed, bh, lockingPriorityUpload, mem)
+	err = w.uploadManager.UploadShards(ctx, s, shardIndices, shards, contractSet, allowed, bh, lockingPriorityUpload, mem)
 	if err != nil {
 		return 0, surchargeApplied, fmt.Errorf("failed to upload slab for migration: %w", err)
 	}

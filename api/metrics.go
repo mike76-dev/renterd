@@ -1,12 +1,19 @@
 package api
 
 import (
+	"fmt"
 	"time"
 
 	"go.sia.tech/core/types"
 )
 
+var (
+	ErrMaxIntervalsExceeded = fmt.Errorf("max number of intervals exceeds maximum of %v", MetricMaxIntervals)
+)
+
 const (
+	MetricMaxIntervals = 1000
+
 	ChurnDirAdded   = "added"
 	ChurnDirRemoved = "removed"
 
@@ -80,7 +87,7 @@ type (
 	}
 
 	ContractPruneMetric struct {
-		Timestamp time.Time `json:"timestamp"`
+		Timestamp TimeRFC3339 `json:"timestamp"`
 
 		ContractID  types.FileContractID `json:"contractID"`
 		HostKey     types.PublicKey      `json:"hostKey"`

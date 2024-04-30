@@ -22,28 +22,14 @@ type uploadParameters struct {
 	contractSet string
 	packing     bool
 	mimeType    string
+
+	metadata api.ObjectUserMetadata
 }
 
 func defaultParameters(bucket, path string) uploadParameters {
 	return uploadParameters{
 		bucket: bucket,
 		path:   path,
-
-		ec:               object.GenerateEncryptionKey(), // random key
-		encryptionOffset: 0,                              // from the beginning
-
-		rs: build.DefaultRedundancySettings,
-	}
-}
-
-func multipartParameters(bucket, path, uploadID string, partNumber int) uploadParameters {
-	return uploadParameters{
-		bucket: bucket,
-		path:   path,
-
-		multipart:  true,
-		uploadID:   uploadID,
-		partNumber: partNumber,
 
 		ec:               object.GenerateEncryptionKey(), // random key
 		encryptionOffset: 0,                              // from the beginning
@@ -90,8 +76,27 @@ func WithPacking(packing bool) UploadOption {
 	}
 }
 
+func WithPartNumber(partNumber int) UploadOption {
+	return func(up *uploadParameters) {
+		up.partNumber = partNumber
+	}
+}
+
 func WithRedundancySettings(rs api.RedundancySettings) UploadOption {
 	return func(up *uploadParameters) {
 		up.rs = rs
+	}
+}
+
+func WithUploadID(uploadID string) UploadOption {
+	return func(up *uploadParameters) {
+		up.uploadID = uploadID
+		up.multipart = true
+	}
+}
+
+func WithObjectUserMetadata(metadata api.ObjectUserMetadata) UploadOption {
+	return func(up *uploadParameters) {
+		up.metadata = metadata
 	}
 }

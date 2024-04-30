@@ -12,12 +12,13 @@ import (
 // AddObject stores the provided object under the given path.
 func (c *Client) AddObject(ctx context.Context, bucket, path, contractSet string, o object.Object, opts api.AddObjectOptions) (err error) {
 	path = api.ObjectPathEscape(path)
-	err = c.c.WithContext(ctx).PUT(fmt.Sprintf("/objects/%s", path), api.ObjectAddRequest{
+	err = c.c.WithContext(ctx).PUT(fmt.Sprintf("/objects/%s", path), api.AddObjectRequest{
 		Bucket:      bucket,
 		ContractSet: contractSet,
 		Object:      o,
-		MimeType:    opts.MimeType,
 		ETag:        opts.ETag,
+		MimeType:    opts.MimeType,
+		Metadata:    opts.Metadata,
 	})
 	return
 }
@@ -25,13 +26,13 @@ func (c *Client) AddObject(ctx context.Context, bucket, path, contractSet string
 // CopyObject copies the object from the source bucket and path to the
 // destination bucket and path.
 func (c *Client) CopyObject(ctx context.Context, srcBucket, dstBucket, srcPath, dstPath string, opts api.CopyObjectOptions) (om api.ObjectMetadata, err error) {
-	err = c.c.WithContext(ctx).POST("/objects/copy", api.ObjectsCopyRequest{
+	err = c.c.WithContext(ctx).POST("/objects/copy", api.CopyObjectsRequest{
 		SourceBucket:      srcBucket,
 		DestinationBucket: dstBucket,
 		SourcePath:        srcPath,
 		DestinationPath:   dstPath,
-
-		MimeType: opts.MimeType,
+		MimeType:          opts.MimeType,
+		Metadata:          opts.Metadata,
 	}, &om)
 	return
 }
@@ -81,8 +82,12 @@ func (c *Client) ObjectsBySlabKey(ctx context.Context, bucket string, key object
 }
 
 // ObjectsStats returns information about the number of objects and their size.
-func (c *Client) ObjectsStats() (osr api.ObjectsStatsResponse, err error) {
-	err = c.c.GET("/stats/objects", &osr)
+func (c *Client) ObjectsStats(ctx context.Context, opts api.ObjectsStatsOpts) (osr api.ObjectsStatsResponse, err error) {
+	values := url.Values{}
+	if opts.Bucket != "" {
+		values.Set("bucket", opts.Bucket)
+	}
+	err = c.c.WithContext(ctx).GET("/stats/objects?"+values.Encode(), &osr)
 	return
 }
 
@@ -107,7 +112,7 @@ func (c *Client) SearchObjects(ctx context.Context, bucket string, opts api.Sear
 }
 
 func (c *Client) renameObjects(ctx context.Context, bucket, from, to, mode string, force bool) (err error) {
-	err = c.c.POST("/objects/rename", api.ObjectsRenameRequest{
+	err = c.c.WithContext(ctx).POST("/objects/rename", api.ObjectsRenameRequest{
 		Bucket: bucket,
 		Force:  force,
 		From:   from,
