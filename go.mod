@@ -10,7 +10,8 @@ require (
 	github.com/google/go-cmp v0.6.0
 	github.com/gotd/contrib v0.19.0
 	github.com/klauspost/reedsolomon v1.12.1
-	github.com/mike76-dev/sia-web/renterd v0.1.20
+	github.com/mike76-dev/renterd-satellite v0.6.5
+	github.com/mike76-dev/sia-web/renterd v0.1.22
 	github.com/minio/minio-go/v7 v7.0.69
 	github.com/montanaflynn/stats v0.7.1
 	gitlab.com/NebulousLabs/encoding v0.0.0-20200604091946-456c3dc907fe
@@ -55,8 +56,7 @@ require (
 	github.com/klauspost/compress v1.17.6 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
 	github.com/mattn/go-sqlite3 v1.14.22 // indirect
-	github.com/mike76-dev/renterd-satellite v0.6.3 // indirect
-	github.com/mike76-dev/sia-web v0.0.0-20230901082429-66c26e5b192b // indirect
+	github.com/mike76-dev/sia-web v0.0.0-20240429182135-f42b6be65b33 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/sha256-simd v1.0.1 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
@@ -79,7 +79,6 @@ require (
 	gitlab.com/NebulousLabs/ratelimit v0.0.0-20200811080431-99b8f0768b2e // indirect
 	gitlab.com/NebulousLabs/siamux v0.0.2-0.20220630142132-142a1443a259 // indirect
 	gitlab.com/NebulousLabs/threadgroup v0.0.0-20200608151952-38921fbef213 // indirect
-	go.sia.tech/web v0.0.0-20240422221546-c1709d16b6ef // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/net v0.24.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
