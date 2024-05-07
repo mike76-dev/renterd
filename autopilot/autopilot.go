@@ -900,8 +900,14 @@ func (ap *Autopilot) buildState(ctx context.Context) (*contractor.MaintenanceSta
 	}
 	address := wi.Address
 
+	// fetch satellite config
+	cfg, err := satellite.StaticSatellite.Config()
+	if err != nil {
+		return nil, fmt.Errorf("could not fetch satellite config, err: %v", err)
+	}
+
 	// no need to try and form contracts if wallet is completely empty
-	skipContractFormations := wi.Confirmed.IsZero() && wi.Unconfirmed.IsZero()
+	skipContractFormations := !cfg.Enabled && wi.Confirmed.IsZero() && wi.Unconfirmed.IsZero()
 	if skipContractFormations {
 		ap.logger.Warn("contract formations skipped, wallet is empty")
 	}
@@ -915,7 +921,7 @@ func (ap *Autopilot) buildState(ctx context.Context) (*contractor.MaintenanceSta
 				return nil, err
 			}
 			ap.logger.Infof("initialised current period to %d", autopilot.CurrentPeriod)
-		} else if nextPeriod := autopilot.CurrentPeriod + autopilot.Config.Contracts.Period; cs.BlockHeight >= nextPeriod {
+		} else if nextPeriod := computeNextPeriod(cs.BlockHeight, autopilot.CurrentPeriod, autopilot.Config.Contracts.Period); nextPeriod != autopilot.CurrentPeriod {
 			prevPeriod := autopilot.CurrentPeriod
 			autopilot.CurrentPeriod = nextPeriod
 			err := ap.bus.UpdateAutopilot(ctx, autopilot)
@@ -988,4 +994,13 @@ func compatV105UsabilityFilterModeCheck(usabilityMode string) error {
 		return fmt.Errorf("invalid usability mode: '%v', options are 'usable', 'unusable' or an empty string for no filter", usabilityMode)
 	}
 	return nil
+}
+
+func computeNextPeriod(bh, currentPeriod, period uint64) uint64 {
+	prevPeriod := currentPeriod
+	nextPeriod := prevPeriod
+	for bh >= nextPeriod+period {
+		nextPeriod += period
+	}
+	return nextPeriod
 }
