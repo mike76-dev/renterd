@@ -323,7 +323,7 @@ func main() {
 
 	flag.Parse()
 
-	log.Println("renterd v0.9.1-satellite")
+	log.Println("renterd v0.10.0-satellite")
 	log.Println("Network", build.NetworkName())
 	if flag.Arg(0) == "version" {
 		fmt.Println("renterd", build.Version())
@@ -642,7 +642,7 @@ func main() {
 		satPassword := cfg.HTTP.Password
 		autopilotAddr := cfg.HTTP.Address + "/api/autopilot"
 		ac := autopilot.NewClient(autopilotAddr, satPassword)
-		satellite, err := satellite.NewSatellite(ac, bc, workers[0], cfg.Directory, getSeed(), logger, satAddr, satPassword)
+		satellite, err := satellite.NewSatellite(ac, bc, workers[0], cfg.Directory, seed, logger, satAddr, satPassword)
 		if err != nil {
 			log.Fatal("failed to create satellite, err: ", err)
 		}
